@@ -4,3 +4,4 @@ certs/
 .DS_Store
 .firebase/
 *.log
+node_modules/
