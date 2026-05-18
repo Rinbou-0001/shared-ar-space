@@ -1,0 +1,18 @@
+{
+  "name": "shared-ar-space",
+  "version": "0.1.0",
+  "description": "Three.js + Socket.IO + AR.js による共有AR空間の最小モデル",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@ar-js-org/ar.js": "^3.4.5",
+    "aframe": "^1.5.0",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

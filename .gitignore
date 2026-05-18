@@ -1,0 +1,6 @@
+node_modules/
+.npm/
+certs/
+.DS_Store
+.firebase/
+*.log

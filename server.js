@@ -1,0 +1,126 @@
+// server.js - フェーズ5 (VR背景 + マーカー追従)
+// Socket.IO サーバー
+//
+// プロトコル:
+//   - client→server 'pose' { x, y, z, qx, qy, qz, qw } (マーカー空間, メートル)
+//   - server→client 'init' { id, self, users } (接続時、hasPose=trueのみ含む)
+//   - server→others 'join' { id, ...pose, color } (初回pose受信時)
+//   - server→others 'pose' { id, ...pose } (以降のpose更新)
+//   - server→others 'leave' { id } (切断時)
+
+const express = require('express');
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { Server } = require('socket.io');
+
+const app = express();
+const certsDir = path.join(__dirname, 'certs');
+const certFile = path.join(certsDir, 'cert.pem');
+const keyFile  = path.join(certsDir, 'key.pem');
+
+let server, scheme;
+if (fs.existsSync(certFile) && fs.existsSync(keyFile)) {
+  server = https.createServer({
+    cert: fs.readFileSync(certFile),
+    key:  fs.readFileSync(keyFile),
+  }, app);
+  scheme = 'https';
+} else {
+  server = http.createServer(app);
+  scheme = 'http';
+}
+
+// CORS: 環境変数 ALLOWED_ORIGINS (カンマ区切り) で許可するオリジンを指定可能
+// 例: ALLOWED_ORIGINS="https://your-app.web.app,https://your-app.firebaseapp.com"
+// 未指定なら * (開発時用)
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+  : '*';
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+  },
+});
+console.log('CORS allowed origins:', allowedOrigins);
+app.use(express.static(path.join(__dirname, 'public')));
+
+const users = new Map();
+function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60%)`; }
+
+io.on('connection', (socket) => {
+  const color = randomColor();
+  const me = {
+    color,
+    x: 0, y: 0, z: 0,
+    qx: 0, qy: 0, qz: 0, qw: 1,
+    hasPose: false,
+  };
+  users.set(socket.id, me);
+  console.log(`[+] ${socket.id} (total=${users.size})`);
+
+  const existing = {};
+  for (const [id, u] of users.entries()) {
+    if (id !== socket.id && u.hasPose) existing[id] = u;
+  }
+  socket.emit('init', { id: socket.id, self: me, users: existing });
+
+  socket.on('pose', (pose) => {
+    const u = users.get(socket.id);
+    if (!u) return;
+    const wasFirst = !u.hasPose;
+    if (typeof pose.x === 'number') u.x = pose.x;
+    if (typeof pose.y === 'number') u.y = pose.y;
+    if (typeof pose.z === 'number') u.z = pose.z;
+    if (typeof pose.qx === 'number') u.qx = pose.qx;
+    if (typeof pose.qy === 'number') u.qy = pose.qy;
+    if (typeof pose.qz === 'number') u.qz = pose.qz;
+    if (typeof pose.qw === 'number') u.qw = pose.qw;
+    u.hasPose = true;
+
+    if (wasFirst) {
+      socket.broadcast.emit('join', {
+        id: socket.id, color: u.color,
+        x: u.x, y: u.y, z: u.z,
+        qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
+      });
+    } else {
+      socket.broadcast.emit('pose', {
+        id: socket.id,
+        x: u.x, y: u.y, z: u.z,
+        qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
+      });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    const u = users.get(socket.id);
+    users.delete(socket.id);
+    if (u && u.hasPose) io.emit('leave', { id: socket.id });
+    console.log(`[-] ${socket.id} (total=${users.size})`);
+  });
+});
+
+function getLanIPs() {
+  const ifaces = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) ips.push(iface.address);
+    }
+  }
+  return ips;
+}
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+  const lanIps = getLanIPs();
+  console.log(`\n  Shared VR Space (${scheme.toUpperCase()}) - フェーズ5 (VR+マーカー)`);
+  console.log(`  ----------------------------`);
+  console.log(`  PC:    ${scheme}://localhost:${PORT}`);
+  for (const ip of lanIps) console.log(`  スマホ: ${scheme}://${ip}:${PORT}`);
+  console.log('');
+});

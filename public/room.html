@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>共有AR空間 (コーナー原点・マジックウィンドウ)</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; }
+    a-scene { display: block; width: 100vw; height: 100vh; }
+    #status {
+      position: fixed; top: 8px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.65); color: white;
+      padding: 10px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+    }
+    #status .pill {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #888;
+      margin-right: 6px; vertical-align: middle;
+    }
+    #status .pill.ok { background: #4ade80; }
+    #status .pill.warn { background: #facc15; }
+    #log {
+      position: fixed; bottom: 8px; left: 8px; right: 8px;
+      max-height: 18vh; overflow-y: auto;
+      background: rgba(0,0,0,0.55); color: #ddd;
+      padding: 6px 10px; border-radius: 6px;
+      font-family: monospace; font-size: 10px;
+      line-height: 1.4; z-index: 9999;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    #log .err { color: #ff8080; }
+    #log .ok  { color: #80ff80; }
+    .arjs-loader {
+      height: 100%; width: 100%;
+      position: absolute; top: 0; left: 0;
+      background-color: rgba(0, 0, 0, 0.85);
+      z-index: 8000;
+      display: flex; justify-content: center; align-items: center;
+      color: white; font-family: sans-serif;
+    }
+  </style>
+
+  <script>
+    window.__logs = [];
+    window.uiLog = function(msg, cls) {
+      window.__logs.push({ msg: String(msg), cls: cls || '' });
+      const el = document.getElementById('log');
+      if (el) {
+        el.innerHTML = window.__logs.slice(-12)
+          .map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
+        el.scrollTop = el.scrollHeight;
+      }
+    };
+    window.addEventListener('error', (e) => {
+      window.uiLog('[ERROR] ' + (e.message || e.error), 'err');
+    });
+  </script>
+
+  <!-- 接続先設定(本番ではsocketUrlを書き換える) -->
+  <script src="/config.js"></script>
+
+  <script src="/vendor/aframe.min.js" onload="uiLog('A-Frame loaded','ok')"></script>
+  <script src="/vendor/aframe-ar.js"  onload="uiLog('AR.js loaded','ok')"></script>
+
+  <!-- socket.io クライアント: 同一オリジン or 外部URL を動的に決定 -->
+  <script>
+    (function loadSocketIO() {
+      const cfg = window.APP_CONFIG || {};
+      const src = (cfg.socketUrl ? cfg.socketUrl.replace(/\/$/, '') : '') + '/socket.io/socket.io.js';
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => window.uiLog && window.uiLog('socket.io loaded from ' + (cfg.socketUrl || 'same-origin'), 'ok');
+      s.onerror = () => window.uiLog && window.uiLog('socket.io FAILED: ' + src, 'err');
+      document.head.appendChild(s);
+    })();
+  </script>
+</head>
+<body>
+
+  <div id="status">
+    <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>
+    &nbsp;|&nbsp;
+    <span class="pill" id="marker-pill"></span><span id="marker-text">マーカー未検出</span>
+    &nbsp;|&nbsp;
+    <span id="count">0</span>人
+    <br>
+    自分: (<span id="my-pos">--</span>) | 最短: <span id="nearest">--</span>m
+  </div>
+
+  <div class="arjs-loader"><div>カメラ起動中...</div></div>
+
+  <!-- AR モード: カメラ映像が背景。マーカーを原点として仮想共通空間を重ねる -->
+  <a-scene
+    embedded
+    vr-mode-ui="enabled: false"
+    renderer="logarithmicDepthBuffer: true; precision: medium; alpha: true;"
+    arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono; cameraParametersUrl: /data/camera_para.dat;"
+  >
+    <!-- 環境光 -->
+    <a-light type="ambient" color="#ffffff" intensity="0.8"></a-light>
+    <a-light type="directional" color="#ffffff" intensity="0.6" position="3 5 2"></a-light>
+
+    <!-- マーカー: 検出専用。size属性は実印刷サイズ[m] -->
+    <a-marker
+      id="marker"
+      type="pattern"
+      url="/data/patt.hiro"
+      size="0.08"
+      smooth="true"
+      smoothCount="5"
+      smoothTolerance="0.01"
+      smoothThreshold="2"
+    ></a-marker>
+
+    <!-- 仮想共通空間ワールド: JSが latestMarkerMatrix を継続適用してマーカー位置に重畳 -->
+    <!-- 子要素はマーカー単位(=メートル)で配置される -->
+    <a-entity id="world" visible="false">
+      <!-- 床グリッド: 1m間隔、20m範囲、半透明緑(現実が透ける)-->
+      <a-entity id="grid"></a-entity>
+
+      <!-- 原点マーク: 5cm円柱 -->
+      <a-cylinder position="0 0.005 0" radius="0.04" height="0.01"
+                  material="color: #4ade80; emissive: #4ade80; emissiveIntensity: 0.7; opacity: 0.9; transparent: true"></a-cylinder>
+      <a-text value="0,0,0" position="0 0.1 0" align="center" color="#4ade80" width="2"
+              look-at="[camera]"></a-text>
+
+      <!-- 軸インジケータ: X=赤(東), Z=青(北), Y=緑(上) -->
+      <a-cylinder position="0.25 0.005 0" rotation="0 0 -90" radius="0.005" height="0.5" color="#ef4444"></a-cylinder>
+      <a-text value="+X" position="0.55 0.05 0" align="center" color="#ef4444" width="1.5" look-at="[camera]"></a-text>
+      <a-cylinder position="0 0.005 0.25" rotation="90 0 0" radius="0.005" height="0.5" color="#3b82f6"></a-cylinder>
+      <a-text value="+Z" position="0 0.05 0.55" align="center" color="#3b82f6" width="1.5" look-at="[camera]"></a-text>
+      <a-cylinder position="0 0.25 0" radius="0.005" height="0.5" color="#4ade80"></a-cylinder>
+      <a-text value="+Y" position="0 0.55 0" align="center" color="#4ade80" width="1.5" look-at="[camera]"></a-text>
+
+      <!-- 20m境界(緑の細枠、薄く)-->
+      <a-box position="0 0.005 -10" width="20" height="0.005" depth="0.03" color="#4ade80" opacity="0.35"></a-box>
+      <a-box position="0 0.005 10"  width="20" height="0.005" depth="0.03" color="#4ade80" opacity="0.35"></a-box>
+      <a-box position="-10 0.005 0" width="0.03" height="0.005" depth="20" color="#4ade80" opacity="0.35"></a-box>
+      <a-box position="10 0.005 0"  width="0.03" height="0.005" depth="20" color="#4ade80" opacity="0.35"></a-box>
+
+      <!-- 他ユーザーのアバターはここに動的追加 -->
+      <a-entity id="others"></a-entity>
+    </a-entity>
+
+    <!-- カメラ(AR.jsが原点で固定制御)-->
+    <a-entity camera></a-entity>
+  </a-scene>
+
+  <div id="log"></div>
+
+  <script src="/room.js"></script>
+</body>
+</html>

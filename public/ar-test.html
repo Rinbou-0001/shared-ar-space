@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>フェーズ1: AR.js動作確認</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; }
+    .info {
+      position: fixed; top: 8px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 10px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; z-index: 9999;
+    }
+    .arjs-loader {
+      height: 100%; width: 100%;
+      position: absolute; top: 0; left: 0;
+      background-color: rgba(0, 0, 0, 0.85);
+      z-index: 9999;
+      display: flex; justify-content: center; align-items: center;
+      color: white; font-family: sans-serif;
+    }
+  </style>
+
+  <!-- A-Frame と AR.js(A-Frame版)をローカルから読み込み -->
+  <script src="/vendor/aframe.min.js"></script>
+  <script src="/vendor/aframe-ar.js"></script>
+</head>
+<body style="margin: 0; overflow: hidden;">
+
+  <div class="info">
+    Hiroマーカーをカメラに映すと赤い立方体が出現します
+  </div>
+
+  <div class="arjs-loader">
+    <div>カメラを起動中...</div>
+  </div>
+
+  <a-scene
+    embedded
+    vr-mode-ui="enabled: false"
+    renderer="logarithmicDepthBuffer: true; precision: medium;"
+    arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix; matrixCodeType: 3x3; cameraParametersUrl: /data/camera_para.dat;"
+  >
+    <!-- Hiroマーカー: patt.hiro を /data/patt.hiro から読み込み -->
+    <a-marker
+      type="pattern"
+      url="/data/patt.hiro"
+      smooth="true"
+      smoothCount="5"
+      smoothTolerance="0.01"
+      smoothThreshold="2"
+    >
+      <!-- マーカー検出時にこの立方体が表示される -->
+      <a-box position="0 0.5 0" material="color: red; opacity: 0.85;"></a-box>
+      <a-text value="DETECTED" position="0 1.5 0" align="center" color="#ffffff"></a-text>
+    </a-marker>
+
+    <a-entity camera></a-entity>
+  </a-scene>
+
+  <script>
+    // ローダー非表示処理
+    // AR.js は初期化完了時に複数のイベントを発火するので、どれかが発火したら消す
+    const loader = document.querySelector('.arjs-loader');
+    function hideLoader() {
+      if (loader) loader.style.display = 'none';
+    }
+
+    // 1) AR.js のビデオ読み込み完了
+    window.addEventListener('arjs-video-loaded', hideLoader);
+
+    // 2) A-Frame シーンの読み込み完了
+    const scene = document.querySelector('a-scene');
+    if (scene) {
+      if (scene.hasLoaded) {
+        hideLoader();
+      } else {
+        scene.addEventListener('loaded', hideLoader);
+        scene.addEventListener('renderstart', hideLoader);
+      }
+    }
+
+    // 3) フォールバック: 5秒経っても消えなければ強制的に消す
+    setTimeout(hideLoader, 5000);
+
+    // 4) マーカー検出イベントもログ用にハンドル
+    document.querySelectorAll('a-marker').forEach((m) => {
+      m.addEventListener('markerFound', () => console.log('markerFound'));
+      m.addEventListener('markerLost', () => console.log('markerLost'));
+    });
+  </script>
+
+</body>
+</html>

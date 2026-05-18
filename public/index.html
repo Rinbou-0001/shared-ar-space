@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>共有AR空間 - 最小モデル</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      max-width: 640px;
+      margin: 40px auto;
+      padding: 0 20px;
+      line-height: 1.7;
+      color: #222;
+    }
+    h1 { font-size: 22px; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 4px; }
+    .btn {
+      display: inline-block;
+      padding: 12px 24px;
+      background: #2b6cb0;
+      color: white;
+      border-radius: 6px;
+      text-decoration: none;
+      margin-top: 16px;
+    }
+    .marker {
+      display: block;
+      max-width: 240px;
+      margin: 16px 0;
+      border: 1px solid #ddd;
+    }
+    .note {
+      background: #fff8dc;
+      padding: 12px 16px;
+      border-left: 4px solid #d4a017;
+      margin: 20px 0;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <h1>共有AR空間 - 最小モデル</h1>
+  <p>
+    複数の端末で<strong>同じHiroマーカー</strong>をカメラに映すと、
+    マーカー位置を共通原点として各端末の現実位置が仮想空間内で同期されます。
+    入室時には各アバターがポップアップ表示されます。
+  </p>
+
+  <h3>使い方</h3>
+  <ol>
+    <li>下のHiroマーカーを別の画面に表示するか印刷します。</li>
+    <li>2台以上のスマートフォンで下のボタンから入室します。</li>
+    <li>各端末でマーカーをカメラに映してください。</li>
+    <li>他の端末の位置に色付きアバターが表示され、移動に追随します。</li>
+  </ol>
+
+  <img class="marker" src="https://raw.githubusercontent.com/AR-js-org/AR.js/master/data/images/HIRO.jpg" alt="Hiroマーカー">
+
+  <div class="note">
+    <strong>注意:</strong> カメラ利用には <code>HTTPS</code> 接続が必要です。
+    ローカルテストでは <code>ngrok http 3000</code> 等でトンネルを作成してください。
+  </div>
+
+  <a class="btn" href="/room.html">AR空間に入室</a>
+</body>
+</html>
