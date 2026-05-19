@@ -39,15 +39,36 @@ const state = {
 // 2. Socket.IO
 // ============================================================
 let socket;
-try {
-  const cfg = window.APP_CONFIG || {};
-  const url = cfg.socketUrl || undefined; // undefined → 同一オリジン
-  socket = url ? io(url, { transports: ['websocket', 'polling'] })
-               : io({ transports: ['websocket', 'polling'] });
-  log('io() → ' + (url || 'same-origin'));
-} catch (e) { log('io() 例外: ' + e.message, 'err'); }
 
-if (socket) {
+// socket.io ライブラリ(io)は room.html で動的読み込みのため、
+// 定義されるまで最大5秒待ってから初期化する
+function waitForIO(callback, attemptsLeft = 100) {
+  if (typeof io !== 'undefined') {
+    callback();
+    return;
+  }
+  if (attemptsLeft <= 0) {
+    log('socket.io ロード待ちタイムアウト(/socket.io/socket.io.js が読めていない)', 'err');
+    return;
+  }
+  setTimeout(() => waitForIO(callback, attemptsLeft - 1), 50);
+}
+
+function initSocket() {
+  try {
+    const cfg = window.APP_CONFIG || {};
+    const url = cfg.socketUrl || undefined; // undefined → 同一オリジン
+    socket = url ? io(url, { transports: ['websocket', 'polling'] })
+                 : io({ transports: ['websocket', 'polling'] });
+    log('io() → ' + (url || 'same-origin'), 'ok');
+    attachSocketHandlers();
+  } catch (e) { log('io() 例外: ' + e.message, 'err'); }
+}
+
+waitForIO(initSocket);
+
+function attachSocketHandlers() {
+  if (!socket) return;
   socket.on('connect', () => {
     log('socket接続 ' + socket.id.slice(0, 6), 'ok');
     document.getElementById('conn-pill').classList.add('ok');
