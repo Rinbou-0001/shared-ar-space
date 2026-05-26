@@ -51,6 +51,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 const users = new Map();
 function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60%)`; }
 
+// 壁を這う球体 (全クライアント共有)
+// s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
+// y: 高さ (m)
+const orbState = { s: 0, y: 2.5 };
+
 io.on('connection', (socket) => {
   const color = randomColor();
   const me = {
@@ -67,6 +72,17 @@ io.on('connection', (socket) => {
     if (id !== socket.id && u.hasPose) existing[id] = u;
   }
   socket.emit('init', { id: socket.id, self: me, users: existing });
+  // 接続時に現在の orb 位置を送る
+  socket.emit('orb', orbState);
+
+  socket.on('orb', (data) => {
+    if (typeof data.s === 'number' && typeof data.y === 'number' &&
+        isFinite(data.s) && isFinite(data.y)) {
+      orbState.s = data.s;
+      orbState.y = data.y;
+      socket.broadcast.emit('orb', orbState);
+    }
+  });
 
   socket.on('pose', (pose) => {
     const u = users.get(socket.id);
