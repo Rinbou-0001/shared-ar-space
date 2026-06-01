@@ -60,6 +60,7 @@ io.on('connection', (socket) => {
   const color = randomColor();
   const me = {
     color,
+    role: 'camera', // 'camera' | 'observer' (クライアントが pose で更新)
     x: 0, y: 0, z: 0,
     qx: 0, qy: 0, qz: 0, qw: 1,
     hasPose: false,
@@ -88,6 +89,7 @@ io.on('connection', (socket) => {
     const u = users.get(socket.id);
     if (!u) return;
     const wasFirst = !u.hasPose;
+    if (pose.role === 'camera' || pose.role === 'observer') u.role = pose.role;
     if (typeof pose.x === 'number') u.x = pose.x;
     if (typeof pose.y === 'number') u.y = pose.y;
     if (typeof pose.z === 'number') u.z = pose.z;
@@ -99,13 +101,13 @@ io.on('connection', (socket) => {
 
     if (wasFirst) {
       socket.broadcast.emit('join', {
-        id: socket.id, color: u.color,
+        id: socket.id, color: u.color, role: u.role,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
     } else {
       socket.broadcast.emit('pose', {
-        id: socket.id,
+        id: socket.id, role: u.role,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
