@@ -56,15 +56,27 @@ function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60
 // y: 高さ (m)
 const orbState = { s: 0, y: 2.5 };
 
+// マルチディスプレイのオフアクシス投影用 共通視点位置
+let viewerEye = { x: 0, y: 1.5, z: 0 };
+
 io.on('connection', (socket) => {
   const color = randomColor();
   const me = {
     color,
-    role: 'camera', // 'camera' | 'observer' (クライアントが pose で更新)
-    lightOn: true, // 各アバターの懐中電灯 ON/OFF (クライアントが light イベントで更新)
+    role: 'camera',
+    lightOn: true,
     x: 0, y: 0, z: 0,
     qx: 0, qy: 0, qz: 0, qw: 1,
     hasPose: false,
+    // ディスプレイ設定: クライアントが自身の物理サイズを送信、master が向きと offaxis を設定
+    display: {
+      width: 0.5,  // m (クライアントが上書き)
+      height: 0.3, // m
+      yaw: 0,      // 度
+      pitch: 0,    // 度
+      roll: 0,     // 度
+      offaxis: false,
+    },
   };
   users.set(socket.id, me);
   console.log(`[+] ${socket.id} (total=${users.size})`);
@@ -76,6 +88,8 @@ io.on('connection', (socket) => {
   socket.emit('init', { id: socket.id, self: me, users: existing });
   // 接続時に現在の orb 位置を送る
   socket.emit('orb', orbState);
+  // 接続時に viewerEye も送る
+  socket.emit('viewerEye', viewerEye);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -103,6 +117,7 @@ io.on('connection', (socket) => {
     if (wasFirst) {
       socket.broadcast.emit('join', {
         id: socket.id, color: u.color, role: u.role, lightOn: u.lightOn,
+        display: u.display,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
@@ -121,6 +136,39 @@ io.on('connection', (socket) => {
     if (!u) return;
     if (typeof data.on === 'boolean') u.lightOn = data.on;
     socket.broadcast.emit('light', { id: socket.id, on: u.lightOn });
+  });
+
+  // クライアントから自身の物理ディスプレイサイズ報告
+  socket.on('displaySize', (data) => {
+    const u = users.get(socket.id);
+    if (!u) return;
+    if (typeof data.width === 'number' && data.width > 0) u.display.width = data.width;
+    if (typeof data.height === 'number' && data.height > 0) u.display.height = data.height;
+    socket.broadcast.emit('displayConfig', { id: socket.id, display: u.display });
+  });
+
+  // Master からのディスプレイ向き/オフアクシス設定 → 全クライアントへ配信
+  socket.on('displayConfig', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.targetId !== 'string') return;
+    const target = users.get(data.targetId);
+    if (!target) return;
+    if (typeof data.yaw === 'number') target.display.yaw = data.yaw;
+    if (typeof data.pitch === 'number') target.display.pitch = data.pitch;
+    if (typeof data.roll === 'number') target.display.roll = data.roll;
+    if (typeof data.offaxis === 'boolean') target.display.offaxis = data.offaxis;
+    io.emit('displayConfig', { id: data.targetId, display: target.display });
+  });
+
+  // Master からの viewerEye 設定
+  socket.on('viewerEye', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (typeof data.x === 'number') viewerEye.x = data.x;
+    if (typeof data.y === 'number') viewerEye.y = data.y;
+    if (typeof data.z === 'number') viewerEye.z = data.z;
+    io.emit('viewerEye', viewerEye);
   });
 
   // Master ロールからの強制ポーズ制御 → 全クライアントへ forcePose 配信
