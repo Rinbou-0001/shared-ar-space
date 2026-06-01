@@ -90,7 +90,7 @@ io.on('connection', (socket) => {
     const u = users.get(socket.id);
     if (!u) return;
     const wasFirst = !u.hasPose;
-    if (pose.role === 'camera' || pose.role === 'observer') u.role = pose.role;
+    if (pose.role === 'camera' || pose.role === 'observer' || pose.role === 'master') u.role = pose.role;
     if (typeof pose.x === 'number') u.x = pose.x;
     if (typeof pose.y === 'number') u.y = pose.y;
     if (typeof pose.z === 'number') u.z = pose.z;
