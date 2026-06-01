@@ -123,6 +123,28 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('light', { id: socket.id, on: u.lightOn });
   });
 
+  // Master ロールからの強制ポーズ制御 → 全クライアントへ forcePose 配信
+  // 対象クライアント自身も受け取り、自分の camera をそこにスナップする
+  socket.on('controlPose', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return; // master 以外は無視
+    if (!data || typeof data.targetId !== 'string') return;
+    const target = users.get(data.targetId);
+    if (!target) return;
+    if (typeof data.x === 'number') target.x = data.x;
+    if (typeof data.y === 'number') target.y = data.y;
+    if (typeof data.z === 'number') target.z = data.z;
+    if (typeof data.qx === 'number') target.qx = data.qx;
+    if (typeof data.qy === 'number') target.qy = data.qy;
+    if (typeof data.qz === 'number') target.qz = data.qz;
+    if (typeof data.qw === 'number') target.qw = data.qw;
+    io.emit('forcePose', {
+      id: data.targetId,
+      x: target.x, y: target.y, z: target.z,
+      qx: target.qx, qy: target.qy, qz: target.qz, qw: target.qw,
+    });
+  });
+
   socket.on('disconnect', () => {
     const u = users.get(socket.id);
     users.delete(socket.id);

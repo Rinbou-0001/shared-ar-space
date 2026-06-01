@@ -8,9 +8,21 @@
     ],
     "headers": [
       {
-        "source": "/data/**",
+        "source": "**/*.html",
         "headers": [
-          { "key": "Cache-Control", "value": "public, max-age=86400" }
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+        ]
+      },
+      {
+        "source": "**/*.js",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+        ]
+      },
+      {
+        "source": "/config.js",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
         ]
       },
       {
@@ -18,8 +30,17 @@
         "headers": [
           { "key": "Cache-Control", "value": "public, max-age=86400" }
         ]
+      },
+      {
+        "source": "/data/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=86400" }
+        ]
       }
     ],
-    "cleanUrls": true
+    "cleanUrls": true,
+    "rewrites": [
+      { "source": "/test/space/master", "destination": "/test/space.html" }
+    ]
   }
 }
