@@ -61,6 +61,7 @@ io.on('connection', (socket) => {
   const me = {
     color,
     role: 'camera', // 'camera' | 'observer' (クライアントが pose で更新)
+    lightOn: true, // 各アバターの懐中電灯 ON/OFF (クライアントが light イベントで更新)
     x: 0, y: 0, z: 0,
     qx: 0, qy: 0, qz: 0, qw: 1,
     hasPose: false,
@@ -101,7 +102,7 @@ io.on('connection', (socket) => {
 
     if (wasFirst) {
       socket.broadcast.emit('join', {
-        id: socket.id, color: u.color, role: u.role,
+        id: socket.id, color: u.color, role: u.role, lightOn: u.lightOn,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
@@ -112,6 +113,14 @@ io.on('connection', (socket) => {
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
     }
+  });
+
+  // 懐中電灯 ON/OFF 同期
+  socket.on('light', (data) => {
+    const u = users.get(socket.id);
+    if (!u) return;
+    if (typeof data.on === 'boolean') u.lightOn = data.on;
+    socket.broadcast.emit('light', { id: socket.id, on: u.lightOn });
   });
 
   socket.on('disconnect', () => {
