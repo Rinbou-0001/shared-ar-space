@@ -59,6 +59,9 @@ const orbState = { s: 0, y: 2.5 };
 // マルチディスプレイのオフアクシス投影用 共通視点位置
 let viewerEye = { x: 0, y: 1.5, z: 0 };
 
+// 鯨 (kujira_1) の周回速度 (rad/s) - master が変更
+let whaleOrbitSpeed = 1.0;
+
 io.on('connection', (socket) => {
   const color = randomColor();
   const me = {
@@ -90,6 +93,8 @@ io.on('connection', (socket) => {
   socket.emit('orb', orbState);
   // 接続時に viewerEye も送る
   socket.emit('viewerEye', viewerEye);
+  // 接続時に鯨の周回速度を送る
+  socket.emit('whaleOrbitSpeed', { speed: whaleOrbitSpeed });
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -169,6 +174,16 @@ io.on('connection', (socket) => {
     if (typeof data.y === 'number') viewerEye.y = data.y;
     if (typeof data.z === 'number') viewerEye.z = data.z;
     io.emit('viewerEye', viewerEye);
+  });
+
+  // Master からの鯨周回速度設定
+  socket.on('whaleOrbitSpeed', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (typeof data.speed === 'number' && isFinite(data.speed)) {
+      whaleOrbitSpeed = data.speed;
+      io.emit('whaleOrbitSpeed', { speed: whaleOrbitSpeed });
+    }
   });
 
   // Master ロールからの強制ポーズ制御 → 全クライアントへ forcePose 配信
