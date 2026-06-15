@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>共有3D空間 (vanilla Three.js)</title>
+  <style>
+    /* body は黒。VRタブは内側で空色を出す。これで他タブ表示中に空色が漏れない */
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+    canvas { display: block; outline: none; }
+
+    /* VRタブは空色背景 */
+    #tab-vr { background: #87ceeb; }
+    /* カメラタブは黒背景 (カメラ映像で埋まる前提) */
+    #tab-camera { background: #000; }
+
+    /* ========== タブバー ========== */
+    #tabbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 44px;
+      background: rgba(0,0,0,0.85);
+      display: flex; z-index: 10000;
+      margin: 0; padding: 0;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    #tabbar button {
+      flex: 1; background: transparent; color: #aaa;
+      border: none;
+      border-bottom: 3px solid transparent;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; font-weight: bold;
+      cursor: pointer; transition: all 0.15s;
+      padding: 0;
+    }
+    #tabbar button.active {
+      color: white;
+      border-bottom-color: #4ade80;
+      background: rgba(255,255,255,0.06);
+    }
+
+    .tab-content {
+      position: fixed; top: 44px; left: 0; right: 0; bottom: 0;
+      display: none; overflow: hidden;
+    }
+    .tab-content.active { display: block; }
+
+    /* カメラタブ内に注入される video 要素 */
+    #tab-camera video {
+      width: 100%; height: 100%; object-fit: cover;
+      background: #000; display: block;
+    }
+    #tab-camera .cam-error {
+      color: #ff8080; padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 14px; line-height: 1.6;
+    }
+
+    #marker-status {
+      position: fixed; top: 52px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 8px 12px; border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+      pointer-events: none;
+      display: none;
+    }
+    #marker-status.detected { background: rgba(16, 185, 129, 0.85); }
+
+    #status {
+      position: fixed; top: 52px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.65); color: white;
+      padding: 10px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999; pointer-events: none;
+    }
+    #status .pill {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #888;
+      margin-right: 6px; vertical-align: middle;
+    }
+    #status .pill.ok { background: #4ade80; }
+    #role-badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 8px;
+      font-size: 10px;
+      font-weight: bold;
+      margin-left: 8px;
+    }
+    #role-badge.observer { background: #fbbf24; color: #422006; }
+    #role-badge.camera   { background: #4ade80; color: #064e3b; }
+    #role-badge.master   { background: #06b6d4; color: #083344; }
+
+    #log {
+      position: fixed; bottom: 8px; left: 8px; right: 56px;
+      max-height: 14vh; overflow-y: auto;
+      background: rgba(0,0,0,0.62); color: #ddd;
+      padding: 6px 10px; border-radius: 6px;
+      font-family: monospace; font-size: 11px;
+      line-height: 1.4; z-index: 9999;
+      white-space: pre-wrap; word-break: break-all;
+      pointer-events: auto;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+    }
+    #log .err { color: #ff8080; }
+    #log .ok  { color: #80ff80; }
+    /* スマホ: ログ枠をさらに小さく */
+    @media (max-width: 640px) {
+      #log {
+        max-height: 10vh;
+        font-size: 10px;
+        line-height: 1.3;
+        padding: 4px 8px;
+      }
+    }
+    /* UI 表示・非表示切替 ボタン (常に右下) */
+    #ui-toggle {
+      position: fixed; bottom: 8px; right: 8px;
+      width: 40px; height: 40px;
+      z-index: 10001;
+      background: rgba(0,0,0,0.7); color: white;
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; font-weight: bold;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    body.ui-hidden #tabbar,
+    body.ui-hidden #status,
+    body.ui-hidden #observer-panel,
+    body.ui-hidden #master-panel,
+    body.ui-hidden #marker-status,
+    body.ui-hidden #log,
+    body.ui-hidden #enter-overlay {
+      display: none !important;
+    }
+    body.ui-hidden .tab-content { top: 0; }
+
+    /* 長押し用丸ボタン (UI 非表示時のみ表示、人差し指で長押し想定) */
+    #ui-long-press-btn {
+      position: fixed;
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 25vw;
+      height: 25vw;
+      max-width: 220px;
+      max-height: 220px;
+      min-width: 70px;
+      min-height: 70px;
+      border-radius: 50%;
+      background: rgba(245, 245, 247, 0.88);
+      border: 3px solid rgba(120, 120, 130, 0.85);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35),
+                  inset 0 -3px 6px rgba(0,0,0,0.08);
+      display: none;
+      z-index: 10002;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+      transition: transform 0.12s, background 0.15s, border-color 0.15s;
+      padding: 0;
+    }
+    body.ui-hidden #ui-long-press-btn { display: block; }
+    #ui-long-press-btn:active,
+    #ui-long-press-btn.pressing {
+      background: rgba(190, 190, 200, 0.95);
+      border-color: rgba(80, 80, 90, 0.95);
+      transform: translateX(-50%) scale(0.94);
+    }
+    /* PC や大画面では非表示 */
+    @media (min-width: 820px) {
+      body.ui-hidden #ui-long-press-btn { display: none; }
+    }
+
+    /* スマホ入室オーバーレイ */
+    #enter-overlay {
+      position: fixed; inset: 0;
+      background: rgba(10, 10, 20, 0.92);
+      z-index: 8000;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: white; font-family: sans-serif;
+      text-align: center; padding: 20px;
+    }
+    #enter-overlay h2 { margin: 0 0 8px; }
+    #enter-overlay p {
+      opacity: 0.8; max-width: 320px; line-height: 1.5;
+      margin: 0 0 20px;
+    }
+    #enter-overlay button {
+      padding: 16px 36px; font-size: 16px; font-weight: bold;
+      background: #4ade80; color: #0a0a14;
+      border: none; border-radius: 8px; cursor: pointer;
+    }
+
+    /* PCオブザーバーパネル */
+    #observer-panel {
+      position: fixed; top: 114px; right: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 12px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+      display: none;
+      min-width: 240px;
+    }
+    /* Master 制御パネル */
+    #master-panel {
+      position: fixed; top: 114px; left: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 12px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+      display: none;
+      min-width: 260px;
+    }
+    #master-panel h3 {
+      margin: 0 0 6px;
+      font-size: 12px;
+      color: #06b6d4;
+      letter-spacing: 0.05em;
+    }
+    #master-panel .hint {
+      font-size: 10px; opacity: 0.75;
+      margin-bottom: 8px; line-height: 1.4;
+    }
+    #master-panel .row {
+      display: flex; gap: 4px; margin-bottom: 6px; align-items: center;
+    }
+    #master-panel input[type="number"] {
+      width: 60px; padding: 4px 6px;
+      border: 1px solid #4b5563; border-radius: 4px;
+      background: #1f2937; color: white;
+      font-family: monospace; font-size: 12px;
+    }
+    #master-panel select {
+      border: 1px solid #4b5563; border-radius: 4px;
+      background: #1f2937; color: white;
+      font-size: 12px;
+    }
+    #master-panel button {
+      padding: 6px 12px; border: none; border-radius: 4px;
+      font-size: 11px; font-weight: bold; cursor: pointer;
+    }
+    #master-panel label {
+      display: inline-block; width: 28px;
+      text-align: center; font-weight: bold; font-family: monospace;
+    }
+    body.fs-mode #master-panel { display: none !important; }
+    #observer-panel h3 {
+      margin: 0 0 6px;
+      font-size: 12px;
+      color: #fbbf24;
+      letter-spacing: 0.05em;
+    }
+    #observer-panel .hint {
+      font-size: 10px;
+      opacity: 0.75;
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+    #observer-panel .row {
+      display: flex; gap: 4px;
+      margin-bottom: 6px;
+      align-items: center;
+    }
+    #observer-panel input[type="number"] {
+      width: 60px;
+      padding: 4px 6px;
+      border: 1px solid #4b5563;
+      border-radius: 4px;
+      background: #1f2937;
+      color: white;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    #observer-panel button {
+      padding: 6px 12px;
+      background: #fbbf24;
+      color: #422006;
+      border: none;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    #observer-panel label {
+      display: inline-block;
+      width: 14px;
+      text-align: center;
+      font-weight: bold;
+      font-family: monospace;
+    }
+
+    /* フルスクリーン解除ボタン (フルスクリーン時のみ表示) */
+    #fs-exit-btn {
+      position: fixed; top: 10px; right: 10px;
+      z-index: 10001; display: none;
+      padding: 10px 18px;
+      background: rgba(0,0,0,0.75); color: white;
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; font-weight: bold;
+      cursor: pointer;
+    }
+    body.fs-mode #fs-exit-btn { display: block; }
+
+    /* フルスクリーン時は他の UI を隠す */
+    body.fs-mode #tabbar,
+    body.fs-mode #status,
+    body.fs-mode #observer-panel,
+    body.fs-mode #marker-status,
+    body.fs-mode #log,
+    body.fs-mode #enter-overlay {
+      display: none !important;
+    }
+    body.fs-mode .tab-content { top: 0; }
+  </style>
+
+  <script>
+    window.__logs = [];
+    window.uiLog = function(msg, cls) {
+      window.__logs.push({ msg: String(msg), cls: cls || '' });
+      const el = document.getElementById('log');
+      if (el) {
+        el.innerHTML = window.__logs.slice(-10).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
+        el.scrollTop = el.scrollHeight;
+      }
+    };
+    window.addEventListener('error', (e) => window.uiLog('[ERROR] ' + (e.message || e.error), 'err'));
+  </script>
+
+  <script src="/vendor/three.min.js" onload="uiLog('three.js loaded','ok')"></script>
+  <!-- FBX 読み込み用の UMD ライブラリ (r146 era examples/js を流用) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/libs/fflate.min.js"
+          onload="uiLog('fflate loaded','ok')"
+          onerror="uiLog('fflate FAILED','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/curves/NURBSCurve.js"
+          onload="uiLog('NURBS loaded','ok')"
+          onerror="uiLog('NURBS FAILED','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/loaders/FBXLoader.js"
+          onload="uiLog('FBXLoader loaded','ok')"
+          onerror="uiLog('FBXLoader FAILED','err')"></script>
+  <script src="/config.js"></script>
+  <script>
+    (function () {
+      const cfg = window.APP_CONFIG || {};
+      const base = cfg.socketUrl ? cfg.socketUrl.replace(/\/$/, '') : '';
+      const s = document.createElement('script');
+      s.src = base + '/socket.io/socket.io.js';
+      s.onload = () => window.uiLog('socket.io loaded from ' + (cfg.socketUrl || 'same-origin'), 'ok');
+      s.onerror = () => window.uiLog('socket.io FAILED: ' + s.src, 'err');
+      document.head.appendChild(s);
+    })();
+  </script>
+</head>
+<body>
+
+<!-- ========== タブバー ========== -->
+<nav id="tabbar">
+  <button data-tab="vr" class="active">VR共通空間</button>
+  <button data-tab="camera">リアルカメラ + マーカー</button>
+</nav>
+
+<!-- ========== VRタブ ========== -->
+<div id="tab-vr" class="tab-content active">
+
+  <!-- スマホ用入室オーバーレイ -->
+  <div id="enter-overlay">
+    <h2>共有3D空間</h2>
+    <p>
+      入室するとあなたのアバター(直径15cm球)が<br>
+      スポーン体積内にランダム配置されます。<br>
+      スマホを動かして見回すマジックウィンドウ。
+    </p>
+    <button id="enter-btn">入室する</button>
+  </div>
+
+  <!-- ステータスバー -->
+  <div id="status">
+    <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>
+    <span id="role-badge"></span>
+    &nbsp;|&nbsp;
+    <span id="count">0</span>人 |
+    自分: (<span id="my-pos">--</span>) |
+    最短: <span id="nearest">--</span>m
+  </div>
+
+  <!-- Master用クライアント制御パネル (右側、observer-panel の下) -->
+  <div id="master-panel">
+    <h3>MASTER 制御</h3>
+    <div class="hint">
+      クライアント一覧から選択 → 座標/角度を入力して適用
+    </div>
+    <div class="row">
+      <select id="m-client-select" style="flex:1; padding: 4px;">
+        <option value="">-- 未選択 --</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>X</label><input type="number" id="m-x" value="0" step="0.1">
+      <label>Y</label><input type="number" id="m-y" value="1.5" step="0.1">
+      <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
+    </div>
+    <div class="row">
+      <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
+      <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
+      <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
+    </div>
+    <div class="row">
+      <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+      <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
+    </div>
+    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
+      <div class="hint">オフアクシス投影 (選択中クライアント)</div>
+      <div class="row">
+        <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
+        <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+      </div>
+    </div>
+    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
+      <div class="hint">共通視点 (viewerEye)</div>
+      <div class="row">
+        <label>X</label><input type="number" id="ve-x" value="0" step="0.1">
+        <label>Y</label><input type="number" id="ve-y" value="1.5" step="0.1">
+        <label>Z</label><input type="number" id="ve-z" value="0" step="0.1">
+      </div>
+      <div class="row">
+        <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
+      </div>
+    </div>
+    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
+      <div class="hint">周回速度倍率 (1.0 = 既定 / 0 で停止 / 負で逆回り)</div>
+      <div class="row">
+        <label>鯨</label>
+        <input type="number" id="m-whale-speed" value="1.00" step="0.1">
+        <label>狐</label>
+        <input type="number" id="m-fox-speed" value="1.00" step="0.1">
+      </div>
+      <div class="row">
+        <label>人</label>
+        <input type="number" id="m-human-speed" value="1.00" step="0.1">
+        <button id="m-orbit-apply" style="background: #06b6d4; color: #083344">適用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PCオブザーバー用パネル -->
+  <div id="observer-panel">
+    <h3>OBSERVER MODE</h3>
+    <div class="hint">
+      左ドラッグ: 回転 / 右ドラッグ: パン / ホイール: ズーム<br>
+      WASD: 移動 / QE: 上下 / Shift: 速い
+    </div>
+    <div class="row">
+      <label>X</label><input type="number" id="obs-x" value="0" step="0.5">
+      <label>Y</label><input type="number" id="obs-y" value="8" step="0.5">
+      <label>Z</label><input type="number" id="obs-z" value="15" step="0.5">
+    </div>
+    <div class="row">
+      <button id="obs-teleport">移動</button>
+      <button id="obs-overview" style="background: #60a5fa; color: #1e3a8a">俯瞰</button>
+      <button id="obs-top" style="background: #4ade80; color: #064e3b">真上</button>
+    </div>
+    <div class="row">
+      <button id="obs-light-toggle" style="background: #fbbf24; color: #422006">🔦 ライト ON</button>
+      <button id="obs-fullscreen" style="background: #8b5cf6; color: white">フルスクリーン</button>
+    </div>
+    <div class="hint" style="margin-top: 6px;">
+      ※入力欄で <b>Enter</b> キーで移動<br>
+      L キーでライト切替 / F キーでフルスクリーン
+    </div>
+  </div>
+
+</div>
+
+<!-- ========== リアルカメラタブ ========== -->
+<div id="tab-camera" class="tab-content">
+  <!-- A-Frame + AR.js シーンは初回タブ表示時に space.js が注入する -->
+</div>
+
+<!-- カメラタブ用ステータス: マーカー検出状態 & 距離 -->
+<div id="marker-status">
+  <span id="marker-text">マーカー未検出</span>
+</div>
+
+<!-- ログ (全タブ共通) -->
+<div id="log"></div>
+
+<!-- UI 表示・非表示トグル -->
+<button id="ui-toggle" title="UI 表示切替">UI</button>
+
+<!-- UI 非表示時に画面上部中央に表示される長押し用丸ボタン -->
+<button id="ui-long-press-btn" type="button" aria-label="長押しでスプレー噴射"></button>
+
+<!-- フルスクリーン解除ボタン (フルスクリーン時のみ表示) -->
+<button id="fs-exit-btn">✕ フルスクリーン解除</button>
+
+<script src="space.js"></script>
+</body>
+</html>

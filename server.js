@@ -176,6 +176,13 @@ io.on('connection', (socket) => {
     io.emit('viewerEye', viewerEye);
   });
 
+  // スプレーイベント中継 (全クライアントに同じパルスを再生させる)
+  //   data = { x, y, z, dx, dy, dz, color, halfAngle, time }
+  socket.on('spray', (data) => {
+    if (!data || typeof data !== 'object') return;
+    socket.broadcast.emit('spray', data);
+  });
+
   // Master からの鯨周回速度設定
   socket.on('orbitSpeed', (data) => {
     const sender = users.get(socket.id);
