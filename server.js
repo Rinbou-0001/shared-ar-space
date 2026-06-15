@@ -59,8 +59,8 @@ const orbState = { s: 0, y: 2.5 };
 // マルチディスプレイのオフアクシス投影用 共通視点位置
 let viewerEye = { x: 0, y: 1.5, z: 0 };
 
-// 鯨 (kujira_1) の周回速度 (rad/s) - master が変更
-let whaleOrbitSpeed = 1.0;
+// 各周回オブジェクトの速度倍率 (1.0 = 各モデル既定速度) - master が個別に変更
+let orbitSpeeds = { whale: 1.0, fox: 1.0, human: 1.0 };
 
 io.on('connection', (socket) => {
   const color = randomColor();
@@ -93,8 +93,8 @@ io.on('connection', (socket) => {
   socket.emit('orb', orbState);
   // 接続時に viewerEye も送る
   socket.emit('viewerEye', viewerEye);
-  // 接続時に鯨の周回速度を送る
-  socket.emit('whaleOrbitSpeed', { speed: whaleOrbitSpeed });
+  // 接続時に全周回オブジェクトの速度倍率を送る
+  socket.emit('orbitSpeed', orbitSpeeds);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -177,13 +177,14 @@ io.on('connection', (socket) => {
   });
 
   // Master からの鯨周回速度設定
-  socket.on('whaleOrbitSpeed', (data) => {
+  socket.on('orbitSpeed', (data) => {
     const sender = users.get(socket.id);
     if (!sender || sender.role !== 'master') return;
-    if (typeof data.speed === 'number' && isFinite(data.speed)) {
-      whaleOrbitSpeed = data.speed;
-      io.emit('whaleOrbitSpeed', { speed: whaleOrbitSpeed });
-    }
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.whale === 'number' && isFinite(data.whale)) orbitSpeeds.whale = data.whale;
+    if (typeof data.fox === 'number' && isFinite(data.fox)) orbitSpeeds.fox = data.fox;
+    if (typeof data.human === 'number' && isFinite(data.human)) orbitSpeeds.human = data.human;
+    io.emit('orbitSpeed', orbitSpeeds);
   });
 
   // Master ロールからの強制ポーズ制御 → 全クライアントへ forcePose 配信
