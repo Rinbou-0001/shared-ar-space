@@ -551,11 +551,13 @@
         uniform vec2  u_uvCenter;
         uniform float u_radius;
         uniform vec3  u_color;
-        uniform float u_seed;
+        uniform float u_seed;     // 0..1000 程度の小さな値を渡す (float32 精度確保)
         uniform float u_density;
 
         // ハッシュノイズ (粒状感の元)
+        //   入力を mod で範囲制限し float32 精度の崩壊を防ぐ
         float hash(vec2 p) {
+          p = mod(p, vec2(997.0));
           p = fract(p * vec2(123.34, 456.21));
           p += dot(p, p + 45.32);
           return fract(p.x * p.y);
@@ -567,8 +569,8 @@
           if (r > u_radius) discard;
           float falloff = 1.0 - smoothstep(0.0, u_radius, r);
           falloff = pow(falloff, 0.85);
-          // 高周波ノイズで粒を散布
-          float n = hash(vUv * 2400.0 + u_seed * 0.123);
+          // 高周波ノイズで粒を散布 (vUv は [0..1] なので 600 倍してテクセル幅程度のノイズに)
+          float n = hash(vUv * 600.0 + vec2(u_seed, u_seed * 1.37));
           float threshold = 1.0 - falloff * u_density;
           if (n < threshold) discard;
           // 1 発の不透明度 (中心ほど濃い)
@@ -598,7 +600,11 @@
       paintShaderMat.uniforms.u_uvCenter.value.copy(uv);
       paintShaderMat.uniforms.u_radius.value = uvRadius;
       paintShaderMat.uniforms.u_color.value.set(color);
-      paintShaderMat.uniforms.u_seed.value = seed;
+      // seed は時刻 (ms) で巨大になりがち。0..1000 に圧縮して float32 精度を保つ。
+      //   Date.now() ≈ 1.7e12 をそのままシェーダーへ渡すと fract() で精度が破綻し
+      //   ハッシュノイズが定数化 → 全画素 discard でペイント不可になる事象を回避。
+      const seedSmall = ((Number(seed) >>> 0) % 100000) * 0.01;
+      paintShaderMat.uniforms.u_seed.value = seedSmall;
 
       const prevTarget = renderer.getRenderTarget();
       const oldAutoClear = renderer.autoClear;
