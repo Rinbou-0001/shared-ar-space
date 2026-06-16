@@ -595,24 +595,9 @@
     const paintQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), paintShaderMat);
     paintScene.add(paintQuad);
 
-    // ペイント書き込み: 単一 RT に対し alphablend で粒を加算
+    // 床ペイント (汎用 applyPaintTo は後段で定義 → 関数巻き上げ)
     function applyPaintToFloor(uv, uvRadius, color, seed) {
-      paintShaderMat.uniforms.u_uvCenter.value.copy(uv);
-      paintShaderMat.uniforms.u_radius.value = uvRadius;
-      paintShaderMat.uniforms.u_color.value.set(color);
-      // seed は時刻 (ms) で巨大になりがち。0..1000 に圧縮して float32 精度を保つ。
-      //   Date.now() ≈ 1.7e12 をそのままシェーダーへ渡すと fract() で精度が破綻し
-      //   ハッシュノイズが定数化 → 全画素 discard でペイント不可になる事象を回避。
-      const seedSmall = ((Number(seed) >>> 0) % 100000) * 0.01;
-      paintShaderMat.uniforms.u_seed.value = seedSmall;
-
-      const prevTarget = renderer.getRenderTarget();
-      const oldAutoClear = renderer.autoClear;
-      renderer.autoClear = false;    // 既存ペイントを保護
-      renderer.setRenderTarget(paintRT);
-      renderer.render(paintScene, paintCamera);
-      renderer.setRenderTarget(prevTarget);
-      renderer.autoClear = oldAutoClear;
+      applyPaintTo(paintRT, uv, uvRadius, color, seed);
     }
 
     // 床マテリアル: 基本色 + ペイントテクスチャ (premultiplied) を OVER 合成
@@ -655,24 +640,94 @@
     ground.position.set(0, 0, 0);
     scene.add(ground);
 
-    // デバッグ: ペイント RT の中身を可視化する 1m × 1m の浮遊プレビュー
-    //   位置: (0, 2.5, -3) (スポーン目線の前方上方)
-    //   - これが透明 → RT 空 (シェーダー出力が RT に届いていない)
-    //   - これが粒で塗られる → RT に書き込みは成功している
-    //     (床に色が出ない場合は床の UV / 床シェーダーの問題)
-    const paintPreviewMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshBasicMaterial({
-        map: paintRT.texture,
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      })
-    );
-    paintPreviewMesh.position.set(0, 2.5, -3);
-    paintPreviewMesh.renderOrder = 999;
-    scene.add(paintPreviewMesh);
+    // ============================================================
+    // Paintable レジストリ (床 + FBX サブメッシュ)
+    //   各メッシュは userData.paintRT に専用 RT を持ち、Raycaster で
+    //   交差した先の RT に対し同じ paintShaderMat を流して着色する
+    // ============================================================
+    const paintables = [];
+    // 床を登録
+    ground.userData.paintRT = paintRT;
+    paintables.push(ground);
+
+    // 汎用ペイント書き込み (任意の RT へ shader pass)
+    function applyPaintTo(rt, uvCenter, uvRadius, color, seed) {
+      paintShaderMat.uniforms.u_uvCenter.value.copy(uvCenter);
+      paintShaderMat.uniforms.u_radius.value = uvRadius;
+      paintShaderMat.uniforms.u_color.value.set(color);
+      // seed は時刻 (ms) で巨大 → 0..1000 に圧縮 (float32 精度確保)
+      const seedSmall = ((Number(seed) >>> 0) % 100000) * 0.01;
+      paintShaderMat.uniforms.u_seed.value = seedSmall;
+
+      const prevTarget = renderer.getRenderTarget();
+      const oldAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.setRenderTarget(rt);
+      renderer.render(paintScene, paintCamera);
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = oldAutoClear;
+    }
+
+    // メッシュをペイント可能化 (既存マテリアルに onBeforeCompile でペイント合成を注入)
+    //   - 既存の lighting / skinning / texture は維持
+    //   - 出力直前 (output_fragment 後) に paint を OVER 合成
+    function makePaintable(mesh, opts) {
+      opts = opts || {};
+      if (!mesh || !mesh.material) return;
+      if (mesh.userData.paintRT) return; // 重複登録防止
+      const res = opts.res || 512;
+      const rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
+      // 透明クリア
+      const prevTarget = renderer.getRenderTarget();
+      const prevClearColor = new THREE.Color();
+      renderer.getClearColor(prevClearColor);
+      const prevClearAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(rt);
+      renderer.clear();
+      renderer.setRenderTarget(prevTarget);
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+
+      const mat = mesh.material;
+      // 共有マテリアルを複製しておく (他メッシュへの副作用回避)
+      const cloned = mat.clone();
+      const userUniform = { value: rt.texture };
+      cloned.onBeforeCompile = (shader) => {
+        shader.uniforms.u_paint = userUniform;
+        // vertex: UV を varying で渡す
+        shader.vertexShader = shader.vertexShader.replace(
+          '#include <common>',
+          '#include <common>\nvarying vec2 vPaintUv;'
+        ).replace(
+          'void main() {',
+          'void main() { vPaintUv = uv;'
+        );
+        // fragment: 最終色 (output_fragment 出力直後) に paint を OVER 合成
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <common>',
+          '#include <common>\nvarying vec2 vPaintUv;\nuniform sampler2D u_paint;'
+        ).replace(
+          '#include <output_fragment>',
+          `#include <output_fragment>
+          vec4 _paint = texture2D(u_paint, vPaintUv);
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`
+        );
+      };
+      // onBeforeCompile を反映するため一意な customProgramCacheKey を発行
+      cloned.customProgramCacheKey = () => 'paintable_' + mesh.uuid;
+      cloned.needsUpdate = true;
+      mesh.material = cloned;
+      mesh.userData.paintRT = rt;
+      paintables.push(mesh);
+    }
+
+    // モデル全体 (Group) を traverse し isMesh 全てをペイント可能化
+    function paintifyModel(root, opts) {
+      if (!root) return;
+      root.traverse((c) => {
+        if (c.isMesh) makePaintable(c, opts);
+      });
+    }
 
     // ============================================================
     // スプレー発射/受信処理
@@ -690,6 +745,7 @@
     const _sprayDir    = new THREE.Vector3();
     const _sprayHit    = new THREE.Vector3();
     const _sprayUv     = new THREE.Vector2();
+    const _sprayRaycaster = new THREE.Raycaster();
 
     // スプレー視覚化用 (発射者本人の手元から床に伸びる円錐 + 床ヒット円)
     const sprayConeVis = new THREE.Group();
@@ -703,7 +759,9 @@
     sprayConeVis.add(sprayHitDisk);
 
     let _spraySeen = false;
-    // 受信したスプレー (色・位置・半径・時刻) を実際に床へ焼き付ける
+    // 受信したスプレー (位置・方向・色・半径・時刻) を Raycaster で paintables へ書き込む
+    //   - 床 + FBX サブメッシュを統一的にテスト
+    //   - 最も近いヒット先メッシュの paintRT に対し同じシェーダーパスを実行
     function processSprayEvent(data) {
       if (!data || typeof data !== 'object') return;
       const sx = +data.x, sy = +data.y, sz = +data.z;
@@ -715,31 +773,40 @@
 
       _spraySource.set(sx, sy, sz);
       _sprayDir.set(dx, dy, dz).normalize();
+      if (_sprayDir.lengthSq() < 1e-6) return;
 
-      // 床 (y=0 平面) との交差
-      if (_sprayDir.y >= -0.001) return;             // 真横〜上向きは床に届かない
-      const t = -sy / _sprayDir.y;
-      if (t <= 0 || t > SPRAY_MAX_DIST) return;
+      _sprayRaycaster.set(_spraySource, _sprayDir);
+      _sprayRaycaster.far = SPRAY_MAX_DIST;
+      _sprayRaycaster.near = 0;
 
-      _sprayHit.copy(_spraySource).addScaledVector(_sprayDir, t);
-      if (Math.abs(_sprayHit.x) > FIELD_HALF || Math.abs(_sprayHit.z) > FIELD_HALF) return;
+      const hits = _sprayRaycaster.intersectObjects(paintables, false);
+      if (hits.length === 0) return;
+      const hit = hits[0];
+      if (!hit.uv) return;
+      if (hit.distance <= 0 || hit.distance > SPRAY_MAX_DIST) return;
 
       // 円錐半径 = 距離 × tan(半角)
-      const worldRadius = t * Math.tan(halfAngle);
-      // UV 変換 (床は plane を -π/2 around X → V 軸が world -Z 方向に対応)
-      _sprayUv.set(
-        (_sprayHit.x + FIELD_HALF) / FIELD_SIZE,
-        (FIELD_HALF - _sprayHit.z) / FIELD_SIZE
-      );
-      const uvRadius = worldRadius / FIELD_SIZE;
-      // 半径が極端に小さい/大きい場合はクランプ (見える最低サイズを保証)
+      const worldRadius = hit.distance * Math.tan(halfAngle);
+
+      // UV 半径: 床は (worldRadius / FIELD_SIZE)。モデルは UV スケール不明なので固定値。
+      let uvRadius;
+      if (hit.object === ground) {
+        uvRadius = worldRadius / FIELD_SIZE;
+      } else {
+        // FBX サブメッシュは UV マッピング次第。小さめ固定にする。
+        uvRadius = 0.035;
+      }
       const uvR = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvRadius));
 
-      applyPaintToFloor(_sprayUv, uvR, color, time);
-      // 初回スプレー検出時のみログ (動作確認用)
+      const rt = hit.object.userData.paintRT;
+      if (!rt) return;
+      applyPaintTo(rt, hit.uv, uvR, color, time);
+
+      // 初回ログ
       if (!_spraySeen) {
         _spraySeen = true;
-        try { log(`spray hit uv=(${_sprayUv.x.toFixed(2)},${_sprayUv.y.toFixed(2)}) r=${uvR.toFixed(3)} t=${t.toFixed(2)}m`, 'ok'); } catch (_) {}
+        const tag = (hit.object === ground) ? 'floor' : (hit.object.name || 'mesh');
+        try { log(`spray hit on ${tag} uv=(${hit.uv.x.toFixed(2)},${hit.uv.y.toFixed(2)}) r=${uvR.toFixed(3)} t=${hit.distance.toFixed(2)}m`, 'ok'); } catch (_) {}
       }
     }
 
@@ -921,6 +988,8 @@
           obj.name = 'kujira_1';
           whaleOrbitPivot.add(obj);
           whaleObj = obj;
+          // スプレーペイント対応 (各サブメッシュに paintRT + 合成シェーダ注入)
+          paintifyModel(obj, { res: 512 });
 
           // 埋め込みアニメーションがあれば再生、なければ簡易自動遊泳
           if (obj.animations && obj.animations.length > 0) {
@@ -1007,6 +1076,8 @@
           obj.name = 'Fox_1';
           foxOrbitGroup.add(obj);
           foxObj = obj;
+          // スプレーペイント対応
+          paintifyModel(obj, { res: 512 });
 
           if (obj.animations && obj.animations.length > 0) {
             foxMixer = new THREE.AnimationMixer(obj);
@@ -1164,6 +1235,8 @@
           // scene 直接ではなく、周回ピボットの子にする
           humanOrbitGroup.add(obj);
           humanObj = obj;
+          // スプレーペイント対応 (白マテリアル MeshStandardMaterial に注入)
+          paintifyModel(obj, { res: 512 });
 
           // ルートボーン抽出 (SkinnedMesh.skeleton.bones[0] が通常 Hips)
           obj.traverse((child) => {
@@ -2557,7 +2630,12 @@
       });
 
       // 他クライアントからのスプレー受信 → 自分の床へ同じ Shader pass を適用
+      let _sprayRecvSeen = false;
       socket.on('spray', (data) => {
+        if (!_sprayRecvSeen) {
+          _sprayRecvSeen = true;
+          try { log(`spray RECV from network color=${data && data.color}`, 'ok'); } catch (_) {}
+        }
         processSprayEvent(data);
       });
 
