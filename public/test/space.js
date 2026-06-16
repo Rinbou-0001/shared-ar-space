@@ -706,26 +706,69 @@
         const origOBC = mat.onBeforeCompile;
         mat.onBeforeCompile = (shader, renderer2) => {
           if (typeof origOBC === 'function') origOBC(shader, renderer2);
+          // ★ 動作診断: 各マテリアル初回コンパイル時に 1 度だけログ
+          try {
+            log('paint inject: ' + (mat.type || 'mat') +
+                ' uuid=' + mat.uuid.substr(0, 8) +
+                ' frag has <output_fragment>=' + (shader.fragmentShader.indexOf('#include <output_fragment>') !== -1) +
+                ' has <opaque_fragment>=' + (shader.fragmentShader.indexOf('#include <opaque_fragment>') !== -1),
+              'ok');
+          } catch (_) {}
+          // 重要: 新たに作る uniform をシェーダーへ追加
           shader.uniforms.u_paint = userUniform;
-          // vertex: UV を varying で渡す (skinning などの既存ロジックは触らない)
+          // vertex: UV を varying で渡す
+          //   - `uv` attribute は Three.js prefix で常に宣言される
+          //   - skinning など既存ロジックは触らない
+          if (shader.vertexShader.indexOf('#include <common>') !== -1) {
+            shader.vertexShader = shader.vertexShader.replace(
+              '#include <common>',
+              '#include <common>\nvarying vec2 vPaintUv;'
+            );
+          } else {
+            shader.vertexShader = 'varying vec2 vPaintUv;\n' + shader.vertexShader;
+          }
           shader.vertexShader = shader.vertexShader.replace(
-            '#include <common>',
-            '#include <common>\nvarying vec2 vPaintUv;'
-          ).replace(
             'void main() {',
-            'void main() { vPaintUv = uv;'
+            'void main() {\n  vPaintUv = uv;'
           );
-          // fragment: 最終色 (output_fragment 出力直後) に paint を OVER 合成
-          shader.fragmentShader = shader.fragmentShader.replace(
-            '#include <common>',
-            '#include <common>\nvarying vec2 vPaintUv;\nuniform sampler2D u_paint;'
-          ).replace(
-            '#include <output_fragment>',
-            `#include <output_fragment>
-            vec4 _paint = texture2D(u_paint, vPaintUv);
-            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`
-          );
+          // fragment: 最終色直後に paint を OVER 合成
+          //   - output_fragment (r150) / opaque_fragment (r152+) の両方を試す
+          //   - どちらも無ければ最後の `}` 直前に挿入
+          if (shader.fragmentShader.indexOf('#include <common>') !== -1) {
+            shader.fragmentShader = shader.fragmentShader.replace(
+              '#include <common>',
+              '#include <common>\nvarying vec2 vPaintUv;\nuniform sampler2D u_paint;'
+            );
+          } else {
+            shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
+          }
+          const paintCompose = `
+          vec4 _paint = texture2D(u_paint, vPaintUv);
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
+          let fs = shader.fragmentShader;
+          const before = fs;
+          const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
+          let injected = false;
+          for (const m of markers) {
+            if (fs.indexOf(m) !== -1) {
+              fs = fs.replace(m, m + '\n' + paintCompose);
+              injected = true;
+              break;
+            }
+          }
+          if (!injected) {
+            // 最後の `}` (main 関数末尾) の直前に挿入
+            fs = fs.replace(/\}\s*$/, paintCompose + '\n}');
+          }
+          shader.fragmentShader = fs;
         };
+        // 重要: customProgramCacheKey を一意化して別プログラムを強制
+        //   ・無いと 3 つの MeshStandardMaterial が同一 onBeforeCompile 文字列 + 同一プロパティで
+        //     プログラムキャッシュキー衝突 → 1 プログラム共有 → shader.uniforms.u_paint が
+        //     後発マテリアルで上書きされ全モデルが「最後に登録された RT」を参照する事象を回避
+        const _key = 'paintable_' + mat.uuid;
+        mat.customProgramCacheKey = function() { return _key; };
+        mat.userData.paintInjected = true;
         mat.needsUpdate = true;
       }
 
