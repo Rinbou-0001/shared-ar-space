@@ -638,6 +638,7 @@
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(0, 0, 0);
+    ground.name = 'ground';   // ヒット同期用ルックアップキー
     scene.add(ground);
 
     // ============================================================
@@ -668,6 +669,53 @@
       renderer.autoClear = oldAutoClear;
     }
 
+    // ジオメトリに有効な `uv` 属性が無い場合、bounding box 平面投影で生成
+    //   FBX (whale / fox 等) は元々テクスチャを持たないジオメトリだと uv 属性が空 or 全 0 の事があり、
+    //   その場合は vPaintUv = uv が常に (0, 0) となり paint が原点コーナーにしか書かれない
+    function ensureUV(geometry) {
+      if (!geometry || !geometry.attributes || !geometry.attributes.position) return;
+      const uv = geometry.attributes.uv;
+      let needGenerate = false;
+      if (!uv) {
+        needGenerate = true;
+      } else {
+        // 軽く先頭 50 頂点を見て全て (0,0) なら degenerate と判定
+        let nonZero = false;
+        const sample = Math.min(uv.count, 50);
+        for (let i = 0; i < sample; i++) {
+          if (Math.abs(uv.getX(i)) > 1e-5 || Math.abs(uv.getY(i)) > 1e-5) { nonZero = true; break; }
+        }
+        if (!nonZero) needGenerate = true;
+      }
+      if (!needGenerate) return;
+      // bbox の最大 2 軸で planar 投影 (最小軸を投影方向にする = 物体の正面に展開)
+      geometry.computeBoundingBox();
+      const bb = geometry.boundingBox;
+      const sx = bb.max.x - bb.min.x;
+      const sy = bb.max.y - bb.min.y;
+      const sz = bb.max.z - bb.min.z;
+      let pickU, pickV, sizeU, sizeV, minU, minV;
+      if (sx <= sy && sx <= sz) {       // X 最小: Y-Z 平面に投影
+        pickU = 'y'; pickV = 'z'; sizeU = sy; sizeV = sz; minU = bb.min.y; minV = bb.min.z;
+      } else if (sy <= sx && sy <= sz) { // Y 最小: X-Z 平面
+        pickU = 'x'; pickV = 'z'; sizeU = sx; sizeV = sz; minU = bb.min.x; minV = bb.min.z;
+      } else {                           // Z 最小: X-Y 平面
+        pickU = 'x'; pickV = 'y'; sizeU = sx; sizeV = sy; minU = bb.min.x; minV = bb.min.y;
+      }
+      const pos = geometry.attributes.position;
+      const arr = new Float32Array(pos.count * 2);
+      const safeU = Math.max(sizeU, 1e-4);
+      const safeV = Math.max(sizeV, 1e-4);
+      for (let i = 0; i < pos.count; i++) {
+        const px = pos.getX(i), py = pos.getY(i), pz = pos.getZ(i);
+        const uVal = pickU === 'x' ? px : (pickU === 'y' ? py : pz);
+        const vVal = pickV === 'x' ? px : (pickV === 'y' ? py : pz);
+        arr[i * 2]     = (uVal - minU) / safeU;
+        arr[i * 2 + 1] = (vVal - minV) / safeV;
+      }
+      geometry.setAttribute('uv', new THREE.BufferAttribute(arr, 2));
+    }
+
     // メッシュをペイント可能化 (既存マテリアルを **複製せず** その場で onBeforeCompile 注入)
     //   - 複製しない理由: SkinnedMesh のスケルトン/ボーン束縛や FBXLoader 内部参照は
     //     material.clone() で失われる事があり、アニメーションが止まる原因になる
@@ -677,6 +725,9 @@
       opts = opts || {};
       if (!mesh || !mesh.material) return;
       if (mesh.userData.paintRT) return; // 重複登録防止
+
+      // UV 属性が無いジオメトリには平面投影 UV を生成
+      ensureUV(mesh.geometry);
 
       // mesh.material が配列の場合はサポート外 (FBX は通常単一マテリアル)
       const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
@@ -742,15 +793,9 @@
           } else {
             shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
           }
-          // ★ デバッグ Phase2: 注入は確実に効いていると確認済み。
-          //   今度は vPaintUv (vertex から渡される UV) を直接色で見せる:
-          //     R = u, G = v, B = paint.a × 10 (paint RT に内容があれば青く光る)
-          //   - 全身が一様な色 (黒/緑/赤など) → vPaintUv が定数 = uv 属性が機能していない
-          //   - 部位ごとに色が変わる赤緑グラデーション → UV は正しく伝わっている
-          //   - スプレー直後だけ青く光る → u_paint も正しくバインドされ RT に書き込めている
           const paintCompose = `
           vec4 _paint = texture2D(u_paint, vPaintUv);
-          gl_FragColor.rgb = vec3(vPaintUv.x, vPaintUv.y, _paint.a * 10.0);`;
+          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
           let fs = shader.fragmentShader;
           const before = fs;
           const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
@@ -821,16 +866,52 @@
 
     let _spraySeen = false;
     const _spraySeenObjects = new Set();
-    // 受信したスプレー (位置・方向・色・半径・時刻) を Raycaster で paintables へ書き込む
-    //   - 床 + FBX サブメッシュを統一的にテスト
-    //   - 最も近いヒット先メッシュの paintRT に対し同じシェーダーパスを実行
+
+    // paintables から name で検索 (受信側で同名オブジェクトを引き当てる)
+    function lookupPaintableByName(name) {
+      if (!name) return null;
+      if (name === 'ground' || name === 'floor') return ground;
+      for (const m of paintables) {
+        if (m.name === name) return m;
+      }
+      return null;
+    }
+
+    // スプレーイベント処理:
+    //   Path 1 (推奨): data.targetName + hitU/hitV を使って直接ペイント
+    //     → 動いている FBX に対しレイテンシでズレない (送信側 raycast 結果を再利用)
+    //   Path 2 (フォールバック): 位置/方向から raycast (旧クライアント互換、床のみ動作確実)
     function processSprayEvent(data) {
       if (!data || typeof data !== 'object') return;
+      const color = (typeof data.color === 'string') ? data.color : '#ffffff';
+      const time = (typeof data.time === 'number') ? data.time : performance.now();
+
+      // ---- Path 1: ヒント (送信側で確定した hit 情報) を使う ----
+      if (typeof data.targetName === 'string' &&
+          typeof data.hitU === 'number' &&
+          typeof data.hitV === 'number') {
+        const target = lookupPaintableByName(data.targetName);
+        if (target && target.userData.paintRT) {
+          const uvR = (typeof data.uvRadius === 'number')
+            ? Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, data.uvRadius))
+            : 0.035;
+          _sprayUv.set(data.hitU, data.hitV);
+          applyPaintTo(target.userData.paintRT, _sprayUv, uvR, color, time);
+          if (!_spraySeenObjects.has(target.uuid)) {
+            _spraySeenObjects.add(target.uuid);
+            const tag = (target === ground) ? 'floor' : data.targetName;
+            try { log(`spray hit on ${tag} uv=(${data.hitU.toFixed(2)},${data.hitV.toFixed(2)}) r=${uvR.toFixed(3)} [hint]`, 'ok'); } catch (_) {}
+          }
+          _spraySeen = true;
+          return;
+        }
+        // ヒント先が見つからなければ raycast へフォールバック
+      }
+
+      // ---- Path 2: raycast フォールバック (位置/方向のみ送られてきた旧形式用) ----
       const sx = +data.x, sy = +data.y, sz = +data.z;
       const dx = +data.dx, dy = +data.dy, dz = +data.dz;
       const halfAngle = (typeof data.halfAngle === 'number') ? data.halfAngle : SPRAY_HALF_ANGLE;
-      const color = (typeof data.color === 'string') ? data.color : '#ffffff';
-      const time = (typeof data.time === 'number') ? data.time : performance.now();
       if (!isFinite(sx + sy + sz + dx + dy + dz)) return;
 
       _spraySource.set(sx, sy, sz);
@@ -847,34 +928,23 @@
       if (!hit.uv) return;
       if (hit.distance <= 0 || hit.distance > SPRAY_MAX_DIST) return;
 
-      // 円錐半径 = 距離 × tan(半角)
       const worldRadius = hit.distance * Math.tan(halfAngle);
-
-      // UV 半径: 床は (worldRadius / FIELD_SIZE)。モデルは UV スケール不明なので固定値。
-      let uvRadius;
-      if (hit.object === ground) {
-        uvRadius = worldRadius / FIELD_SIZE;
-      } else {
-        // FBX サブメッシュは UV マッピング次第。小さめ固定にする。
-        uvRadius = 0.035;
-      }
-      const uvR = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvRadius));
+      let uvRadius = (hit.object === ground) ? worldRadius / FIELD_SIZE : 0.035;
+      uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvRadius));
 
       const rt = hit.object.userData.paintRT;
       if (!rt) return;
-      applyPaintTo(rt, hit.uv, uvR, color, time);
+      applyPaintTo(rt, hit.uv, uvRadius, color, time);
 
-      // 初回ログ (オブジェクト毎に 1 回出す → どのモデルに当たったか即座に確認できる)
       if (!_spraySeenObjects.has(hit.object.uuid)) {
         _spraySeenObjects.add(hit.object.uuid);
-        // 親 Group をたどってモデル名を取得 (mesh は無名サブメッシュのことが多いため)
         let tag = (hit.object === ground) ? 'floor' : (hit.object.name || 'mesh');
         if (hit.object !== ground) {
           let p = hit.object;
           while (p && !p.name) p = p.parent;
           if (p && p.name) tag = `${p.name}/${hit.object.name || 'sub'}`;
         }
-        try { log(`spray hit on ${tag} uv=(${hit.uv.x.toFixed(2)},${hit.uv.y.toFixed(2)}) r=${uvR.toFixed(3)} t=${hit.distance.toFixed(2)}m`, 'ok'); } catch (_) {}
+        try { log(`spray hit on ${tag} uv=(${hit.uv.x.toFixed(2)},${hit.uv.y.toFixed(2)}) r=${uvRadius.toFixed(3)} t=${hit.distance.toFixed(2)}m [raycast]`, 'ok'); } catch (_) {}
       }
       _spraySeen = true;
     }
@@ -890,12 +960,35 @@
       camera.getWorldPosition(_spraySource);
       camera.getWorldDirection(_sprayDir);
       const color = state.myColor || '#ffaa00';
+      const halfAngle = SPRAY_HALF_ANGLE;
+      const time = Date.now();
+
+      // 発射側で raycast → 当たったオブジェクト名と UV を確定させ、データに同梱
+      //   送信側でヒット確定させることで受信側はモデルの移動に影響されず同じ場所を着色できる
+      _sprayRaycaster.set(_spraySource, _sprayDir);
+      _sprayRaycaster.far = SPRAY_MAX_DIST;
+      _sprayRaycaster.near = 0;
+      const hits = _sprayRaycaster.intersectObjects(paintables, false);
+
       const data = {
+        // 旧仕様フィールド (位置・方向) — 受信側 raycast フォールバック用
         x: _spraySource.x, y: _spraySource.y, z: _spraySource.z,
         dx: _sprayDir.x,   dy: _sprayDir.y,   dz: _sprayDir.z,
-        color, halfAngle: SPRAY_HALF_ANGLE,
-        time: Date.now(),
+        color, halfAngle, time,
       };
+
+      if (hits.length > 0) {
+        const hit = hits[0];
+        if (hit.uv && hit.distance > 0 && hit.distance <= SPRAY_MAX_DIST) {
+          const worldR = hit.distance * Math.tan(halfAngle);
+          const uvR = (hit.object === ground) ? worldR / FIELD_SIZE : 0.035;
+          data.targetName = (hit.object === ground) ? 'ground' : (hit.object.name || '');
+          data.hitU = hit.uv.x;
+          data.hitV = hit.uv.y;
+          data.uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvR));
+        }
+      }
+
       processSprayEvent(data);
       if (socket && socket.connected) socket.emit('spray', data);
     }
