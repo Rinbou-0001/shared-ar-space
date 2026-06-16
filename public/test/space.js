@@ -742,8 +742,11 @@
           } else {
             shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
           }
+          // ★ デバッグ: paint が無くても 25% 緑にうっすら染める (注入経路の生死確認)
+          //   → モデルが緑がかれば本コードは実行されている、緑にならなければ shader 反映前
           const paintCompose = `
           vec4 _paint = texture2D(u_paint, vPaintUv);
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.0, 1.0, 0.0), 0.25);
           gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
           let fs = shader.fragmentShader;
           const before = fs;
