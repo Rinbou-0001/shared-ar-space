@@ -742,12 +742,15 @@
           } else {
             shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
           }
-          // ★ デバッグ: paint が無くても 25% 緑にうっすら染める (注入経路の生死確認)
-          //   → モデルが緑がかれば本コードは実行されている、緑にならなければ shader 反映前
+          // ★ デバッグ Phase2: 注入は確実に効いていると確認済み。
+          //   今度は vPaintUv (vertex から渡される UV) を直接色で見せる:
+          //     R = u, G = v, B = paint.a × 10 (paint RT に内容があれば青く光る)
+          //   - 全身が一様な色 (黒/緑/赤など) → vPaintUv が定数 = uv 属性が機能していない
+          //   - 部位ごとに色が変わる赤緑グラデーション → UV は正しく伝わっている
+          //   - スプレー直後だけ青く光る → u_paint も正しくバインドされ RT に書き込めている
           const paintCompose = `
           vec4 _paint = texture2D(u_paint, vPaintUv);
-          gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.0, 1.0, 0.0), 0.25);
-          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
+          gl_FragColor.rgb = vec3(vPaintUv.x, vPaintUv.y, _paint.a * 10.0);`;
           let fs = shader.fragmentShader;
           const before = fs;
           const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
