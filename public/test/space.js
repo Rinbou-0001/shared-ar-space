@@ -668,55 +668,67 @@
       renderer.autoClear = oldAutoClear;
     }
 
-    // メッシュをペイント可能化 (既存マテリアルに onBeforeCompile でペイント合成を注入)
-    //   - 既存の lighting / skinning / texture は維持
-    //   - 出力直前 (output_fragment 後) に paint を OVER 合成
+    // メッシュをペイント可能化 (既存マテリアルを **複製せず** その場で onBeforeCompile 注入)
+    //   - 複製しない理由: SkinnedMesh のスケルトン/ボーン束縛や FBXLoader 内部参照は
+    //     material.clone() で失われる事があり、アニメーションが止まる原因になる
+    //   - 同じマテリアルを共有する複数サブメッシュは **同じ paintRT** を共有 (UV 空間も共有)
+    //   - 1 つのモデル (= 1 マテリアル) = 1 paintRT という運用になる
     function makePaintable(mesh, opts) {
       opts = opts || {};
       if (!mesh || !mesh.material) return;
       if (mesh.userData.paintRT) return; // 重複登録防止
-      const res = opts.res || 512;
-      const rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
-      // 透明クリア
-      const prevTarget = renderer.getRenderTarget();
-      const prevClearColor = new THREE.Color();
-      renderer.getClearColor(prevClearColor);
-      const prevClearAlpha = renderer.getClearAlpha();
-      renderer.setClearColor(0x000000, 0);
-      renderer.setRenderTarget(rt);
-      renderer.clear();
-      renderer.setRenderTarget(prevTarget);
-      renderer.setClearColor(prevClearColor, prevClearAlpha);
 
-      const mat = mesh.material;
-      // 共有マテリアルを複製しておく (他メッシュへの副作用回避)
-      const cloned = mat.clone();
-      const userUniform = { value: rt.texture };
-      cloned.onBeforeCompile = (shader) => {
-        shader.uniforms.u_paint = userUniform;
-        // vertex: UV を varying で渡す
-        shader.vertexShader = shader.vertexShader.replace(
-          '#include <common>',
-          '#include <common>\nvarying vec2 vPaintUv;'
-        ).replace(
-          'void main() {',
-          'void main() { vPaintUv = uv;'
-        );
-        // fragment: 最終色 (output_fragment 出力直後) に paint を OVER 合成
-        shader.fragmentShader = shader.fragmentShader.replace(
-          '#include <common>',
-          '#include <common>\nvarying vec2 vPaintUv;\nuniform sampler2D u_paint;'
-        ).replace(
-          '#include <output_fragment>',
-          `#include <output_fragment>
-          vec4 _paint = texture2D(u_paint, vPaintUv);
-          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`
-        );
-      };
-      // onBeforeCompile を反映するため一意な customProgramCacheKey を発行
-      cloned.customProgramCacheKey = () => 'paintable_' + mesh.uuid;
-      cloned.needsUpdate = true;
-      mesh.material = cloned;
+      // mesh.material が配列の場合はサポート外 (FBX は通常単一マテリアル)
+      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (!mat) return;
+      if (!mat.userData) mat.userData = {};
+
+      let rt = mat.userData.paintRT;
+      if (!rt) {
+        // このマテリアル用 paintRT を新規作成
+        const res = opts.res || 512;
+        rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
+        // 透明クリア
+        const prevTarget = renderer.getRenderTarget();
+        const prevClearColor = new THREE.Color();
+        renderer.getClearColor(prevClearColor);
+        const prevClearAlpha = renderer.getClearAlpha();
+        renderer.setClearColor(0x000000, 0);
+        renderer.setRenderTarget(rt);
+        renderer.clear();
+        renderer.setRenderTarget(prevTarget);
+        renderer.setClearColor(prevClearColor, prevClearAlpha);
+        mat.userData.paintRT = rt;
+
+        // onBeforeCompile はマテリアル毎に 1 度だけ注入
+        const userUniform = { value: rt.texture };
+        mat.userData.paintUniform = userUniform;
+        const origOBC = mat.onBeforeCompile;
+        mat.onBeforeCompile = (shader, renderer2) => {
+          if (typeof origOBC === 'function') origOBC(shader, renderer2);
+          shader.uniforms.u_paint = userUniform;
+          // vertex: UV を varying で渡す (skinning などの既存ロジックは触らない)
+          shader.vertexShader = shader.vertexShader.replace(
+            '#include <common>',
+            '#include <common>\nvarying vec2 vPaintUv;'
+          ).replace(
+            'void main() {',
+            'void main() { vPaintUv = uv;'
+          );
+          // fragment: 最終色 (output_fragment 出力直後) に paint を OVER 合成
+          shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <common>',
+            '#include <common>\nvarying vec2 vPaintUv;\nuniform sampler2D u_paint;'
+          ).replace(
+            '#include <output_fragment>',
+            `#include <output_fragment>
+            vec4 _paint = texture2D(u_paint, vPaintUv);
+            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`
+          );
+        };
+        mat.needsUpdate = true;
+      }
+
       mesh.userData.paintRT = rt;
       paintables.push(mesh);
     }
@@ -759,6 +771,7 @@
     sprayConeVis.add(sprayHitDisk);
 
     let _spraySeen = false;
+    const _spraySeenObjects = new Set();
     // 受信したスプレー (位置・方向・色・半径・時刻) を Raycaster で paintables へ書き込む
     //   - 床 + FBX サブメッシュを統一的にテスト
     //   - 最も近いヒット先メッシュの paintRT に対し同じシェーダーパスを実行
@@ -802,12 +815,19 @@
       if (!rt) return;
       applyPaintTo(rt, hit.uv, uvR, color, time);
 
-      // 初回ログ
-      if (!_spraySeen) {
-        _spraySeen = true;
-        const tag = (hit.object === ground) ? 'floor' : (hit.object.name || 'mesh');
+      // 初回ログ (オブジェクト毎に 1 回出す → どのモデルに当たったか即座に確認できる)
+      if (!_spraySeenObjects.has(hit.object.uuid)) {
+        _spraySeenObjects.add(hit.object.uuid);
+        // 親 Group をたどってモデル名を取得 (mesh は無名サブメッシュのことが多いため)
+        let tag = (hit.object === ground) ? 'floor' : (hit.object.name || 'mesh');
+        if (hit.object !== ground) {
+          let p = hit.object;
+          while (p && !p.name) p = p.parent;
+          if (p && p.name) tag = `${p.name}/${hit.object.name || 'sub'}`;
+        }
         try { log(`spray hit on ${tag} uv=(${hit.uv.x.toFixed(2)},${hit.uv.y.toFixed(2)}) r=${uvR.toFixed(3)} t=${hit.distance.toFixed(2)}m`, 'ok'); } catch (_) {}
       }
+      _spraySeen = true;
     }
 
     // ローカルで自分が発射するときに呼ぶ。サーバーへも送信。
