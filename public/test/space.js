@@ -2512,6 +2512,24 @@
       const oaBtn = document.getElementById('m-offaxis-toggle');
       const sizeSpan = document.getElementById('m-display-size');
 
+      // display 関連の UI (off-axis ボタン / サイズ表示) だけを再描画
+      function refreshDisplayUI() {
+        if (!selectedClientId) return;
+        const d = remoteDisplays.get(selectedClientId);
+        if (d && sizeSpan) {
+          sizeSpan.textContent = 'サイズ: ' + (d.width || 0).toFixed(3) + ' × ' +
+            (d.height || 0).toFixed(3) + ' m';
+        } else if (sizeSpan) {
+          sizeSpan.textContent = 'サイズ: --';
+        }
+        if (oaBtn) {
+          const on = !!(d && d.offaxis);
+          oaBtn.textContent = on ? 'ON' : 'OFF';
+          oaBtn.style.background = on ? '#06b6d4' : '#475569';
+          oaBtn.style.color = on ? '#083344' : 'white';
+        }
+      }
+      // master の現在状態を入力欄へ流し込む (位置/角度入力 + UI 再描画)
       function readCurrentToFields() {
         if (!selectedClientId) return;
         const a = avatars.get(selectedClientId);
@@ -2525,21 +2543,11 @@
         iyaw.value = (e.y * 180 / Math.PI).toFixed(1);
         if (ipitch) ipitch.value = (e.x * 180 / Math.PI).toFixed(1);
         if (iroll) iroll.value = (e.z * 180 / Math.PI).toFixed(1);
-        // ディスプレイ設定表示
-        const d = remoteDisplays.get(selectedClientId);
-        if (d && sizeSpan) {
-          sizeSpan.textContent = 'サイズ: ' + (d.width || 0).toFixed(3) + ' × ' +
-            (d.height || 0).toFixed(3) + ' m';
-        } else if (sizeSpan) {
-          sizeSpan.textContent = 'サイズ: --';
-        }
-        if (d && oaBtn) {
-          oaBtn.textContent = d.offaxis ? 'ON' : 'OFF';
-          oaBtn.style.background = d.offaxis ? '#06b6d4' : '#475569';
-          oaBtn.style.color = d.offaxis ? '#083344' : 'white';
-        }
+        refreshDisplayUI();
       }
       btnRead.addEventListener('click', readCurrentToFields);
+      // 他から呼べるよう state へ公開 (displayConfig 受信時の即時 UI 同期に使用)
+      state.__masterRefreshDisplayUI = refreshDisplayUI;
 
       function applyControl() {
         if (!selectedClientId) { log('未選択', 'err'); return; }
@@ -2597,6 +2605,9 @@
           log('offaxis → ' + (newOn ? 'ON' : 'OFF') + ' for ' +
             selectedClientId.slice(0, 6), 'ok');
         }
+        // 楽観的に remoteDisplays + UI を即時更新 (broadcast 戻り待ちのちらつき防止)
+        remoteDisplays.set(selectedClientId, Object.assign({}, d, { offaxis: newOn }));
+        refreshDisplayUI();
       });
 
       // viewerEye 適用
@@ -2910,6 +2921,11 @@
           const a = avatars.get(id);
           if (a && a.frustum && merged.width && merged.height) {
             updateDisplayFrame(a.frustum, merged.width, merged.height);
+          }
+          // master が現在この id を選択中なら、ボタン/サイズ表示を即時再描画
+          //   → 観察者が offaxis を toggle した瞬間に master のボタンも反応するように
+          if (ROLE === 'master' && typeof state.__masterRefreshDisplayUI === 'function') {
+            state.__masterRefreshDisplayUI();
           }
         }
       });
