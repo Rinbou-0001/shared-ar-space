@@ -170,18 +170,26 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('displayConfig', { id: socket.id, display: u.display });
   });
 
-  // Master からのディスプレイ向き/オフアクシス設定 → 全クライアントへ配信
+  // ディスプレイ向き / オフアクシス / サイズ 設定
+  //   - master: 任意の targetId に対し他人 / 自分の display を変更可
+  //   - non-master: targetId を省略 (= 自身) のみ許可
+  // これでオブザーバー自身の offaxis トグルもサーバーへ反映され、その後に master が
+  // controlPose+displayConfig (yaw/pitch/roll のみ) を打っても offaxis が保持される。
   socket.on('displayConfig', (data) => {
     const sender = users.get(socket.id);
-    if (!sender || sender.role !== 'master') return;
-    if (!data || typeof data.targetId !== 'string') return;
-    const target = users.get(data.targetId);
+    if (!sender || !data) return;
+    const isMaster = (sender.role === 'master');
+    const targetId = (typeof data.targetId === 'string') ? data.targetId : socket.id;
+    if (!isMaster && targetId !== socket.id) return;  // 非 master は自分以外を変更不可
+    const target = users.get(targetId);
     if (!target) return;
     if (typeof data.yaw === 'number') target.display.yaw = data.yaw;
     if (typeof data.pitch === 'number') target.display.pitch = data.pitch;
     if (typeof data.roll === 'number') target.display.roll = data.roll;
     if (typeof data.offaxis === 'boolean') target.display.offaxis = data.offaxis;
-    io.emit('displayConfig', { id: data.targetId, display: target.display });
+    if (typeof data.width === 'number' && data.width > 0) target.display.width = data.width;
+    if (typeof data.height === 'number' && data.height > 0) target.display.height = data.height;
+    io.emit('displayConfig', { id: targetId, display: target.display });
   });
 
   // Master からの viewerEye 設定

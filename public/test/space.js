@@ -2418,6 +2418,10 @@
       if (obsOaBtn) {
         obsOaBtn.addEventListener('click', () => {
           myDisplay.offaxis = !myDisplay.offaxis;
+          // サーバーへ通知 → master の controlPose+displayConfig で offaxis が潰されなくなる
+          if (socket && socket.connected) {
+            socket.emit('displayConfig', { offaxis: myDisplay.offaxis });
+          }
           log('observer offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
           syncObsOffaxisUI();
         });
