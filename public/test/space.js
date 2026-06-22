@@ -1597,8 +1597,11 @@
     const _oaSaveQuat = new THREE.Quaternion();
     const _oaDispCenter = new THREE.Vector3();
     const _oaDispQuat = new THREE.Quaternion();
+    const _oaOffsetQuat = new THREE.Quaternion();
     const _oaEuler = new THREE.Euler(0, 0, 0, 'YXZ');
     const _oaEye = new THREE.Vector3();
+    const _oaFaceMat = new THREE.Matrix4();
+    const _oaWorldUp = new THREE.Vector3(0, 1, 0);
     function applyOffAxisProjection(cam, eye, displayCenter, displayQuat, w, h, near, far) {
       _ax.set(1, 0, 0).applyQuaternion(displayQuat); // right
       _ay.set(0, 1, 0).applyQuaternion(displayQuat); // up
@@ -3255,19 +3258,24 @@
           _oaSavePos.copy(camera.position);
           _oaSaveQuat.copy(camera.quaternion);
 
-          // ディスプレイ姿勢: avatar quaternion × display offset (yaw/pitch/roll)
+          // dispCenter = アバター位置 (= 物理的に画面がある場所)
+          _oaDispCenter.copy(_oaSavePos);
+          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+
+          // ディスプレイ法線が必ず eye 方向を向くよう自動姿勢を組む
+          //   lookAt(eye, dispCenter, worldUp) で構築した行列の rotation は
+          //     local -Z = dispCenter - eye  → local +Z = eye - dispCenter (= 法線が eye 側)
+          //   さらに master が設定する yaw/pitch/roll をオフセットとして掛け合わせる
+          _oaFaceMat.lookAt(_oaEye, _oaDispCenter, _oaWorldUp);
+          _oaDispQuat.setFromRotationMatrix(_oaFaceMat);
           _oaEuler.set(
             myDisplay.pitch * Math.PI / 180,
             myDisplay.yaw   * Math.PI / 180,
             myDisplay.roll  * Math.PI / 180,
             'YXZ'
           );
-          _oaDispQuat.setFromEuler(_oaEuler);
-          _oaDispQuat.premultiply(_oaSaveQuat);
-
-          // dispCenter = アバター位置 (= 物理的に画面がある場所)
-          _oaDispCenter.copy(_oaSavePos);
-          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+          _oaOffsetQuat.setFromEuler(_oaEuler);
+          _oaDispQuat.multiply(_oaOffsetQuat);
 
           const ok = applyOffAxisProjection(
             camera, _oaEye, _oaDispCenter, _oaDispQuat,
