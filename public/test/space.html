@@ -474,6 +474,21 @@
       ※入力欄で <b>Enter</b> キーで移動<br>
       L キーでライト切替 / F キーでフルスクリーン
     </div>
+
+    <!-- Off-Axis Projection (自分の画面に適用) -->
+    <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
+      <label>Off-Axis</label>
+      <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+      <button id="obs-display-auto" style="background: #94a3b8; color: #1e293b; font-size: 11px;">自動取得</button>
+    </div>
+    <div class="row">
+      <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.01" min="0.05" max="3.0">
+      <label>H(m)</label><input type="number" id="obs-display-h" value="0.20" step="0.01" min="0.05" max="3.0">
+    </div>
+    <div class="hint" style="font-size: 10px;">
+      viewerEye = (0, 2.0, 0) を頂点とした非対称錐台<br>
+      ※W/H は物理ディスプレイの実寸 (m)
+    </div>
   </div>
 
 </div>

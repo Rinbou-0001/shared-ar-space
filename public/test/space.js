@@ -1877,7 +1877,7 @@
       yaw: 0, pitch: 0, roll: 0, // 度
       offaxis: false,
     };
-    const viewerEye = { x: 0, y: 1.5, z: 0 };
+    const viewerEye = { x: 0, y: 2.0, z: 0 };
     const remoteDisplays = new Map(); // id -> display config
 
     // 画面の物理サイズを推定 (PPI ベース)
@@ -2352,6 +2352,80 @@
         else if (e.key === 'l' || e.key === 'L') toggleLight();
       });
 
+      // ============================================================
+      // Off-Axis Projection オブザーバー用コントロール
+      //   ・トグル: myDisplay.offaxis を切り替え (ローカルのみ、サーバー broadcast 不要)
+      //   ・W/H 入力: myDisplay.width/height を直接更新 + サーバーへ displaySize 通知
+      //   ・自動取得: window.innerWidth/Height + devicePixelRatio + 96 PPI から推定
+      // ============================================================
+      const obsOaBtn  = document.getElementById('obs-offaxis-toggle');
+      const obsDispW  = document.getElementById('obs-display-w');
+      const obsDispH  = document.getElementById('obs-display-h');
+      const obsDispAuto = document.getElementById('obs-display-auto');
+
+      function syncObsOffaxisUI() {
+        if (obsOaBtn) {
+          obsOaBtn.textContent = myDisplay.offaxis ? 'ON' : 'OFF';
+          obsOaBtn.style.background = myDisplay.offaxis ? '#06b6d4' : '#475569';
+          obsOaBtn.style.color = myDisplay.offaxis ? '#083344' : 'white';
+        }
+        if (obsDispW && document.activeElement !== obsDispW) {
+          obsDispW.value = myDisplay.width.toFixed(3);
+        }
+        if (obsDispH && document.activeElement !== obsDispH) {
+          obsDispH.value = myDisplay.height.toFixed(3);
+        }
+      }
+      // 既定値で UI を初期化
+      syncObsOffaxisUI();
+      // master broadcast でディスプレイ設定が更新されたら UI も追従させたい:
+      //   オブザーバー (= 非マスター) は受信側 displayConfig ハンドラで myDisplay が更新されるので
+      //   そのタイミングで UI 同期する
+      state.__syncObsOffaxisUI = syncObsOffaxisUI;
+
+      if (obsOaBtn) {
+        obsOaBtn.addEventListener('click', () => {
+          myDisplay.offaxis = !myDisplay.offaxis;
+          log('observer offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
+          syncObsOffaxisUI();
+        });
+      }
+
+      function applyObsDisplaySize() {
+        const w = parseFloat(obsDispW.value);
+        const h = parseFloat(obsDispH.value);
+        if (isFinite(w) && w > 0.01) myDisplay.width = w;
+        if (isFinite(h) && h > 0.01) myDisplay.height = h;
+        // master/他クライアントへ通知 (サーバーは displaySize を受けて users[id].display を更新)
+        if (socket && socket.connected) {
+          socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
+        }
+        log('observer display size: ' + myDisplay.width.toFixed(3) + ' × ' +
+            myDisplay.height.toFixed(3) + ' m', 'ok');
+        syncObsOffaxisUI();
+      }
+      if (obsDispW) {
+        obsDispW.addEventListener('change', applyObsDisplaySize);
+        obsDispW.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyObsDisplaySize(); });
+      }
+      if (obsDispH) {
+        obsDispH.addEventListener('change', applyObsDisplaySize);
+        obsDispH.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyObsDisplaySize(); });
+      }
+      if (obsDispAuto) {
+        obsDispAuto.addEventListener('click', () => {
+          // 表示中の (ブラウザ可視) ディスプレイサイズを推定:
+          //   width(px) × DPR / PPI(=96) × 0.0254 m/inch
+          //   PPI は環境差があるためあくまで参考値
+          const dpr = window.devicePixelRatio || 1;
+          const PPI = 96;
+          const m_per_inch = 0.0254;
+          myDisplay.width  = (window.innerWidth  * dpr / PPI) * m_per_inch;
+          myDisplay.height = (window.innerHeight * dpr / PPI) * m_per_inch;
+          applyObsDisplaySize();
+        });
+      }
+
       log('observer ready', 'ok');
     }
 
@@ -2766,6 +2840,7 @@
         applyOrbState();
       });
       // ディスプレイ設定の更新 (自分宛 or 他クライアント)
+      // master からの displayConfig 受信時、自分宛なら myDisplay を更新 + UI 同期
       socket.on('displayConfig', ({ id, display }) => {
         if (!display) return;
         if (id === state.myId) {
@@ -2778,6 +2853,8 @@
           log('myDisplay updated: ' + myDisplay.width.toFixed(2) + 'x' +
               myDisplay.height.toFixed(2) + 'm  yaw=' + myDisplay.yaw +
               ' offaxis=' + myDisplay.offaxis, 'ok');
+          // オブザーバーパネルの off-axis 表示も追従
+          if (typeof state.__syncObsOffaxisUI === 'function') state.__syncObsOffaxisUI();
         } else {
           // 部分マージ
           const prev = remoteDisplays.get(id) || {};

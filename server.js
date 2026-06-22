@@ -57,7 +57,7 @@ function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60
 const orbState = { s: 0, y: 2.5 };
 
 // マルチディスプレイのオフアクシス投影用 共通視点位置
-let viewerEye = { x: 0, y: 1.5, z: 0 };
+let viewerEye = { x: 0, y: 2.0, z: 0 };
 
 // 各周回オブジェクトの速度倍率 (1.0 = 各モデル既定速度) - master が個別に変更
 let orbitSpeeds = { whale: 1.0, fox: 1.0, human: 1.0 };
