@@ -1600,8 +1600,8 @@
     const _oaOffsetQuat = new THREE.Quaternion();
     const _oaEuler = new THREE.Euler(0, 0, 0, 'YXZ');
     const _oaEye = new THREE.Vector3();
-    const _oaFaceMat = new THREE.Matrix4();
-    const _oaWorldUp = new THREE.Vector3(0, 1, 0);
+    // 180° around Y: avatar の local +Z (背中) を local -Z (前方) に転回するためのプリセット
+    const _oaFlipQ = new THREE.Quaternion(0, 1, 0, 0); // axis=Y, angle=π
     function applyOffAxisProjection(cam, eye, displayCenter, displayQuat, w, h, near, far) {
       _ax.set(1, 0, 0).applyQuaternion(displayQuat); // right
       _ay.set(0, 1, 0).applyQuaternion(displayQuat); // up
@@ -3262,12 +3262,13 @@
           _oaDispCenter.copy(_oaSavePos);
           _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
 
-          // ディスプレイ法線が必ず eye 方向を向くよう自動姿勢を組む
-          //   lookAt(eye, dispCenter, worldUp) で構築した行列の rotation は
-          //     local -Z = dispCenter - eye  → local +Z = eye - dispCenter (= 法線が eye 側)
-          //   さらに master が設定する yaw/pitch/roll をオフセットとして掛け合わせる
-          _oaFaceMat.lookAt(_oaEye, _oaDispCenter, _oaWorldUp);
-          _oaDispQuat.setFromRotationMatrix(_oaFaceMat);
+          // ディスプレイ姿勢 = avatar quaternion × Euler(yaw/pitch/roll) × 180°around-Y
+          //   180° flip の意味:
+          //     Three.js カメラの「前方」は local -Z だが、applyOffAxisProjection は
+          //     local +Z を「画面の表側 (viewer 側)」として扱う。
+          //     flip しないと display 法線が avatar の後頭部方向を向き、eye は背面側になって
+          //     d<=0 で off-axis が無音失敗する。
+          //     180° around Y を後段で掛けて local +Z = avatar の前方 = eye 方向にする。
           _oaEuler.set(
             myDisplay.pitch * Math.PI / 180,
             myDisplay.yaw   * Math.PI / 180,
@@ -3275,7 +3276,7 @@
             'YXZ'
           );
           _oaOffsetQuat.setFromEuler(_oaEuler);
-          _oaDispQuat.multiply(_oaOffsetQuat);
+          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaOffsetQuat).multiply(_oaFlipQ);
 
           const ok = applyOffAxisProjection(
             camera, _oaEye, _oaDispCenter, _oaDispQuat,
