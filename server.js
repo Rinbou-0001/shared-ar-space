@@ -63,7 +63,9 @@ let viewerEye = { x: 0, y: 2.0, z: 0 };
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
 //   サーバーは baseOmega を知らないが phase/t0/factor だけで完全に同期させられる。
 //   全クライアントは Date.now() (絶対時刻) を共有しているのでロード開始タイミングに依らず同じ位置を計算する。
-const ORBIT_EPOCH = Date.now();
+// 全クライアントが共有できる固定エポック (= Unix epoch 0)。
+// 各クライアントの初期 t0 も 0 にしておけば、broadcast 受信前後で位置が飛ばない。
+const ORBIT_EPOCH = 0;
 let orbitState = {
   whale: { phase: 0, t0: ORBIT_EPOCH, factor: 1.0 },
   fox:   { phase: 0, t0: ORBIT_EPOCH, factor: 1.0 },

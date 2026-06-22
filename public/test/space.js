@@ -1105,9 +1105,11 @@
     //     どのクライアントも同じ位置に「飛ばず」追従する。
     const WHALE_BASE_OMEGA = 1.0;                         // rad/s
     const FOX_BASE_OMEGA = (2 * Math.PI) / 180.0;         // rad/s (3分で1周)
-    let whaleOrbitState = { phase: 0, t0: Date.now(), factor: 1.0 };
-    let foxOrbitState   = { phase: 0, t0: Date.now(), factor: 1.0 };
-    let humanOrbitState = { phase: 0, t0: Date.now(), factor: 1.0 };
+    // 全クライアント共通の固定エポック (= サーバーと同じ Unix epoch 0)。
+    // broadcast 受信前から、Date.now() を共有する全クライアントが完全に同じ accum を計算する。
+    let whaleOrbitState = { phase: 0, t0: 0, factor: 1.0 };
+    let foxOrbitState   = { phase: 0, t0: 0, factor: 1.0 };
+    let humanOrbitState = { phase: 0, t0: 0, factor: 1.0 };
     // 後方互換用ショートカット (UI 表示専用)
     function whaleSpeedFactorValue() { return whaleOrbitState.factor; }
     function foxSpeedFactorValue()   { return foxOrbitState.factor; }
@@ -1590,6 +1592,13 @@
     const _ax = new THREE.Vector3(), _ay = new THREE.Vector3(), _az = new THREE.Vector3();
     const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
     const _camLookMat = new THREE.Matrix4();
+    // tick() の off-axis ブロックで毎フレーム使う退避用バッファ (毎フレーム new しない)
+    const _oaSavePos = new THREE.Vector3();
+    const _oaSaveQuat = new THREE.Quaternion();
+    const _oaDispCenter = new THREE.Vector3();
+    const _oaDispQuat = new THREE.Quaternion();
+    const _oaEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const _oaEye = new THREE.Vector3();
     function applyOffAxisProjection(cam, eye, displayCenter, displayQuat, w, h, near, far) {
       _ax.set(1, 0, 0).applyQuaternion(displayQuat); // right
       _ay.set(0, 1, 0).applyQuaternion(displayQuat); // up
@@ -3218,35 +3227,51 @@
       // VRタブが非表示なら描画スキップ (A-Frame が別タブで動いている)
       if (tabState.active === 'vr') {
         // オフアクシス投影が有効なら自分用に専用カメラを構築 → 描画
+        //   ※ applyOffAxisProjection は描画時に camera.position/quaternion を eye 起点に上書きする。
+        //      自操作 / Master からの位置更新が潰れないよう、描画前に「ユーザー由来のアバター位置」を退避し、
+        //      描画後に必ず復元する。アバター位置 = ディスプレイ位置 という運用。
         if (myDisplay.offaxis) {
-          const dispCenter = new THREE.Vector3(
-            camera.position.x, camera.position.y, camera.position.z
-          );
-          // ディスプレイ姿勢: yaw/pitch/roll (度) → クォータニオン
-          const e = new THREE.Euler(
+          // 退避: ユーザー / Master 由来のアバター pose
+          _oaSavePos.copy(camera.position);
+          _oaSaveQuat.copy(camera.quaternion);
+
+          // ディスプレイ姿勢: avatar quaternion × display offset (yaw/pitch/roll)
+          _oaEuler.set(
             myDisplay.pitch * Math.PI / 180,
             myDisplay.yaw   * Math.PI / 180,
             myDisplay.roll  * Math.PI / 180,
             'YXZ'
           );
-          const dispQuat = new THREE.Quaternion().setFromEuler(e);
-          const eye = new THREE.Vector3(viewerEye.x, viewerEye.y, viewerEye.z);
+          _oaDispQuat.setFromEuler(_oaEuler);
+          _oaDispQuat.premultiply(_oaSaveQuat);
+
+          // dispCenter = アバター位置 (= 物理的に画面がある場所)
+          _oaDispCenter.copy(_oaSavePos);
+          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+
           const ok = applyOffAxisProjection(
-            camera, eye, dispCenter, dispQuat,
+            camera, _oaEye, _oaDispCenter, _oaDispQuat,
             myDisplay.width, myDisplay.height,
             0.05, 200
           );
           if (!ok) {
-            // 失敗時はデフォルトに戻す
             camera.updateProjectionMatrix();
           }
+
+          renderer.render(scene, camera);
+
+          // 復元: カメラ位置/姿勢をユーザー由来の値に戻す
+          //   → 次フレームの WASD / マウス / forcePose 処理が camera.position を正しく扱える
+          //   → pose 送信もアバター位置 (= ディスプレイ位置) で正しい値が送られる
+          camera.position.copy(_oaSavePos);
+          camera.quaternion.copy(_oaSaveQuat);
         } else {
           // 通常の対称 perspective に復帰
           camera.aspect = window.innerWidth / (window.innerHeight - 44);
           camera.fov = 72;
           camera.updateProjectionMatrix();
+          renderer.render(scene, camera);
         }
-        renderer.render(scene, camera);
       }
     }
     tick();
