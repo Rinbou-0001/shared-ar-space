@@ -59,15 +59,31 @@ const orbState = { s: 0, y: 2.5 };
 // マルチディスプレイのオフアクシス投影用 共通視点位置
 let viewerEye = { x: 0, y: 2.0, z: 0 };
 
-// 各周回オブジェクトの速度倍率 (1.0 = 各モデル既定速度) - master が個別に変更
-let orbitSpeeds = { whale: 1.0, fox: 1.0, human: 1.0 };
+// 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
+//   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
+//   サーバーは baseOmega を知らないが phase/t0/factor だけで完全に同期させられる。
+//   全クライアントは Date.now() (絶対時刻) を共有しているのでロード開始タイミングに依らず同じ位置を計算する。
+const ORBIT_EPOCH = Date.now();
+let orbitState = {
+  whale: { phase: 0, t0: ORBIT_EPOCH, factor: 1.0 },
+  fox:   { phase: 0, t0: ORBIT_EPOCH, factor: 1.0 },
+  human: { phase: 0, t0: ORBIT_EPOCH, factor: 1.0 },
+};
+// 後方互換: 旧 orbitSpeeds API を引き続き露出 (現在の倍率だけ)
+function orbitSpeedsBroadcastObj() {
+  return {
+    whale: orbitState.whale.factor, whalePhase: orbitState.whale.phase, whaleT0: orbitState.whale.t0,
+    fox:   orbitState.fox.factor,   foxPhase:   orbitState.fox.phase,   foxT0:   orbitState.fox.t0,
+    human: orbitState.human.factor, humanPhase: orbitState.human.phase, humanT0: orbitState.human.t0,
+  };
+}
 
 io.on('connection', (socket) => {
   const color = randomColor();
   const me = {
     color,
     role: 'camera',
-    lightOn: true,
+    lightOn: false,
     x: 0, y: 0, z: 0,
     qx: 0, qy: 0, qz: 0, qw: 1,
     hasPose: false,
@@ -94,7 +110,7 @@ io.on('connection', (socket) => {
   // 接続時に viewerEye も送る
   socket.emit('viewerEye', viewerEye);
   // 接続時に全周回オブジェクトの速度倍率を送る
-  socket.emit('orbitSpeed', orbitSpeeds);
+  socket.emit('orbitSpeed', orbitSpeedsBroadcastObj());
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -183,15 +199,26 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('spray', data);
   });
 
-  // Master からの鯨周回速度設定
+  // Master からの周回速度設定
+  //   各倍率変更時、その時点の累積位相を凍結し新しい factor / t0 で次区間を開始する。
+  //   これにより周回位置が変更前後で「飛ばず」連続し、新規参加クライアントも同じ位相を再現できる。
   socket.on('orbitSpeed', (data) => {
     const sender = users.get(socket.id);
     if (!sender || sender.role !== 'master') return;
     if (!data || typeof data !== 'object') return;
-    if (typeof data.whale === 'number' && isFinite(data.whale)) orbitSpeeds.whale = data.whale;
-    if (typeof data.fox === 'number' && isFinite(data.fox)) orbitSpeeds.fox = data.fox;
-    if (typeof data.human === 'number' && isFinite(data.human)) orbitSpeeds.human = data.human;
-    io.emit('orbitSpeed', orbitSpeeds);
+    const now = Date.now();
+    function applyChange(key, newFactor) {
+      const s = orbitState[key];
+      if (!s) return;
+      // 直前まで factor で進めた分を phase に積み上げる
+      s.phase = s.phase + s.factor * (now - s.t0) / 1000;
+      s.t0 = now;
+      s.factor = newFactor;
+    }
+    if (typeof data.whale === 'number' && isFinite(data.whale)) applyChange('whale', data.whale);
+    if (typeof data.fox   === 'number' && isFinite(data.fox))   applyChange('fox',   data.fox);
+    if (typeof data.human === 'number' && isFinite(data.human)) applyChange('human', data.human);
+    io.emit('orbitSpeed', orbitSpeedsBroadcastObj());
   });
 
   // Master ロールからの強制ポーズ制御 → 全クライアントへ forcePose 配信

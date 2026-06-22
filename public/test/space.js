@@ -1098,18 +1098,24 @@
     const ORBIT_Y_BASE = 2.0;     // 高さ基準 (m)
     const ORBIT_Y_AMP  = 0.5;     // 高さ振幅 (m)
     const ORBIT_Y_FREQ = 2.0;     // 高さ振動周波数 (rad/s)
-    // 各周回オブジェクトの速度倍率 (master が個別制御、1.0 = 各モデル既定)
+    // 各周回オブジェクトの状態 (phase: factor-秒, t0: ms 絶対時刻, factor: 倍率)
+    //   theta(now) = (phase + factor * (Date.now() - t0) / 1000) × BASE_OMEGA
+    //   ─ 全クライアントが同じ Date.now() を共有 → 起動タイミングに依らず同じ位置を再現
+    //   ─ 速度倍率変更時はサーバーが phase を凍結し全員へ再ブロードキャストするので、
+    //     どのクライアントも同じ位置に「飛ばず」追従する。
     const WHALE_BASE_OMEGA = 1.0;                         // rad/s
-    let whaleSpeedFactor = 1.0;
-    let whaleTheta = 0;                                   // 累積角度 (rad)
-    // Fox 既定: 3分で1周
-    const FOX_BASE_OMEGA = (2 * Math.PI) / 180.0;         // rad/s
-    let foxSpeedFactor = 1.0;
-    let foxTheta = 0;                                     // 累積角度 (rad)
-    // Human 既定: 周長/120秒
-    // ※ HUMAN_RECT_PERIM は後で宣言されるので、tick 時点で参照
-    let humanSpeedFactor = 1.0;
-    let humanS = 0;                                       // 累積周長距離 (m)
+    const FOX_BASE_OMEGA = (2 * Math.PI) / 180.0;         // rad/s (3分で1周)
+    let whaleOrbitState = { phase: 0, t0: Date.now(), factor: 1.0 };
+    let foxOrbitState   = { phase: 0, t0: Date.now(), factor: 1.0 };
+    let humanOrbitState = { phase: 0, t0: Date.now(), factor: 1.0 };
+    // 後方互換用ショートカット (UI 表示専用)
+    function whaleSpeedFactorValue() { return whaleOrbitState.factor; }
+    function foxSpeedFactorValue()   { return foxOrbitState.factor; }
+    function humanSpeedFactorValue() { return humanOrbitState.factor; }
+    // 現在の累積 factor-秒
+    function whaleAccum() { return whaleOrbitState.phase + whaleOrbitState.factor * (Date.now() - whaleOrbitState.t0) / 1000; }
+    function foxAccum()   { return foxOrbitState.phase   + foxOrbitState.factor   * (Date.now() - foxOrbitState.t0)   / 1000; }
+    function humanAccum() { return humanOrbitState.phase + humanOrbitState.factor * (Date.now() - humanOrbitState.t0) / 1000; }
 
     let whaleObj = null;
     let whaleMixer = null;
@@ -1799,11 +1805,20 @@
       myFlashlight.light.visible = on;
       myFlashlight.cone.visible = on;
     }
+    // 初期は OFF (ユーザー要求: ライトは標準で全てオフ)
+    setMyFlashlight(false);
 
     // ============================================================
     // アバター管理
     // ============================================================
     const avatars = new Map(); // id -> { grp, color, targetPos, targetQuat }
+
+    // 自分が observer のときに他の observer を非表示にする判定
+    //   - master からも全 observer は見えてほしいので master は除外
+    //   - camera 同士は通常通り表示
+    function isHiddenAvatar(otherRole) {
+      return ROLE === 'observer' && otherRole === 'observer';
+    }
 
     function spawnRemoteAvatar(id, u) {
       if (avatars.has(id)) return;
@@ -1811,9 +1826,15 @@
       grp.position.set(u.x || 0, u.y || 2, u.z || 0);
       grp.quaternion.set(u.qx || 0, u.qy || 0, u.qz || 0, u.qw || 1);
       const flashlight = makeFlashlight(grp, u.color);
-      const initialOn = (u.lightOn !== false);
+      const initialOn = (u.lightOn === true);  // 既定 OFF、明示的に true のときだけ ON
       flashlight.light.visible = initialOn;
       flashlight.cone.visible = initialOn;
+      // observer 同士はお互いに非表示 (アバター + ライトコーン + フレーム)
+      if (isHiddenAvatar(u.role)) {
+        grp.visible = false;
+        flashlight.light.visible = false;
+        flashlight.cone.visible = false;
+      }
       // 実画面サイズで表示フレーム生成
       const fw = (u.display && u.display.width)  || 0.5;
       const fh = (u.display && u.display.height) || 0.3;
@@ -2300,21 +2321,23 @@
         applyYawPitch();
       });
 
-      // ライト ON/OFF トグル (オブザーバー専用)
-      let lightOn = true;
+      // ライト ON/OFF トグル (オブザーバー専用、初期 OFF)
+      let lightOn = false;
       const lightBtn = document.getElementById('obs-light-toggle');
+      function syncLightBtn() {
+        if (!lightBtn) return;
+        lightBtn.textContent = '🔦 ライト ' + (lightOn ? 'ON' : 'OFF');
+        lightBtn.style.background = lightOn ? '#fbbf24' : '#6b7280';
+        lightBtn.style.color = lightOn ? '#422006' : '#1f2937';
+      }
+      syncLightBtn();
       function toggleLight() {
         lightOn = !lightOn;
         setMyFlashlight(lightOn);
-        // 全クライアントに同期
         if (socket && socket.connected) {
           socket.emit('light', { on: lightOn });
         }
-        if (lightBtn) {
-          lightBtn.textContent = '🔦 ライト ' + (lightOn ? 'ON' : 'OFF');
-          lightBtn.style.background = lightOn ? '#fbbf24' : '#6b7280';
-          lightBtn.style.color = lightOn ? '#422006' : '#1f2937';
-        }
+        syncLightBtn();
       }
       if (lightBtn) lightBtn.addEventListener('click', toggleLight);
 
@@ -2823,11 +2846,21 @@
         spawnRemoteAvatar(id, u);
         updateCount();
       });
-      socket.on('pose', ({ id, x, y, z, qx, qy, qz, qw }) => {
+      socket.on('pose', ({ id, role, x, y, z, qx, qy, qz, qw }) => {
         const a = avatars.get(id);
         if (!a) return;
         a.targetPos.set(x, y, z);
         a.targetQuat.set(qx, qy, qz, qw);
+        // role が変わったら observer 同士の非表示判定を更新
+        if (typeof role === 'string' && role !== a.role) {
+          a.role = role;
+          const hide = isHiddenAvatar(role);
+          if (a.grp) a.grp.visible = !hide;
+          if (a.flashlight) {
+            a.flashlight.light.visible = !hide && (a.lightOn === true);
+            a.flashlight.cone.visible  = !hide && (a.lightOn === true);
+          }
+        }
       });
       socket.on('leave', ({ id }) => {
         despawnRemoteAvatar(id);
@@ -2878,29 +2911,44 @@
         processSprayEvent(data);
       });
 
-      // 周回速度倍率 (master が個別制御、全員へ配信)
+      // 周回状態 (絶対時刻位相方式)
+      //   新プロトコル: { whale: factor, whalePhase, whaleT0, fox: ..., human: ... }
+      //   旧プロトコル (factor のみ) も後方互換として受け付ける
       socket.on('orbitSpeed', (data) => {
         if (!data || typeof data !== 'object') return;
-        const set = (k, factor, inputId) => {
+        const updateUiInput = (factor, inputId) => {
           if (typeof factor !== 'number' || !isFinite(factor)) return;
           const el = document.getElementById(inputId);
           if (el && document.activeElement !== el) el.value = factor.toFixed(2);
         };
+        function applyState(state, factor, phase, t0) {
+          if (typeof phase === 'number' && typeof t0 === 'number' && isFinite(phase) && isFinite(t0)) {
+            // 新プロトコル: phase + t0 + factor を全部更新 (位相凍結状態を再現)
+            state.phase = phase;
+            state.t0 = t0;
+            state.factor = factor;
+          } else {
+            // 旧プロトコル: factor だけが来た場合、ローカルで位相凍結
+            state.phase = state.phase + state.factor * (Date.now() - state.t0) / 1000;
+            state.t0 = Date.now();
+            state.factor = factor;
+          }
+        }
         if (typeof data.whale === 'number' && isFinite(data.whale)) {
-          whaleSpeedFactor = data.whale;
-          set('whale', data.whale, 'm-whale-speed');
+          applyState(whaleOrbitState, data.whale, data.whalePhase, data.whaleT0);
+          updateUiInput(data.whale, 'm-whale-speed');
         }
         if (typeof data.fox === 'number' && isFinite(data.fox)) {
-          foxSpeedFactor = data.fox;
-          set('fox', data.fox, 'm-fox-speed');
+          applyState(foxOrbitState, data.fox, data.foxPhase, data.foxT0);
+          updateUiInput(data.fox, 'm-fox-speed');
         }
         if (typeof data.human === 'number' && isFinite(data.human)) {
-          humanSpeedFactor = data.human;
-          set('human', data.human, 'm-human-speed');
+          applyState(humanOrbitState, data.human, data.humanPhase, data.humanT0);
+          updateUiInput(data.human, 'm-human-speed');
         }
-        log('orbit speeds: whale=' + whaleSpeedFactor.toFixed(2) +
-            ' fox=' + foxSpeedFactor.toFixed(2) +
-            ' human=' + humanSpeedFactor.toFixed(2), 'ok');
+        log('orbit speeds: whale=' + whaleOrbitState.factor.toFixed(2) +
+            ' fox=' + foxOrbitState.factor.toFixed(2) +
+            ' human=' + humanOrbitState.factor.toFixed(2), 'ok');
       });
 
       // 共通視点位置
@@ -3103,27 +3151,28 @@
         updateMasterViewFrustums();
       }
 
-      // Human (human_1) アニメ + ルートモーション無効化 + 長方形外周周回 (累積距離方式)
+      // Human (human_1) アニメ + ルートモーション無効化 + 長方形外周周回 (絶対時刻位相方式)
       if (humanObj) {
         const dtH = humanClock.getDelta();
         if (humanMixer) humanMixer.update(dtH);
         if (humanRootBone && humanRootInitPos) {
           humanRootBone.position.set(0, humanRootInitPos.y, 0);
         }
-        // 既定 = 周長 / 120秒、これに humanSpeedFactor 倍率を掛けた速度で進む
+        // 距離 (m) = humanBaseSpeed × accum(factor-秒)
         const humanBaseSpeed = HUMAN_RECT_PERIM / HUMAN_PERIOD_SEC;
-        humanS += humanBaseSpeed * humanSpeedFactor * dtH;
-        const pt = humanRectPositionAt(humanS);
+        const humanDist = humanBaseSpeed * humanAccum();
+        const pt = humanRectPositionAt(humanDist);
         humanOrbitGroup.position.set(pt.x, 0, pt.z);
         humanOrbitGroup.rotation.y = Math.atan2(pt.dx, pt.dz);
       }
 
-      // Fox (Fox_1) アニメーション + 楕円軌道周回 (累積角度方式)
+      // Fox (Fox_1) アニメーション + 楕円軌道周回 (絶対時刻位相方式)
       if (foxObj) {
         const dtF = foxClock.getDelta();
         if (foxMixer) foxMixer.update(dtF);
 
-        foxTheta += FOX_BASE_OMEGA * foxSpeedFactor * dtF;
+        // 角度 (rad) = FOX_BASE_OMEGA × accum(factor-秒)
+        const foxTheta = FOX_BASE_OMEGA * foxAccum();
         // 楕円: x = SEMI_X * sin(theta), z = CENTER_Z + SEMI_Z * cos(theta)
         foxOrbitGroup.position.x = FOX_SEMI_X * Math.sin(foxTheta);
         foxOrbitGroup.position.y = 0;
@@ -3156,12 +3205,12 @@
         const dtW = whaleClock.getDelta();
         if (whaleMixer) whaleMixer.update(dtW);
 
-        // 累積角度方式 (速度変更で位置が飛ばない)
-        whaleTheta += WHALE_BASE_OMEGA * whaleSpeedFactor * dtW;
+        // 絶対時刻位相方式 (全クライアントで Date.now() を共有 → ロード時刻に依らず同じ位置)
+        const whaleTheta = WHALE_BASE_OMEGA * whaleAccum();
         whaleOrbitPivot.rotation.y = -whaleTheta;
 
-        // 上下振動 (時刻ベース、速度とは独立)
-        const t = performance.now() * 0.001;
+        // 上下振動も絶対時刻ベース化 (Date.now() ms × 1e-3 を秒として使う)
+        const t = Date.now() * 0.001;
         whaleOrbitPivot.position.y =
           ORBIT_Y_BASE + Math.sin(t * ORBIT_Y_FREQ) * ORBIT_Y_AMP;
       }
