@@ -1600,6 +1600,9 @@
     const _oaOffsetQuat = new THREE.Quaternion();
     const _oaEuler = new THREE.Euler(0, 0, 0, 'YXZ');
     const _oaEye = new THREE.Vector3();
+    const _oaTmp = new THREE.Vector3();
+    // スマホ用: アバターから window までの距離 (= 視線方向 20cm 先)
+    const CAM_WINDOW_DIST = 0.20;
     // 180° around Y: avatar の local +Z (背中) を local -Z (前方) に転回するためのプリセット
     const _oaFlipQ = new THREE.Quaternion(0, 1, 0, 0); // axis=Y, angle=π
     function applyOffAxisProjection(cam, eye, displayCenter, displayQuat, w, h, near, far) {
@@ -1947,6 +1950,33 @@
       uiToggleBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); });
     }
 
+    // スマホ (camera ロール) 用 Off-Axis トグル
+    //   - eye   = アバター位置 (= camera.position)
+    //   - window = 視線方向 20cm 先、サイズ = myDisplay.width/height (自動推定 or サーバー保持値)
+    //   ボタン押下時に myDisplay.offaxis をトグルし、サーバーへも notify (master の controlPose で潰されないため)
+    const camOaBtn = document.getElementById('cam-offaxis-toggle');
+    function syncCamOaBtn() {
+      if (!camOaBtn) return;
+      const on = !!myDisplay.offaxis;
+      camOaBtn.textContent = 'Off-Axis ' + (on ? 'ON' : 'OFF');
+      camOaBtn.classList.toggle('is-on', on);
+    }
+    if (camOaBtn) {
+      syncCamOaBtn();
+      camOaBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        myDisplay.offaxis = !myDisplay.offaxis;
+        if (socket && socket.connected) {
+          socket.emit('displayConfig', { offaxis: myDisplay.offaxis });
+        }
+        log('camera offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
+        syncCamOaBtn();
+      });
+      camOaBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); });
+      // サーバーからの displayConfig 反映時にも追従させる
+      state.__syncCamOaBtn = syncCamOaBtn;
+    }
+
     // スプレーボタン (画面上部中央の丸ボタン、UI 非表示時のみ可視)
     //   - 押下中: 円錐スプレーを連続発射 (床にペイント蓄積、全クライアントへ同期)
     //   - 離す: スプレー停止 (着色結果は保持)
@@ -2046,6 +2076,11 @@
     // ============================================================
     // ロール別: 入室 + コントロール
     // ============================================================
+    // role 用 body class (CSS で UI 出し分け)
+    document.body.classList.toggle('is-camera',   ROLE === 'camera');
+    document.body.classList.toggle('is-observer', ROLE === 'observer');
+    document.body.classList.toggle('is-master',   ROLE === 'master');
+
     if (ROLE === 'observer') {
       document.getElementById('enter-overlay').style.display = 'none';
       document.getElementById('observer-panel').style.display = 'block';
@@ -2915,6 +2950,8 @@
               ' offaxis=' + myDisplay.offaxis, 'ok');
           // オブザーバーパネルの off-axis 表示も追従
           if (typeof state.__syncObsOffaxisUI === 'function') state.__syncObsOffaxisUI();
+          // スマホ画面上部の off-axis ボタンも追従
+          if (typeof state.__syncCamOaBtn === 'function') state.__syncCamOaBtn();
         } else {
           // 部分マージ
           const prev = remoteDisplays.get(id) || {};
@@ -3258,25 +3295,36 @@
           _oaSavePos.copy(camera.position);
           _oaSaveQuat.copy(camera.quaternion);
 
-          // dispCenter = アバター位置 (= 物理的に画面がある場所)
-          _oaDispCenter.copy(_oaSavePos);
-          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
-
-          // ディスプレイ姿勢 = avatar quaternion × Euler(yaw/pitch/roll) × 180°around-Y
-          //   180° flip の意味:
-          //     Three.js カメラの「前方」は local -Z だが、applyOffAxisProjection は
-          //     local +Z を「画面の表側 (viewer 側)」として扱う。
-          //     flip しないと display 法線が avatar の後頭部方向を向き、eye は背面側になって
-          //     d<=0 で off-axis が無音失敗する。
-          //     180° around Y を後段で掛けて local +Z = avatar の前方 = eye 方向にする。
-          _oaEuler.set(
-            myDisplay.pitch * Math.PI / 180,
-            myDisplay.yaw   * Math.PI / 180,
-            myDisplay.roll  * Math.PI / 180,
-            'YXZ'
-          );
-          _oaOffsetQuat.setFromEuler(_oaEuler);
-          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaOffsetQuat).multiply(_oaFlipQ);
+          // ロール別 off-axis ジオメトリ:
+          if (ROLE === 'camera') {
+            // スマホ視点:
+            //   ・eye = アバター位置 = camera.position (= ユーザーの目の位置)
+            //   ・dispCenter = アバターの **視線方向 20cm 先**
+            //   ・display 姿勢 = camera.quaternion (画面はユーザーに正対)
+            //     → display 法線 (local +Z) = camera local +Z = カメラ背面 = eye 側
+            //     → flip 不要、applyOffAxisProjection の d > 0 が自然に成立
+            //   ・display サイズ = myDisplay.width/height (実機表示サイズ)
+            _oaEye.copy(_oaSavePos);
+            // forward = camera local -Z in world
+            _oaTmp.set(0, 0, -1).applyQuaternion(_oaSaveQuat);
+            _oaDispCenter.copy(_oaSavePos).addScaledVector(_oaTmp, CAM_WINDOW_DIST);
+            _oaDispQuat.copy(_oaSaveQuat);
+          } else {
+            // observer / master 視点:
+            //   ・eye = 共通固定点 viewerEye
+            //   ・dispCenter = アバター位置 (画面がそこに置かれている想定)
+            //   ・display 姿勢 = avatar quaternion × Euler × 180°flip
+            _oaDispCenter.copy(_oaSavePos);
+            _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+            _oaEuler.set(
+              myDisplay.pitch * Math.PI / 180,
+              myDisplay.yaw   * Math.PI / 180,
+              myDisplay.roll  * Math.PI / 180,
+              'YXZ'
+            );
+            _oaOffsetQuat.setFromEuler(_oaEuler);
+            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaOffsetQuat).multiply(_oaFlipQ);
+          }
 
           const ok = applyOffAxisProjection(
             camera, _oaEye, _oaDispCenter, _oaDispQuat,
