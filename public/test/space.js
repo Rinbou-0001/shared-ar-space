@@ -1617,21 +1617,24 @@
       _ay.set(0, 1, 0).applyQuaternion(displayQuat); // up
       _az.set(0, 0, 1).applyQuaternion(displayQuat); // normal (viewer side)
 
-      // 4隅 (BL, BR, TL) を eye 基準で計算
       const hw = w * 0.5, hh = h * 0.5;
-      // BL = D - hw*right - hh*up
-      _va.copy(displayCenter)
-         .addScaledVector(_ax, -hw).addScaledVector(_ay, -hh).sub(eye);
-      // BR = D + hw*right - hh*up
-      _vb.copy(displayCenter)
-         .addScaledVector(_ax, +hw).addScaledVector(_ay, -hh).sub(eye);
-      // TL = D - hw*right + hh*up
-      _vc.copy(displayCenter)
-         .addScaledVector(_ax, -hw).addScaledVector(_ay, +hh).sub(eye);
+      _va.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, -hh).sub(eye);
+      _vb.copy(displayCenter).addScaledVector(_ax, +hw).addScaledVector(_ay, -hh).sub(eye);
+      _vc.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, +hh).sub(eye);
 
-      // eye → display 面までの距離 (-面法線方向への射影)
-      const d = -_va.dot(_az);
-      if (d <= 0.001) return false; // eye が画面の裏 or 同一面上
+      let d = -_va.dot(_az);
+      // 自動補正: eye が画面の裏側にあった場合、displayQuat を 180°(Y軸) 反転して
+      //   法線をアイ側へ向け直し再計算する。これで avatar の向き / 位置に関係なく
+      //   off-axis が常に成立する (= "Z+ で無効" のような条件依存失敗が起きない)。
+      if (d <= 0.001) {
+        _az.negate();
+        _ax.negate(); // Y軸180°で X 軸も反転
+        _va.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, -hh).sub(eye);
+        _vb.copy(displayCenter).addScaledVector(_ax, +hw).addScaledVector(_ay, -hh).sub(eye);
+        _vc.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, +hh).sub(eye);
+        d = -_va.dot(_az);
+        if (d <= 0.001) return false; // eye が display 平面上 (退化ケース)
+      }
 
       const k = near / d;
       const l = _va.dot(_ax) * k;
@@ -3062,7 +3065,13 @@
         if (id === state.myId) {
           // 自分の VR camera を強制設定
           camera.position.set(x, y, z);
-          camera.quaternion.set(qx || 0, qy || 0, qz || 0, qw || 1);
+          // ROLE === 'camera' (スマホ) は DeviceOrientation が姿勢の真値なので、
+          //   master の姿勢を上書きしても次の gyro イベントで即上書きされて意味がない。
+          //   → position のみ反映、quaternion はジャイロに委ねる。
+          //   結果として「master の Yaw 指定がスマホで効かない / +Z 方向に固定される」現象を回避。
+          if (ROLE !== 'camera') {
+            camera.quaternion.set(qx || 0, qy || 0, qz || 0, qw || 1);
+          }
           if (ROLE === 'camera') {
             state.mySpawn = { x, y, z };
             // 歩行追跡もこの位置にリセット
