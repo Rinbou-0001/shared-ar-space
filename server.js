@@ -74,6 +74,10 @@ let orbitState = {
 // 後方互換: 旧 orbitSpeeds API を引き続き露出 (現在の倍率だけ)
 function orbitSpeedsBroadcastObj() {
   return {
+    // クライアントがサーバー時刻に同期するためのアンカー
+    //   client は (serverNow - 受信時の Date.now()) でオフセットを記録し、
+    //   以降の orbit 計算は (Date.now() + offset) を「サーバー時刻」として扱う
+    serverNow: Date.now(),
     whale: orbitState.whale.factor, whalePhase: orbitState.whale.phase, whaleT0: orbitState.whale.t0,
     fox:   orbitState.fox.factor,   foxPhase:   orbitState.fox.phase,   foxT0:   orbitState.fox.t0,
     human: orbitState.human.factor, humanPhase: orbitState.human.phase, humanT0: orbitState.human.t0,

@@ -1106,18 +1106,25 @@
     const WHALE_BASE_OMEGA = 1.0;                         // rad/s
     const FOX_BASE_OMEGA = (2 * Math.PI) / 180.0;         // rad/s (3分で1周)
     // 全クライアント共通の固定エポック (= サーバーと同じ Unix epoch 0)。
-    // broadcast 受信前から、Date.now() を共有する全クライアントが完全に同じ accum を計算する。
     let whaleOrbitState = { phase: 0, t0: 0, factor: 1.0 };
     let foxOrbitState   = { phase: 0, t0: 0, factor: 1.0 };
     let humanOrbitState = { phase: 0, t0: 0, factor: 1.0 };
+
+    // サーバー時刻オフセット (ms): サーバー時刻 - ローカル時刻
+    //   broadcast に同梱される serverNow から (serverNow - Date.now()) を記録し、
+    //   以降は (Date.now() + _serverClockOffset) を「サーバー時刻」として全クライアントで揃える。
+    //   これでデバイス間の OS 時計ずれ (NTP 非同期 / 数秒のクロックスキュー) を吸収する。
+    let _serverClockOffset = 0;
+    function syncedNow() { return Date.now() + _serverClockOffset; }
+
     // 後方互換用ショートカット (UI 表示専用)
     function whaleSpeedFactorValue() { return whaleOrbitState.factor; }
     function foxSpeedFactorValue()   { return foxOrbitState.factor; }
     function humanSpeedFactorValue() { return humanOrbitState.factor; }
-    // 現在の累積 factor-秒
-    function whaleAccum() { return whaleOrbitState.phase + whaleOrbitState.factor * (Date.now() - whaleOrbitState.t0) / 1000; }
-    function foxAccum()   { return foxOrbitState.phase   + foxOrbitState.factor   * (Date.now() - foxOrbitState.t0)   / 1000; }
-    function humanAccum() { return humanOrbitState.phase + humanOrbitState.factor * (Date.now() - humanOrbitState.t0) / 1000; }
+    // 現在の累積 factor-秒 (サーバー時刻ベース)
+    function whaleAccum() { return whaleOrbitState.phase + whaleOrbitState.factor * (syncedNow() - whaleOrbitState.t0) / 1000; }
+    function foxAccum()   { return foxOrbitState.phase   + foxOrbitState.factor   * (syncedNow() - foxOrbitState.t0)   / 1000; }
+    function humanAccum() { return humanOrbitState.phase + humanOrbitState.factor * (syncedNow() - humanOrbitState.t0) / 1000; }
 
     let whaleObj = null;
     let whaleMixer = null;
@@ -2980,11 +2987,16 @@
         processSprayEvent(data);
       });
 
-      // 周回状態 (絶対時刻位相方式)
-      //   新プロトコル: { whale: factor, whalePhase, whaleT0, fox: ..., human: ... }
+      // 周回状態 (絶対時刻位相方式 + サーバー時刻同期)
+      //   新プロトコル: { serverNow, whale: factor, whalePhase, whaleT0, fox: ..., human: ... }
       //   旧プロトコル (factor のみ) も後方互換として受け付ける
       socket.on('orbitSpeed', (data) => {
         if (!data || typeof data !== 'object') return;
+        // サーバー時刻オフセットを更新 (デバイス間の OS 時計ずれを吸収)
+        if (typeof data.serverNow === 'number' && isFinite(data.serverNow)) {
+          _serverClockOffset = data.serverNow - Date.now();
+          try { log('clock sync: server offset = ' + _serverClockOffset + ' ms', 'ok'); } catch (_) {}
+        }
         const updateUiInput = (factor, inputId) => {
           if (typeof factor !== 'number' || !isFinite(factor)) return;
           const el = document.getElementById(inputId);
@@ -3278,8 +3290,8 @@
         const whaleTheta = WHALE_BASE_OMEGA * whaleAccum();
         whaleOrbitPivot.rotation.y = -whaleTheta;
 
-        // 上下振動も絶対時刻ベース化 (Date.now() ms × 1e-3 を秒として使う)
-        const t = Date.now() * 0.001;
+        // 上下振動もサーバー時刻ベース (全クライアントで完全に揃う)
+        const t = syncedNow() * 0.001;
         whaleOrbitPivot.position.y =
           ORBIT_Y_BASE + Math.sin(t * ORBIT_Y_FREQ) * ORBIT_Y_AMP;
       }
