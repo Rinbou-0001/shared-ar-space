@@ -3343,6 +3343,20 @@
             myDisplay.width, myDisplay.height,
             0.05, 200
           );
+          // 切替のたびに 1 度だけ診断ログ (eye/display geometry + ok 判定)
+          if (state.__lastOaLogged !== (ok ? 'ok' : 'fail')) {
+            state.__lastOaLogged = ok ? 'ok' : 'fail';
+            try {
+              const dE = _oaEye.distanceTo(_oaDispCenter);
+              log('off-axis ' + (ok ? 'OK' : 'FAIL') +
+                  ' role=' + ROLE +
+                  ' eye=(' + _oaEye.x.toFixed(2) + ',' + _oaEye.y.toFixed(2) + ',' + _oaEye.z.toFixed(2) + ')' +
+                  ' disp=(' + _oaDispCenter.x.toFixed(2) + ',' + _oaDispCenter.y.toFixed(2) + ',' + _oaDispCenter.z.toFixed(2) + ')' +
+                  ' dist=' + dE.toFixed(2) + 'm' +
+                  ' size=' + myDisplay.width.toFixed(2) + '×' + myDisplay.height.toFixed(2) + 'm',
+                ok ? 'ok' : 'err');
+            } catch (_) {}
+          }
           if (!ok) {
             camera.updateProjectionMatrix();
           }
@@ -3355,6 +3369,8 @@
           camera.position.copy(_oaSavePos);
           camera.quaternion.copy(_oaSaveQuat);
         } else {
+          // off-axis OFF に切替 → 次回 ON 時に再度ログを出すためフラグをリセット
+          if (state.__lastOaLogged) state.__lastOaLogged = null;
           // 通常の対称 perspective に復帰
           camera.aspect = window.innerWidth / (window.innerHeight - 44);
           camera.fov = 72;
