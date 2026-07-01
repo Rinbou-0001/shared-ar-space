@@ -600,29 +600,107 @@
       applyPaintTo(paintRT, uv, uvRadius, color, seed);
     }
 
-    // 床マテリアル: 基本色 + ペイントテクスチャ (premultiplied) を OVER 合成
-    //   paint.rgb は既に paint.a を乗算済み → そのまま baseColor 上に重ねる
+    // 床マテリアル: 水面シミュレーション (試験実装)
+    //   ・頂点シェーダ: 4 波長の sin 合成で頂点を Y 方向に変位 → 3D 波
+    //   ・フラグメントシェーダ:
+    //     - 波の勾配から法線を数値微分で算出
+    //     - Fresnel で浅色↔深色を混合
+    //     - Blinn-Phong 風のスペキュラでハイライト
+    //     - 高周波の疑似コースティクスを加算
+    //     - スプレーペイントは水面の上に浮かぶ形で OVER 合成 (paint.a 依存)
+    //   ・u_time は tick() で毎フレーム更新
+    //   ・全クライアントで同期させたい場合は syncedNow() を渡す
     const floorMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        u_baseColor: { value: new THREE.Color(0x55555c) },
-        u_paint:     { value: paintRT.texture },
+        u_time:          { value: 0 },
+        u_deepColor:     { value: new THREE.Color(0x0a2540) },   // 深部の暗い青
+        u_shallowColor:  { value: new THREE.Color(0x2e88b0) },   // 浅部の空色寄り
+        u_specColor:     { value: new THREE.Color(0xfff5e0) },   // 太陽反射色
+        u_lightDir:      { value: new THREE.Vector3(0.4, 1.0, 0.3).normalize() },
+        u_paint:         { value: paintRT.texture },
       },
       vertexShader: `
         varying vec2 vUv;
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        uniform float u_time;
+
+        // 4 波の重ね合わせ (方向・波長・時間位相・振幅がバラバラ)
+        //   pos は plane local XY (メートル)。plane は後で -π/2 X回転され local Z → world Y。
+        float waveHeight(vec2 pos, float t) {
+          float h = 0.0;
+          h += sin(dot(pos, vec2( 0.30,  0.10)) + t * 0.9) * 0.10;
+          h += sin(dot(pos, vec2(-0.20,  0.35)) + t * 1.3) * 0.06;
+          h += sin(dot(pos, vec2( 0.60, -0.25)) + t * 1.9) * 0.035;
+          h += sin(dot(pos, vec2(-0.85, -0.40)) + t * 2.6) * 0.020;
+          return h;
+        }
+        // 中心差分で local 法線を算出 (up = 変位前の local +Z)
+        vec3 waveNormalLocal(vec2 pos, float t) {
+          float eps = 0.20;
+          float hL = waveHeight(pos - vec2(eps, 0.0), t);
+          float hR = waveHeight(pos + vec2(eps, 0.0), t);
+          float hD = waveHeight(pos - vec2(0.0, eps), t);
+          float hU = waveHeight(pos + vec2(0.0, eps), t);
+          // 高さの X/Y 勾配 → 法線 (local +Z を up 基準に)
+          return normalize(vec3(hL - hR, hD - hU, 2.0 * eps));
+        }
+
         void main() {
           vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          vec3 p = position;
+          p.z = waveHeight(p.xy, u_time);
+          vec4 wp = modelMatrix * vec4(p, 1.0);
+          vWorldPos = wp.xyz;
+          vec3 nLocal = waveNormalLocal(p.xy, u_time);
+          // 局所法線をワールド空間へ (床は -π/2 X 回転で local +Z が world +Y になる)
+          vWorldNormal = normalize(mat3(modelMatrix) * nLocal);
+          gl_Position = projectionMatrix * viewMatrix * wp;
         }
       `,
       fragmentShader: `
         precision highp float;
         varying vec2 vUv;
-        uniform vec3 u_baseColor;
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        uniform float u_time;
+        uniform vec3  u_deepColor;
+        uniform vec3  u_shallowColor;
+        uniform vec3  u_specColor;
+        uniform vec3  u_lightDir;
         uniform sampler2D u_paint;
+
         void main() {
+          vec3 N = normalize(vWorldNormal);
+          vec3 V = normalize(cameraPosition - vWorldPos);
+          vec3 L = normalize(u_lightDir);
+
+          // Fresnel (Schlick): 見下ろすと透けて浅色、水平近くだと反射が強くて深色
+          float NdotV = clamp(dot(N, V), 0.0, 1.0);
+          float F = pow(1.0 - NdotV, 4.0);
+
+          // ベース水色: 浅↔深 を Fresnel で補間 + 微妙な水平位置揺らぎ
+          vec3 waterColor = mix(u_shallowColor, u_deepColor, F);
+
+          // Blinn-Phong スペキュラ (太陽の反射)
+          vec3 H = normalize(L + V);
+          float NdotH = max(dot(N, H), 0.0);
+          float spec = pow(NdotH, 80.0);
+          waterColor += u_specColor * spec * 0.6;
+
+          // 疑似コースティクス: 光が水面で屈折して床に当たったような明線
+          //   高周波の 2 波を掛け合わせ、明るい部分だけを強調
+          vec2 cp = vWorldPos.xz * 0.35 + N.xz * 0.6;
+          float c1 = sin(cp.x + u_time * 1.4);
+          float c2 = sin(cp.y - u_time * 1.7);
+          float caustic = max(c1 * c2, 0.0);
+          caustic = pow(caustic, 6.0) * 0.35;
+          waterColor += vec3(0.6, 0.9, 1.0) * caustic;
+
+          // スプレーペイント (premultiplied) を水面上に OVER 合成
           vec4 paint = texture2D(u_paint, vUv);
-          // premultiplied alpha: paint.rgb は paint.a 乗算済みなので加算ベースで合成
-          vec3 col = u_baseColor * (1.0 - paint.a) + paint.rgb;
+          vec3 col = waterColor * (1.0 - paint.a) + paint.rgb;
+
           gl_FragColor = vec4(col, 1.0);
         }
       `,
@@ -631,9 +709,11 @@
     // ============================================================
     // 環境構築: 床・グリッド・境界・スポーン体積 (中心原点)
     // ============================================================
-    // 床: 中心(0,0,0)、40×40 (スプレーペイント可能な ShaderMaterial)
+    // 床: 中心(0,0,0)、40×40 の水面 (試験実装)
+    //   ・128×128 分割で頂点変位できる密度を確保 (16k 頂点、GPU 負荷は軽微)
+    //   ・法線を頂点シェーダで計算するため flatShading 不要
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
+      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE, 128, 128),
       floorMaterial
     );
     ground.rotation.x = -Math.PI / 2;
@@ -3286,6 +3366,10 @@
 
     function tick() {
       requestAnimationFrame(tick);
+      // 水面シェーダの時刻更新 (サーバー時刻ベース → 全クライアントで波が同位相)
+      if (floorMaterial && floorMaterial.uniforms && floorMaterial.uniforms.u_time) {
+        floorMaterial.uniforms.u_time.value = syncedNow() * 0.001;
+      }
       // スプレー発射中の床ヒット位置リング更新 (発射者本人のみ可視)
       updateSprayConeVis();
 
