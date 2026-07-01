@@ -3839,17 +3839,14 @@
             // observer / master 視点:
             //   ・eye = 共通固定点 viewerEye
             //   ・dispCenter = アバター位置 (画面がそこに置かれている想定)
-            //   ・display 姿勢 = avatar quaternion × Euler × 180°flip
+            //   ・display 姿勢 = avatar quaternion × 180°flip
+            //     (旧: × Euler(myDisplay.yaw/pitch/roll) を挟んでいたが、master の
+            //      applyControl が同じ Yaw を controlPose[camera.quat] と
+            //      displayConfig[myDisplay.yaw] の両経路で送るため二重適用となり、
+            //      Yaw≠0 でエイリアスや auto-flip 失敗を引き起こしていた)
             _oaDispCenter.copy(_oaSavePos);
             _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
-            _oaEuler.set(
-              myDisplay.pitch * Math.PI / 180,
-              myDisplay.yaw   * Math.PI / 180,
-              myDisplay.roll  * Math.PI / 180,
-              'YXZ'
-            );
-            _oaOffsetQuat.setFromEuler(_oaEuler);
-            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaOffsetQuat).multiply(_oaFlipQ);
+            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
           }
 
           const ok = applyOffAxisProjection(
