@@ -725,7 +725,11 @@
     // 波紋キュー + アイドル判定
     const pendingRipples = [];   // { u, v, strength, radius }
     let simActivity = 0;         // > 0 の間はシミュレーションを回す (フレームカウント)
-    const SIM_ACTIVE_FRAMES = 600; // 波紋 1 つで ~10s 走らせる (60fps 換算)
+    //   波紋 1 つで 30s (=1800 フレーム) 継続。damping 0.994 なら 30s 後は
+    //   振幅 0.994^1800 ≈ 2e-5 まで減衰しているので視覚的にゼロ。
+    //   数秒間隔の 「静止する挙動」 = simActivity 切れによるシミュ停止 だったが、
+    //   十分大きな値にしたので途切れず滑らかに減衰する。
+    const SIM_ACTIVE_FRAMES = 1800;
 
     // シェーダー制御共有パラメータ (master が変更、broadcast で全クライアントに配信)
     //   rippleMinM/rippleMaxM: 発生する波紋の直径 (m)。この範囲で決定的乱数で選ぶ
@@ -734,6 +738,7 @@
       rippleMinM: 0.5,
       rippleMaxM: 1.5,
       waveSpeed:  12.5,
+      rippleSpawnRate: 0.30,  // 自動発生の頻度 (回/秒)。0 = 自動発生なし
     };
     function applyWaveSpeed(v) {
       // 0..20 を c² 0..0.48 に線形マップ (CFL 安定条件 c²<0.5 の範囲内で最大化)
@@ -777,7 +782,9 @@
     // 1 フレーム分の波動シミュレーションを実行 (注入 + 伝播)
     function simulateWaveStep() {
       const anyDrop = pendingRipples.length > 0;
-      if (!anyDrop && simActivity <= 0) return;
+      // 自動発生の rate > 0 のときは常時シミュを走らせる (途中で凍結しない)
+      const alwaysActive = waveSimConfig.rippleSpawnRate > 0.001;
+      if (!anyDrop && simActivity <= 0 && !alwaysActive) return;
 
       const prevTarget = renderer.getRenderTarget();
       const oldAutoClear = renderer.autoClear;
@@ -822,19 +829,21 @@
       n = n ^ (n >>> 16);
       return n >>> 0;
     }
-    // syncedNow() を共有するので全クライアントが同じ発生時刻/位置になる
+    // rippleSpawnRate (回/秒) から自動発生。全クライアントが syncedNow() を共有するので
+    //   bucket 番号が一致 → 同じ位置/サイズの波紋が同期して発生する。
+    //   rate=0 の場合は自動発生停止 (スプレー等の外部イベントは動作)。
     let _lastRandomBucket = -1;
     function maybeSpawnRandomRipple() {
+      const rate = waveSimConfig.rippleSpawnRate;
+      if (rate <= 0.001) return;
+      const bucketMs = 1000 / rate;               // rate=1 → 1000ms/bucket, rate=5 → 200ms
       const now = syncedNow();
-      const bucket = Math.floor(now / 1500);  // 1.5s 毎に判定
+      const bucket = Math.floor(now / bucketMs);
       if (bucket === _lastRandomBucket) return;
       _lastRandomBucket = bucket;
-      // 3 バケットに 1 回 (平均 4.5s 毎) 発生
-      if ((hash32(bucket * 7) & 0x3) !== 0) return;
-      const h = hash32(bucket);
+      const h = hash32(bucket * 31 + 17);
       const u = (h & 0xFFFF) / 0xFFFF;
       const v = ((h >>> 16) & 0xFFFF) / 0xFFFF;
-      // サイズは min..max からバケット決定的乱数で選択 → 全クライアントで一致
       const radiusUV = chooseRippleRadiusUV(bucket * 31 + 17);
       injectRippleLocal(u, v, 0.55, radiusUV);
     }
@@ -3161,6 +3170,7 @@
       // ============================================================
       const rippleMinInput  = document.getElementById('m-ripple-min');
       const rippleMaxInput  = document.getElementById('m-ripple-max');
+      const rippleRateInput = document.getElementById('m-ripple-rate');
       const waveSpeedInput  = document.getElementById('m-wave-speed');
       const shaderApplyBtn  = document.getElementById('m-shader-apply');
       function applyShaderConfig() {
@@ -3173,6 +3183,10 @@
           const v = parseFloat(rippleMaxInput.value);
           if (isFinite(v)) data.rippleMaxM = v;
         }
+        if (rippleRateInput) {
+          const v = parseFloat(rippleRateInput.value);
+          if (isFinite(v)) data.rippleSpawnRate = v;
+        }
         if (waveSpeedInput) {
           const v = parseFloat(waveSpeedInput.value);
           if (isFinite(v)) data.waveSpeed = v;
@@ -3181,11 +3195,12 @@
           socket.emit('shaderConfig', data);
           log('shader emit: min=' + (data.rippleMinM ?? '-') +
               ' max=' + (data.rippleMaxM ?? '-') +
+              ' rate=' + (data.rippleSpawnRate ?? '-') +
               ' speed=' + (data.waveSpeed ?? '-'), 'ok');
         }
       }
       if (shaderApplyBtn) shaderApplyBtn.addEventListener('click', applyShaderConfig);
-      [rippleMinInput, rippleMaxInput, waveSpeedInput].forEach((el) => {
+      [rippleMinInput, rippleMaxInput, rippleRateInput, waveSpeedInput].forEach((el) => {
         if (!el) return;
         el.addEventListener('keydown', (ev) => {
           if (ev.key === 'Enter') {
@@ -3490,18 +3505,25 @@
           waveSimConfig.waveSpeed = data.waveSpeed;
           applyWaveSpeed(waveSimConfig.waveSpeed);
         }
+        if (typeof data.rippleSpawnRate === 'number' && isFinite(data.rippleSpawnRate)) {
+          waveSimConfig.rippleSpawnRate = data.rippleSpawnRate;
+          // rate 変更時は _lastRandomBucket をリセット (次バケットからの取り直し)
+          _lastRandomBucket = -1;
+        }
         // master UI 入力欄を反映 (フォーカス中は上書きしない)
         const setInp = (id, v) => {
           const el = document.getElementById(id);
           if (el && document.activeElement !== el) el.value = v.toFixed(2);
         };
-        setInp('m-ripple-min', waveSimConfig.rippleMinM);
-        setInp('m-ripple-max', waveSimConfig.rippleMaxM);
-        setInp('m-wave-speed', waveSimConfig.waveSpeed);
+        setInp('m-ripple-min',  waveSimConfig.rippleMinM);
+        setInp('m-ripple-max',  waveSimConfig.rippleMaxM);
+        setInp('m-wave-speed',  waveSimConfig.waveSpeed);
+        setInp('m-ripple-rate', waveSimConfig.rippleSpawnRate);
         try {
           log('shaderConfig: min=' + waveSimConfig.rippleMinM.toFixed(2) +
               'm max=' + waveSimConfig.rippleMaxM.toFixed(2) +
-              'm speed=' + waveSimConfig.waveSpeed.toFixed(1), 'ok');
+              'm speed=' + waveSimConfig.waveSpeed.toFixed(1) +
+              ' rate=' + waveSimConfig.rippleSpawnRate.toFixed(2) + '/s', 'ok');
         } catch (_) {}
       });
 
