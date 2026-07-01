@@ -59,6 +59,11 @@ const orbState = { s: 0, y: 2.5 };
 // マルチディスプレイのオフアクシス投影用 共通視点位置
 let viewerEye = { x: 0, y: 2.0, z: 0 };
 
+// GPU 波動シミュレーション共有パラメータ (master が変更、全クライアントへ配信)
+//   rippleMinM / rippleMaxM: 発生する波紋の直径 min / max (メートル)
+//   waveSpeed              : 0-20 の抽象値、client 側で c² にマップ
+let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 12.5 };
+
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
 //   サーバーは baseOmega を知らないが phase/t0/factor だけで完全に同期させられる。
@@ -117,6 +122,8 @@ io.on('connection', (socket) => {
   socket.emit('viewerEye', viewerEye);
   // 接続時に全周回オブジェクトの速度倍率を送る
   socket.emit('orbitSpeed', orbitSpeedsBroadcastObj());
+  // 接続直後に現在のシェーダー設定 (波紋 min/max, 波速) を送る
+  socket.emit('shaderConfig', shaderConfig);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -219,6 +226,29 @@ io.on('connection', (socket) => {
   socket.on('ripple', (data) => {
     if (!data || typeof data !== 'object') return;
     socket.broadcast.emit('ripple', data);
+  });
+
+  // master からのシェーダー制御設定 (波紋 min/max, 波速) → 全クライアントへ配信
+  socket.on('shaderConfig', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.rippleMinM === 'number' && isFinite(data.rippleMinM)) {
+      shaderConfig.rippleMinM = Math.max(0.05, Math.min(10, data.rippleMinM));
+    }
+    if (typeof data.rippleMaxM === 'number' && isFinite(data.rippleMaxM)) {
+      shaderConfig.rippleMaxM = Math.max(0.1, Math.min(10, data.rippleMaxM));
+    }
+    if (typeof data.waveSpeed === 'number' && isFinite(data.waveSpeed)) {
+      shaderConfig.waveSpeed = Math.max(0, Math.min(20, data.waveSpeed));
+    }
+    // min > max のときは自動スワップ
+    if (shaderConfig.rippleMinM > shaderConfig.rippleMaxM) {
+      const t = shaderConfig.rippleMinM;
+      shaderConfig.rippleMinM = shaderConfig.rippleMaxM;
+      shaderConfig.rippleMaxM = t;
+    }
+    io.emit('shaderConfig', shaderConfig);
   });
 
   // Master からの周回速度設定

@@ -727,6 +727,34 @@
     let simActivity = 0;         // > 0 の間はシミュレーションを回す (フレームカウント)
     const SIM_ACTIVE_FRAMES = 600; // 波紋 1 つで ~10s 走らせる (60fps 換算)
 
+    // シェーダー制御共有パラメータ (master が変更、broadcast で全クライアントに配信)
+    //   rippleMinM/rippleMaxM: 発生する波紋の直径 (m)。この範囲で決定的乱数で選ぶ
+    //   waveSpeed: 0-20 の抽象値 → c² = waveSpeed * 0.024 (0..0.48 の範囲、CFL 上限内)
+    const waveSimConfig = {
+      rippleMinM: 0.5,
+      rippleMaxM: 1.5,
+      waveSpeed:  12.5,
+    };
+    function applyWaveSpeed(v) {
+      // 0..20 を c² 0..0.48 に線形マップ (CFL 安定条件 c²<0.5 の範囲内で最大化)
+      const c2 = Math.max(0, Math.min(0.48, v * 0.024));
+      simUpdateMat.uniforms.u_c2.value = c2;
+    }
+    applyWaveSpeed(waveSimConfig.waveSpeed);
+
+    // シード (整数) を [0,1] に落とす決定的乱数
+    function seededUnit(seed) {
+      const h = hash32(seed | 0);
+      return (h & 0xFFFF) / 0xFFFF;
+    }
+    // 波紋サイズを min..max の間から選択して UV 半径に変換
+    function chooseRippleRadiusUV(seed) {
+      const t = seededUnit(seed);
+      const sizeM = waveSimConfig.rippleMinM
+                  + (waveSimConfig.rippleMaxM - waveSimConfig.rippleMinM) * t;
+      return sizeM / FIELD_SIZE;
+    }
+
     function injectRippleLocal(u, v, strength, radius) {
       if (typeof u !== 'number' || typeof v !== 'number') return;
       pendingRipples.push({
@@ -806,7 +834,9 @@
       const h = hash32(bucket);
       const u = (h & 0xFFFF) / 0xFFFF;
       const v = ((h >>> 16) & 0xFFFF) / 0xFFFF;
-      injectRippleLocal(u, v, 0.55, 0.018);
+      // サイズは min..max からバケット決定的乱数で選択 → 全クライアントで一致
+      const radiusUV = chooseRippleRadiusUV(bucket * 31 + 17);
+      injectRippleLocal(u, v, 0.55, radiusUV);
     }
 
     // 床マテリアル: GPU 波動シミュレーション結果を法線・発光に反映
@@ -1166,8 +1196,10 @@
           _sprayUv.set(data.hitU, data.hitV);
           applyPaintTo(target.userData.paintRT, _sprayUv, uvR, color, time);
           // 床への着弾は波紋も呼ぶ (ローカル注入のみ、事象自体は spray broadcast 済み)
+          //   サイズは min..max から time シードで決定的に選択 → 全クライアント一致
           if (target === ground) {
-            injectRippleLocal(data.hitU, data.hitV, 0.35, Math.max(0.008, uvR * 0.5));
+            const rippleR = chooseRippleRadiusUV(Math.floor(time) * 13 + 7);
+            injectRippleLocal(data.hitU, data.hitV, 0.35, rippleR);
           }
           if (!_spraySeenObjects.has(target.uuid)) {
             _spraySeenObjects.add(target.uuid);
@@ -3111,6 +3143,46 @@
         });
       });
 
+      // ============================================================
+      // シェーダーコントロール タブ (波紋 min/max, 波速)
+      // ============================================================
+      const rippleMinInput  = document.getElementById('m-ripple-min');
+      const rippleMaxInput  = document.getElementById('m-ripple-max');
+      const waveSpeedInput  = document.getElementById('m-wave-speed');
+      const shaderApplyBtn  = document.getElementById('m-shader-apply');
+      function applyShaderConfig() {
+        const data = {};
+        if (rippleMinInput) {
+          const v = parseFloat(rippleMinInput.value);
+          if (isFinite(v)) data.rippleMinM = v;
+        }
+        if (rippleMaxInput) {
+          const v = parseFloat(rippleMaxInput.value);
+          if (isFinite(v)) data.rippleMaxM = v;
+        }
+        if (waveSpeedInput) {
+          const v = parseFloat(waveSpeedInput.value);
+          if (isFinite(v)) data.waveSpeed = v;
+        }
+        if (socket && socket.connected) {
+          socket.emit('shaderConfig', data);
+          log('shader emit: min=' + (data.rippleMinM ?? '-') +
+              ' max=' + (data.rippleMaxM ?? '-') +
+              ' speed=' + (data.waveSpeed ?? '-'), 'ok');
+        }
+      }
+      if (shaderApplyBtn) shaderApplyBtn.addEventListener('click', applyShaderConfig);
+      [rippleMinInput, rippleMaxInput, waveSpeedInput].forEach((el) => {
+        if (!el) return;
+        el.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            applyShaderConfig();
+            el.blur();
+          }
+        });
+      });
+
       // クリックでアバター選択 (raycaster はオブザーバー側にあるので簡易追加)
       const dom = renderer.domElement;
       const mray = new THREE.Raycaster();
@@ -3390,6 +3462,34 @@
           Number(data.strength) || 0.4,
           Number(data.radius)   || 0.018
         );
+      });
+
+      // シェーダー制御パラメータ (master 変更を全員に反映)
+      socket.on('shaderConfig', (data) => {
+        if (!data || typeof data !== 'object') return;
+        if (typeof data.rippleMinM === 'number' && isFinite(data.rippleMinM)) {
+          waveSimConfig.rippleMinM = data.rippleMinM;
+        }
+        if (typeof data.rippleMaxM === 'number' && isFinite(data.rippleMaxM)) {
+          waveSimConfig.rippleMaxM = data.rippleMaxM;
+        }
+        if (typeof data.waveSpeed === 'number' && isFinite(data.waveSpeed)) {
+          waveSimConfig.waveSpeed = data.waveSpeed;
+          applyWaveSpeed(waveSimConfig.waveSpeed);
+        }
+        // master UI 入力欄を反映 (フォーカス中は上書きしない)
+        const setInp = (id, v) => {
+          const el = document.getElementById(id);
+          if (el && document.activeElement !== el) el.value = v.toFixed(2);
+        };
+        setInp('m-ripple-min', waveSimConfig.rippleMinM);
+        setInp('m-ripple-max', waveSimConfig.rippleMaxM);
+        setInp('m-wave-speed', waveSimConfig.waveSpeed);
+        try {
+          log('shaderConfig: min=' + waveSimConfig.rippleMinM.toFixed(2) +
+              'm max=' + waveSimConfig.rippleMaxM.toFixed(2) +
+              'm speed=' + waveSimConfig.waveSpeed.toFixed(1), 'ok');
+        } catch (_) {}
       });
 
       // 周回状態 (絶対時刻位相方式 + サーバー時刻同期)
