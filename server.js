@@ -213,6 +213,14 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('spray', data);
   });
 
+  // 波紋イベント中継 (GPU 波動シミュレーション用: 発生位置 + 強度 + 時刻)
+  //   data = { u, v, strength, radius, time }
+  //   各クライアントが同一シミュレーションを走らせるので状態全体は送らない
+  socket.on('ripple', (data) => {
+    if (!data || typeof data !== 'object') return;
+    socket.broadcast.emit('ripple', data);
+  });
+
   // Master からの周回速度設定
   //   各倍率変更時、その時点の累積位相を凍結し新しい factor / t0 で次区間を開始する。
   //   これにより周回位置が変更前後で「飛ばず」連続し、新規参加クライアントも同じ位相を再現できる。

@@ -600,20 +600,225 @@
       applyPaintTo(paintRT, uv, uvRadius, color, seed);
     }
 
-    // 床マテリアル: フラグメントシェーダのみのランダム波紋 (試験実装)
-    //   ・頂点は変位させない (床は完全に平面)
-    //   ・N 個の "リップルスロット" が SLOT_PERIOD ごとに新しい波紋を独立に発生
-    //   ・各波紋は cycleIndex に対する hash から発生位置を決定 → 常にランダム
-    //   ・発生時刻も slot ごとに位相オフセット → 全部が同時発生せず時間的に分散
-    //   ・ガウス包絡 × 余弦振動で "広がる明線" として表現
-    //   ・勾配から法線を解析的に算出、Fresnel / Lambertian / Specular で立体感付与
-    //   ・スプレーペイントは水面の上に浮かぶ形で OVER 合成 (paint.a 依存)
+    // ============================================================
+    // GPU 波動シミュレーション (2D 波動方程式)
+    //   ・Ping-Pong RenderTarget で高さマップを毎フレーム更新
+    //   ・R = 現時刻の高さ、G = 前時刻の高さ (h_new = 2*h - h_prev + c² * ∇²h)
+    //   ・波紋はランダム発生 + スプレー時 + 外部イベントで注入
+    //   ・アイドル時 (simActivity=0) は更新スキップして GPU 負荷を抑制
+    //   ・複数クライアントで syncedNow() 共有 + イベント broadcast → 決定的に同じ状態
+    // ============================================================
+    let SIM_RES = 256;   // ベース解像度 (スマホは 128 に下げる可能性)
+    if (ROLE === 'camera') SIM_RES = 128;   // スマホは半分に
+
+    const simRTOpts = {
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+      wrapS: THREE.ClampToEdgeWrapping,
+      wrapT: THREE.ClampToEdgeWrapping,
+    };
+    let simRT_A = new THREE.WebGLRenderTarget(SIM_RES, SIM_RES, simRTOpts);
+    let simRT_B = new THREE.WebGLRenderTarget(SIM_RES, SIM_RES, simRTOpts);
+    // 両 RT をゼロにクリア (何も無い水面状態)
+    {
+      const prevT = renderer.getRenderTarget();
+      const prevCC = new THREE.Color(); renderer.getClearColor(prevCC);
+      const prevCA = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(simRT_A); renderer.clear();
+      renderer.setRenderTarget(simRT_B); renderer.clear();
+      renderer.setRenderTarget(prevT);
+      renderer.setClearColor(prevCC, prevCA);
+    }
+    let currentSimRT = simRT_A;
+    let nextSimRT    = simRT_B;
+
+    // 波動方程式シェーダ (updates R = h_new, G = h_curr from R = h_curr, G = h_prev)
+    const simUpdateMat = new THREE.ShaderMaterial({
+      uniforms: {
+        u_prev:    { value: simRT_A.texture },
+        u_texel:   { value: new THREE.Vector2(1 / SIM_RES, 1 / SIM_RES) },
+        u_c2:      { value: 0.30 },    // 波速² (CFL 安定条件で < 0.5)
+        u_damping: { value: 0.994 },   // 減衰率 (1 に近いほど長寿命)
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2 vUv;
+        uniform sampler2D u_prev;
+        uniform vec2  u_texel;
+        uniform float u_c2;
+        uniform float u_damping;
+        void main() {
+          vec4 s = texture2D(u_prev, vUv);
+          float h_curr = s.r;
+          float h_prev = s.g;
+          // 4 近傍 (Neumann 境界: エッジは自己反射で自然な壁になる)
+          float hL = texture2D(u_prev, vUv + vec2(-u_texel.x, 0.0)).r;
+          float hR = texture2D(u_prev, vUv + vec2( u_texel.x, 0.0)).r;
+          float hD = texture2D(u_prev, vUv + vec2(0.0, -u_texel.y)).r;
+          float hU = texture2D(u_prev, vUv + vec2(0.0,  u_texel.y)).r;
+          float lap = hL + hR + hD + hU - 4.0 * h_curr;
+          float h_new = 2.0 * h_curr - h_prev + u_c2 * lap;
+          h_new *= u_damping;
+          gl_FragColor = vec4(h_new, h_curr, 0.0, 1.0);
+        }
+      `,
+    });
+    const simScene = new THREE.Scene();
+    const simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), simUpdateMat);
+    simScene.add(simQuad);
+
+    // 波紋注入シェーダ (R チャネルにガウス状の "しずく" を加算)
+    //   加算ブレンドで既存の R に上乗せする
+    const dropShaderMat = new THREE.ShaderMaterial({
+      uniforms: {
+        u_dropCenter:   { value: new THREE.Vector2(0.5, 0.5) },
+        u_dropRadius:   { value: 0.02 },
+        u_dropStrength: { value: 0.5 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2 vUv;
+        uniform vec2  u_dropCenter;
+        uniform float u_dropRadius;
+        uniform float u_dropStrength;
+        void main() {
+          float d = distance(vUv, u_dropCenter);
+          if (d > u_dropRadius) discard;
+          // なだらかなガウス風 falloff (中心が最大、外周で 0)
+          float f = 1.0 - smoothstep(0.0, u_dropRadius, d);
+          f = f * f; // 中心を鋭く
+          gl_FragColor = vec4(u_dropStrength * f, 0.0, 0.0, 1.0);
+        }
+      `,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneFactor,   // 純加算 (R は既存に上乗せ、G/B は 0 で無変化)
+    });
+    const dropScene = new THREE.Scene();
+    const dropQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), dropShaderMat);
+    dropScene.add(dropQuad);
+
+    // 波紋キュー + アイドル判定
+    const pendingRipples = [];   // { u, v, strength, radius }
+    let simActivity = 0;         // > 0 の間はシミュレーションを回す (フレームカウント)
+    const SIM_ACTIVE_FRAMES = 600; // 波紋 1 つで ~10s 走らせる (60fps 換算)
+
+    function injectRippleLocal(u, v, strength, radius) {
+      if (typeof u !== 'number' || typeof v !== 'number') return;
+      pendingRipples.push({
+        u: Math.max(0, Math.min(1, u)),
+        v: Math.max(0, Math.min(1, v)),
+        strength: (typeof strength === 'number') ? strength : 0.4,
+        radius:   (typeof radius   === 'number') ? radius   : 0.015,
+      });
+      simActivity = SIM_ACTIVE_FRAMES;
+    }
+
+    // ローカルで発生 → サーバーへ notify + 自分の RT にも注入
+    function emitRipple(u, v, strength, radius) {
+      injectRippleLocal(u, v, strength, radius);
+      if (socket && socket.connected) {
+        socket.emit('ripple', { u, v, strength, radius, time: syncedNow() });
+      }
+    }
+
+    // 1 フレーム分の波動シミュレーションを実行 (注入 + 伝播)
+    function simulateWaveStep() {
+      const anyDrop = pendingRipples.length > 0;
+      if (!anyDrop && simActivity <= 0) return;
+
+      const prevTarget = renderer.getRenderTarget();
+      const oldAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+
+      // (a) 保留中の波紋を currentSimRT の R に加算注入
+      if (anyDrop) {
+        renderer.setRenderTarget(currentSimRT);
+        for (let i = 0; i < pendingRipples.length; i++) {
+          const r = pendingRipples[i];
+          dropShaderMat.uniforms.u_dropCenter.value.set(r.u, r.v);
+          dropShaderMat.uniforms.u_dropRadius.value = r.radius;
+          dropShaderMat.uniforms.u_dropStrength.value = r.strength;
+          renderer.render(dropScene, simCamera);
+        }
+        pendingRipples.length = 0;
+      }
+
+      // (b) 波動方程式 1 ステップ (nextSimRT に書き込み → swap)
+      simUpdateMat.uniforms.u_prev.value = currentSimRT.texture;
+      renderer.setRenderTarget(nextSimRT);
+      renderer.render(simScene, simCamera);
+      renderer.autoClear = oldAutoClear;
+      renderer.setRenderTarget(prevTarget);
+
+      const tmp = currentSimRT;
+      currentSimRT = nextSimRT;
+      nextSimRT = tmp;
+
+      // 床マテリアルの u_wave を最新の RT へ更新
+      floorMaterial.uniforms.u_wave.value = currentSimRT.texture;
+
+      if (simActivity > 0) simActivity--;
+    }
+
+    // 決定的な擬似乱数 (32bit hash)
+    function hash32(n) {
+      n = (n | 0) ^ (n >>> 16);
+      n = Math.imul(n, 0x85ebca6b) | 0;
+      n = n ^ (n >>> 13);
+      n = Math.imul(n, 0xc2b2ae35) | 0;
+      n = n ^ (n >>> 16);
+      return n >>> 0;
+    }
+    // syncedNow() を共有するので全クライアントが同じ発生時刻/位置になる
+    let _lastRandomBucket = -1;
+    function maybeSpawnRandomRipple() {
+      const now = syncedNow();
+      const bucket = Math.floor(now / 1500);  // 1.5s 毎に判定
+      if (bucket === _lastRandomBucket) return;
+      _lastRandomBucket = bucket;
+      // 3 バケットに 1 回 (平均 4.5s 毎) 発生
+      if ((hash32(bucket * 7) & 0x3) !== 0) return;
+      const h = hash32(bucket);
+      const u = (h & 0xFFFF) / 0xFFFF;
+      const v = ((h >>> 16) & 0xFFFF) / 0xFFFF;
+      injectRippleLocal(u, v, 0.55, 0.018);
+    }
+
+    // 床マテリアル: GPU 波動シミュレーション結果を法線・発光に反映
     const floorMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        u_time:          { value: 0 },
-        u_deepColor:     { value: new THREE.Color(0x0a2540) },   // 深部の暗い青
-        u_shallowColor:  { value: new THREE.Color(0x2e88b0) },   // 浅部の空色寄り
-        u_specColor:     { value: new THREE.Color(0xfff5e0) },   // 太陽反射色
+        u_wave:          { value: simRT_A.texture },              // 波動シミュ RT (R = 高さ)
+        u_simTexel:      { value: new THREE.Vector2(1 / SIM_RES, 1 / SIM_RES) },
+        u_normalStrength:{ value: 12.0 },                          // 法線の効き具合
+        u_deepColor:     { value: new THREE.Color(0x0a2540) },
+        u_shallowColor:  { value: new THREE.Color(0x2e88b0) },
+        u_specColor:     { value: new THREE.Color(0xfff5e0) },
+        u_emissiveColor: { value: new THREE.Color(0x4098d0) },     // 波頭の発光色
         u_lightDir:      { value: new THREE.Vector3(0.4, 1.0, 0.3).normalize() },
         u_paint:         { value: paintRT.texture },
       },
@@ -631,90 +836,33 @@
         precision highp float;
         varying vec2 vUv;
         varying vec3 vWorldPos;
-        uniform float u_time;
+        uniform sampler2D u_wave;
+        uniform vec2  u_simTexel;
+        uniform float u_normalStrength;
         uniform vec3  u_deepColor;
         uniform vec3  u_shallowColor;
         uniform vec3  u_specColor;
+        uniform vec3  u_emissiveColor;
         uniform vec3  u_lightDir;
         uniform sampler2D u_paint;
 
-        // 疑似乱数 (安定した 32bit 整数演算相当を fract で近似)
-        float hash11(float p) {
-          p = fract(p * 0.1031);
-          p *= p + 33.33;
-          p *= p + p;
-          return fract(p);
-        }
-        vec2 hash22(vec2 p) {
-          vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-          p3 += dot(p3, p3.yzx + 33.33);
-          return fract((p3.xx + p3.yz) * p3.zy);
-        }
-
-        // 単一波紋の (高さ, 勾配XZ) を返す
-        //   center: 発生位置 (world XZ)
-        //   age: この波紋の経過時間 (秒)
-        vec3 rippleContribution(vec2 pos, vec2 center, float age) {
-          const float LIFE   = 3.0;    // 寿命 3 秒
-          const float SPEED  = 3.2;    // 波面拡大速度 3.2 m/s → 最大半径 ~10m
-          const float FREQ   = 14.0;   // 波面上の余弦振動 (rad/m)
-          const float WIDTH  = 0.32;   // ガウス包絡の半幅 (m)
-          const float AMP    = 0.055;  // 振幅 (仮想高さ, m相当)
-
-          if (age < 0.0 || age > LIFE) return vec3(0.0);
-
-          vec2 d  = pos - center;
-          float dist = length(d);
-          float r    = age * SPEED;
-          float dw   = dist - r;          // 波面までの符号付き距離
-          float w2   = WIDTH * WIDTH;
-          float env  = exp(-dw * dw / w2);// ガウス包絡
-          float osc  = cos(dw * FREQ);    // 明暗を作る余弦
-
-          // 誕生時にフェードイン、寿命末でフェードアウト
-          float ageT = age / LIFE;
-          float fade = 4.0 * ageT * (1.0 - ageT); // 放物線 0→1→0
-          float amp  = AMP * fade;
-
-          float h = amp * env * osc;
-          // ∂h/∂dist を解析的に:
-          //   env' = -2 dw / w^2 * env
-          //   osc' = -FREQ * sin(dw*FREQ)
-          float dEnv = (-2.0 * dw / w2) * env;
-          float dOsc = -FREQ * sin(dw * FREQ);
-          float dh_dr = amp * (dEnv * osc + env * dOsc);
-          vec2 grad = (dist > 0.001) ? (d / dist * dh_dr) : vec2(0.0);
-          return vec3(h, grad);
-        }
-
         void main() {
-          vec2 pos = vWorldPos.xz;
+          // 波動 RT から中心差分で法線を作る (R = 高さ)
+          float hL = texture2D(u_wave, vUv + vec2(-u_simTexel.x, 0.0)).r;
+          float hR = texture2D(u_wave, vUv + vec2( u_simTexel.x, 0.0)).r;
+          float hD = texture2D(u_wave, vUv + vec2(0.0, -u_simTexel.y)).r;
+          float hU = texture2D(u_wave, vUv + vec2(0.0,  u_simTexel.y)).r;
+          float hC = texture2D(u_wave, vUv).r;
 
-          const int   NUM_SLOTS  = 16;
-          const float SLOT_PERIOD = 2.5;    // 各スロットが 2.5s ごとに 1 発生
-          const float FIELD_RANGE = 40.0;   // ±20 の範囲に散布
+          // 高さ勾配 → world XZ 方向のズレ量
+          //   plane は -π/2 X 回転なので local (X, Y) が world (X, -Z) にマップ
+          //   normal を world 空間で (dh/dx, up, dh/dz) の形で組む
+          vec3 N = normalize(vec3(
+            (hL - hR) * u_normalStrength,
+             2.0 * u_simTexel.x,
+            (hU - hD) * u_normalStrength
+          ));
 
-          float totalH = 0.0;
-          vec2  totalGrad = vec2(0.0);
-
-          for (int i = 0; i < NUM_SLOTS; i++) {
-            float slot = float(i);
-            // 各スロットの発生時刻をずらす (位相オフセット)
-            float phaseOffset = hash11(slot * 7.13) * SLOT_PERIOD;
-            float shiftedT = u_time + phaseOffset;
-            float cycleIdx = floor(shiftedT / SLOT_PERIOD);
-            float birthTime = cycleIdx * SLOT_PERIOD - phaseOffset;
-            // このサイクル分の発生位置 (毎サイクルで hash が変わる)
-            vec2 rnd = hash22(vec2(slot * 1.71, cycleIdx));
-            vec2 center = (rnd - 0.5) * FIELD_RANGE;
-            float age = u_time - birthTime;
-            vec3 rc = rippleContribution(pos, center, age);
-            totalH   += rc.x;
-            totalGrad += rc.yz;
-          }
-
-          // 勾配から擬似法線を構築 (Y=1 を基準に xz 成分を勾配で摂動)
-          vec3 N = normalize(vec3(-totalGrad.x, 1.0, -totalGrad.y));
           vec3 V = normalize(cameraPosition - vWorldPos);
           vec3 L = normalize(u_lightDir);
 
@@ -723,18 +871,20 @@
           float F = pow(1.0 - NdotV, 2.0);
           vec3 waterColor = mix(u_shallowColor, u_deepColor, F);
 
-          // Lambertian で明暗
+          // Lambertian
           float diff = clamp(dot(N, L), 0.0, 1.0);
           waterColor *= mix(0.65, 1.30, diff);
 
-          // Blinn-Phong (波紋の稜線でギラッと反射)
+          // Blinn-Phong (波の稜線でギラッと反射)
           vec3 H = normalize(L + V);
           float NdotH = max(dot(N, H), 0.0);
           float spec = pow(NdotH, 90.0);
           waterColor += u_specColor * spec * 1.8;
 
-          // 波紋の高さそのものも僅かに明暗として上乗せ (中央の "点滴痕" 感)
-          waterColor += vec3(0.15, 0.25, 0.30) * clamp(totalH * 8.0, -0.4, 0.6);
+          // 発光: 波紋の峰 (正の高さ) が青く光る、谷 (負の高さ) は暗く沈む
+          float emissive = clamp(hC * 4.0, -0.4, 0.8);
+          waterColor += u_emissiveColor * max(emissive, 0.0);
+          waterColor *= 1.0 + emissive * 0.15;
 
           // スプレーペイント合成
           vec4 paint = texture2D(u_paint, vUv);
@@ -1015,6 +1165,10 @@
             : 0.035;
           _sprayUv.set(data.hitU, data.hitV);
           applyPaintTo(target.userData.paintRT, _sprayUv, uvR, color, time);
+          // 床への着弾は波紋も呼ぶ (ローカル注入のみ、事象自体は spray broadcast 済み)
+          if (target === ground) {
+            injectRippleLocal(data.hitU, data.hitV, 0.35, Math.max(0.008, uvR * 0.5));
+          }
           if (!_spraySeenObjects.has(target.uuid)) {
             _spraySeenObjects.add(target.uuid);
             const tag = (target === ground) ? 'floor' : data.targetName;
@@ -3228,6 +3382,16 @@
         processSprayEvent(data);
       });
 
+      // 波紋イベント (発生位置・強度) — 状態全体ではなくイベントを共有
+      socket.on('ripple', (data) => {
+        if (!data || typeof data !== 'object') return;
+        injectRippleLocal(
+          Number(data.u), Number(data.v),
+          Number(data.strength) || 0.4,
+          Number(data.radius)   || 0.018
+        );
+      });
+
       // 周回状態 (絶対時刻位相方式 + サーバー時刻同期)
       //   新プロトコル: { serverNow, whale: factor, whalePhase, whaleT0, fox: ..., human: ... }
       //   旧プロトコル (factor のみ) も後方互換として受け付ける
@@ -3404,13 +3568,9 @@
 
     function tick() {
       requestAnimationFrame(tick);
-      // 水面シェーダの時刻更新
-      //   Unix ms をそのまま fp32 に渡すと 1.7e9 の桁で精度が破綻し sin が動かないため
-      //   100000ms = 100s でラップした値を渡す。全クライアントで syncedNow() を共有し、
-      //   同じ mod 値なので波位相は同期する。
-      if (floorMaterial && floorMaterial.uniforms && floorMaterial.uniforms.u_time) {
-        floorMaterial.uniforms.u_time.value = (syncedNow() % 100000) * 0.001;
-      }
+      // GPU 波動シミュレーション: ランダム波紋 + 保留イベント処理 + 1 ステップ更新
+      maybeSpawnRandomRipple();
+      simulateWaveStep();
       // スプレー発射中の床ヒット位置リング更新 (発射者本人のみ可視)
       updateSprayConeVis();
 
