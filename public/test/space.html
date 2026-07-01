@@ -284,6 +284,40 @@
       text-align: center; font-weight: bold; font-family: monospace;
     }
     body.fs-mode #master-panel { display: none !important; }
+
+    /* Master 内部タブ (パネル切替) */
+    #master-panel .m-tabs {
+      display: flex; gap: 4px; margin: 6px 0 10px;
+      border-bottom: 1px solid #334;
+      padding-bottom: 6px;
+    }
+    #master-panel .m-tab-btn {
+      flex: 1;
+      padding: 5px 4px !important;
+      font-size: 11px !important;
+      background: #334155;
+      color: #cbd5e1;
+      border-radius: 4px 4px 0 0 !important;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    #master-panel .m-tab-btn:hover { background: #475569; color: white; }
+    #master-panel .m-tab-btn.is-active {
+      background: #06b6d4;
+      color: #083344;
+    }
+    #master-panel .m-tab-content { display: none; }
+    #master-panel .m-tab-content.is-active { display: block; }
+    #master-panel .m-tab-content .m-section {
+      border-top: 1px solid #334;
+      margin: 8px 0;
+      padding-top: 6px;
+    }
+    #master-panel .m-tab-content .m-section:first-child {
+      border-top: none;
+      margin-top: 0;
+      padding-top: 0;
+    }
     #observer-panel h3 {
       margin: 0 0 6px;
       font-size: 12px;
@@ -427,78 +461,100 @@
   <!-- Master用クライアント制御パネル (右側、observer-panel の下) -->
   <div id="master-panel">
     <h3>MASTER 制御</h3>
-    <div class="hint">
-      クライアント一覧から選択 → 座標/角度を入力して適用
+
+    <!-- タブ切替ボタン -->
+    <div class="m-tabs">
+      <button class="m-tab-btn is-active" data-mtab="client">クライアント</button>
+      <button class="m-tab-btn" data-mtab="world">ワールド</button>
+      <button class="m-tab-btn" data-mtab="shader">シェーダー</button>
     </div>
-    <div class="row">
-      <select id="m-client-select" style="flex:1; padding: 4px;">
-        <option value="">-- 未選択 --</option>
-      </select>
-    </div>
-    <div class="row">
-      <label>X</label><input type="number" id="m-x" value="0" step="0.1">
-      <label>Y</label><input type="number" id="m-y" value="1.5" step="0.1">
-      <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
-    </div>
-    <div class="row">
-      <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
-      <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
-      <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
-    </div>
-    <div class="row">
-      <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
-      <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
-    </div>
-    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
-      <div class="hint">オフアクシス投影 (選択中クライアント)</div>
-      <div class="row">
-        <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
-        <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+
+    <!-- タブ 1: クライアント制御 (選択 + 姿勢 + Off-Axis) -->
+    <div id="m-tab-client" class="m-tab-content is-active">
+      <div class="m-section">
+        <div class="hint">クライアント一覧から選択 → 座標/角度を入力して適用</div>
+        <div class="row">
+          <select id="m-client-select" style="flex:1; padding: 4px;">
+            <option value="">-- 未選択 --</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>X</label><input type="number" id="m-x" value="0" step="0.1">
+          <label>Y</label><input type="number" id="m-y" value="1.5" step="0.1">
+          <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
+        </div>
+        <div class="row">
+          <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
+          <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
+          <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
+        </div>
+        <div class="row">
+          <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+          <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
+        </div>
       </div>
-    </div>
-    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
-      <div class="hint">共通視点 (viewerEye) — 全クライアントの Off-Axis 描画頂点</div>
-      <div class="row">
-        <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
-        <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
-        <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
-      </div>
-      <div class="row">
-        <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
-      </div>
-      <div class="hint" style="font-size:10px; opacity:0.7;">
-        ※ 高さ(Y)を上下するとオブザーバーの視差が即座に変化します
-      </div>
-    </div>
-    <div style="border-top: 1px solid #334; margin: 8px 0; padding-top: 6px;">
-      <div class="hint">周回速度倍率 (1.0 = 既定 / 0 で停止 / 負で逆回り)</div>
-      <div class="row">
-        <label>鯨</label>
-        <input type="number" id="m-whale-speed" value="1.00" step="0.1">
-        <label>狐</label>
-        <input type="number" id="m-fox-speed" value="1.00" step="0.1">
-      </div>
-      <div class="row">
-        <label>人</label>
-        <input type="number" id="m-human-speed" value="1.00" step="0.1">
-        <button id="m-orbit-apply" style="background: #06b6d4; color: #083344">適用</button>
+      <div class="m-section">
+        <div class="hint">オフアクシス投影 (選択中クライアント)</div>
+        <div class="row">
+          <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
+          <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+        </div>
       </div>
     </div>
 
-    <!-- シェーダーコントロール タブ (床の GPU 波動シミュ) -->
-    <div style="border-top: 2px solid #06b6d4; margin: 10px 0 6px; padding-top: 8px;">
-      <div class="hint" style="font-weight:600; color:#67e8f9;">▼ シェーダー制御 (波紋)</div>
-      <div class="row">
-        <label>最小(m)</label><input type="number" id="m-ripple-min" value="0.5" step="0.1" min="0.05" max="10">
-        <label>最大(m)</label><input type="number" id="m-ripple-max" value="1.5" step="0.1" min="0.1" max="10">
+    <!-- タブ 2: ワールド共通 (viewerEye + 周回速度) -->
+    <div id="m-tab-world" class="m-tab-content">
+      <div class="m-section">
+        <div class="hint">共通視点 (viewerEye) — 全クライアントの Off-Axis 描画頂点</div>
+        <div class="row">
+          <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
+          <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
+          <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
+        </div>
+        <div class="row">
+          <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          ※ 高さ(Y)を上下するとオブザーバーの視差が即座に変化します
+        </div>
       </div>
-      <div class="row">
-        <label>波速(0-20)</label><input type="number" id="m-wave-speed" value="12.5" step="0.5" min="0" max="20">
-        <button id="m-shader-apply" style="background: #06b6d4; color: #083344">適用</button>
+      <div class="m-section">
+        <div class="hint">周回速度倍率 (1.0 = 既定 / 0 で停止 / 負で逆回り)</div>
+        <div class="row">
+          <label>鯨</label>
+          <input type="number" id="m-whale-speed" value="1.00" step="0.1">
+          <label>狐</label>
+          <input type="number" id="m-fox-speed" value="1.00" step="0.1">
+        </div>
+        <div class="row">
+          <label>人</label>
+          <input type="number" id="m-human-speed" value="1.00" step="0.1">
+          <button id="m-orbit-apply" style="background: #06b6d4; color: #083344">適用</button>
+        </div>
       </div>
-      <div class="hint" style="font-size:10px; opacity:0.7;">
-        ※ 発生する波紋は最小〜最大の間からランダムに選ばれます (m 単位)。<br>
-        ※ 波速 0 = 波が広がらない / 12.5 = 既定 / 20 = 高速伝播 (CFL 上限)。
+    </div>
+
+    <!-- タブ 3: シェーダー制御 (波紋 min/max + 波速) -->
+    <div id="m-tab-shader" class="m-tab-content">
+      <div class="m-section">
+        <div class="hint" style="color:#67e8f9;">波紋サイズ (m)</div>
+        <div class="row">
+          <label>最小</label><input type="number" id="m-ripple-min" value="0.5" step="0.1" min="0.05" max="10">
+          <label>最大</label><input type="number" id="m-ripple-max" value="1.5" step="0.1" min="0.1" max="10">
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          発生する波紋は最小〜最大の間からランダムに選ばれます
+        </div>
+      </div>
+      <div class="m-section">
+        <div class="hint" style="color:#67e8f9;">波速 (0〜20)</div>
+        <div class="row">
+          <label>速度</label><input type="number" id="m-wave-speed" value="12.5" step="0.5" min="0" max="20">
+          <button id="m-shader-apply" style="background: #06b6d4; color: #083344">適用</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          0 = 波が広がらない / 12.5 = 既定 / 20 = 高速伝播 (CFL 上限)
+        </div>
       </div>
     </div>
   </div>

@@ -2959,6 +2959,19 @@
     }
 
     function setupMaster() {
+      // ---- master パネル内タブ切替 ----
+      const mTabBtns = document.querySelectorAll('#master-panel .m-tab-btn');
+      const mTabContents = document.querySelectorAll('#master-panel .m-tab-content');
+      mTabBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const key = btn.getAttribute('data-mtab');
+          mTabBtns.forEach((b) => b.classList.toggle('is-active', b === btn));
+          mTabContents.forEach((c) => {
+            c.classList.toggle('is-active', c.id === 'm-tab-' + key);
+          });
+        });
+      });
+
       const sel = document.getElementById('m-client-select');
       const ix = document.getElementById('m-x');
       const iy = document.getElementById('m-y');
