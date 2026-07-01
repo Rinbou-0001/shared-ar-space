@@ -1534,26 +1534,30 @@
     //     どのクライアントも同じ位置に「飛ばず」追従する。
     const WHALE_BASE_OMEGA = 1.0;                         // rad/s
     const FOX_BASE_OMEGA = (2 * Math.PI) / 180.0;         // rad/s (3分で1周)
-    // 全クライアント共通の固定エポック (= サーバーと同じ Unix epoch 0)。
-    let whaleOrbitState = { phase: 0, t0: 0, factor: 1.0 };
-    let foxOrbitState   = { phase: 0, t0: 0, factor: 1.0 };
-    let humanOrbitState = { phase: 0, t0: 0, factor: 1.0 };
+    // 周回状態を単一の Map に集約 (whale / fox / human で構造が完全一致)
+    //   全クライアント共通の固定エポック (= サーバーと同じ Unix epoch 0) から scale。
+    const orbitStates = {
+      whale: { phase: 0, t0: 0, factor: 1.0 },
+      fox:   { phase: 0, t0: 0, factor: 1.0 },
+      human: { phase: 0, t0: 0, factor: 1.0 },
+    };
+    // 旧名互換 (既存参照を壊さないためのエイリアス、同じオブジェクトを指す)
+    const whaleOrbitState = orbitStates.whale;
+    const foxOrbitState   = orbitStates.fox;
+    const humanOrbitState = orbitStates.human;
 
     // サーバー時刻オフセット (ms): サーバー時刻 - ローカル時刻
-    //   broadcast に同梱される serverNow から (serverNow - Date.now()) を記録し、
-    //   以降は (Date.now() + _serverClockOffset) を「サーバー時刻」として全クライアントで揃える。
-    //   これでデバイス間の OS 時計ずれ (NTP 非同期 / 数秒のクロックスキュー) を吸収する。
     let _serverClockOffset = 0;
     function syncedNow() { return Date.now() + _serverClockOffset; }
 
-    // 後方互換用ショートカット (UI 表示専用)
-    function whaleSpeedFactorValue() { return whaleOrbitState.factor; }
-    function foxSpeedFactorValue()   { return foxOrbitState.factor; }
-    function humanSpeedFactorValue() { return humanOrbitState.factor; }
-    // 現在の累積 factor-秒 (サーバー時刻ベース)
-    function whaleAccum() { return whaleOrbitState.phase + whaleOrbitState.factor * (syncedNow() - whaleOrbitState.t0) / 1000; }
-    function foxAccum()   { return foxOrbitState.phase   + foxOrbitState.factor   * (syncedNow() - foxOrbitState.t0)   / 1000; }
-    function humanAccum() { return humanOrbitState.phase + humanOrbitState.factor * (syncedNow() - humanOrbitState.t0) / 1000; }
+    // 現在の累積 factor-秒 (サーバー時刻ベース) — 3 モデル共通ロジック
+    function orbitAccum(key) {
+      const s = orbitStates[key];
+      return s.phase + s.factor * (syncedNow() - s.t0) / 1000;
+    }
+    const whaleAccum = () => orbitAccum('whale');
+    const foxAccum   = () => orbitAccum('fox');
+    const humanAccum = () => orbitAccum('human');
 
     let whaleObj = null;
     let whaleMixer = null;
@@ -2968,6 +2972,40 @@
     }
 
     function setupMaster() {
+      // ============================================================
+      // master パネル 共通ヘルパ (apply / Enter 連打 / UI 同期の集約)
+      // ============================================================
+      //   createApplyEmit: 入力オブジェクトから値を集めてサーバへ emit する apply 関数を生成
+      //   bindApplyOnEnter: 入力欄で Enter → apply → blur を配線
+      //   setInputSafe: フォーカス中でない入力欄に値を書き戻し (socket 受信時の UI 同期)
+      function createApplyEmit(event, inputs, logPrefix) {
+        return function () {
+          const data = {};
+          for (const [key, el] of Object.entries(inputs)) {
+            if (!el) continue;
+            const v = parseFloat(el.value);
+            if (isFinite(v)) data[key] = v;
+          }
+          if (socket && socket.connected) {
+            socket.emit(event, data);
+            if (logPrefix) try { log(logPrefix + ' ' + JSON.stringify(data), 'ok'); } catch (_) {}
+          }
+          return data;
+        };
+      }
+      function bindApplyOnEnter(inputs, applyFn) {
+        const arr = Array.isArray(inputs) ? inputs : Object.values(inputs);
+        arr.filter(Boolean).forEach((el) => {
+          el.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              applyFn();
+              el.blur();
+            }
+          });
+        });
+      }
+
       // ---- master パネル内タブ切替 ----
       const mTabBtns = document.querySelectorAll('#master-panel .m-tab-btn');
       const mTabContents = document.querySelectorAll('#master-panel .m-tab-content');
@@ -3104,47 +3142,30 @@
         refreshDisplayUI();
       });
 
-      // viewerEye 適用
-      const veX = document.getElementById('ve-x');
-      const veY = document.getElementById('ve-y');
-      const veZ = document.getElementById('ve-z');
+      // viewerEye 適用 (共通ヘルパ経由)
+      const veInputs = {
+        x: document.getElementById('ve-x'),
+        y: document.getElementById('ve-y'),
+        z: document.getElementById('ve-z'),
+      };
       const veApply = document.getElementById('ve-apply');
-      function applyViewerEye() {
-        const vx = parseFloat(veX.value);
-        const vy = parseFloat(veY.value);
-        const vz = parseFloat(veZ.value);
-        if ([vx, vy, vz].some(isNaN)) return;
-        if (socket && socket.connected) {
-          socket.emit('viewerEye', { x: vx, y: vy, z: vz });
-          log('viewerEye send (' + vx + ',' + vy + ',' + vz + ')', 'ok');
-        }
-      }
+      const applyViewerEye = createApplyEmit('viewerEye', veInputs, 'viewerEye send');
       if (veApply) veApply.addEventListener('click', applyViewerEye);
-      [veX, veY, veZ].forEach((el) => {
-        if (!el) return;
-        el.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter') { ev.preventDefault(); applyViewerEye(); el.blur(); }
-        });
-      });
+      bindApplyOnEnter(veInputs, applyViewerEye);
 
-      // 周回速度倍率 (鯨 / 狐 / 人) を個別管理
-      const whaleSpeedInput = document.getElementById('m-whale-speed');
-      const foxSpeedInput   = document.getElementById('m-fox-speed');
-      const humanSpeedInput = document.getElementById('m-human-speed');
-      const orbitApplyBtn   = document.getElementById('m-orbit-apply');
+      // 周回速度倍率 (鯨 / 狐 / 人) — 共通ヘルパ経由
+      const orbitInputs = {
+        whale: document.getElementById('m-whale-speed'),
+        fox:   document.getElementById('m-fox-speed'),
+        human: document.getElementById('m-human-speed'),
+      };
+      const orbitApplyBtn = document.getElementById('m-orbit-apply');
       function applyOrbitSpeeds() {
         const data = {};
-        if (whaleSpeedInput) {
-          const v = parseFloat(whaleSpeedInput.value);
-          if (isFinite(v)) data.whale = v;
-        }
-        if (foxSpeedInput) {
-          const v = parseFloat(foxSpeedInput.value);
-          if (isFinite(v)) data.fox = v;
-        }
-        if (humanSpeedInput) {
-          const v = parseFloat(humanSpeedInput.value);
-          if (isFinite(v)) data.human = v;
+        for (const [key, el] of Object.entries(orbitInputs)) {
+          if (!el) continue;
+          const v = parseFloat(el.value);
+          if (isFinite(v)) data[key] = v;
         }
         if (socket && socket.connected) {
           socket.emit('orbitSpeed', data);
@@ -3154,62 +3175,21 @@
         }
       }
       if (orbitApplyBtn) orbitApplyBtn.addEventListener('click', applyOrbitSpeeds);
-      [whaleSpeedInput, foxSpeedInput, humanSpeedInput].forEach((el) => {
-        if (!el) return;
-        el.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter') {
-            ev.preventDefault();
-            applyOrbitSpeeds();
-            el.blur();
-          }
-        });
-      });
+      bindApplyOnEnter(orbitInputs, applyOrbitSpeeds);
 
       // ============================================================
-      // シェーダーコントロール タブ (波紋 min/max, 波速)
+      // シェーダーコントロール タブ (波紋 min/max/rate, 波速) — 共通ヘルパ経由
       // ============================================================
-      const rippleMinInput  = document.getElementById('m-ripple-min');
-      const rippleMaxInput  = document.getElementById('m-ripple-max');
-      const rippleRateInput = document.getElementById('m-ripple-rate');
-      const waveSpeedInput  = document.getElementById('m-wave-speed');
-      const shaderApplyBtn  = document.getElementById('m-shader-apply');
-      function applyShaderConfig() {
-        const data = {};
-        if (rippleMinInput) {
-          const v = parseFloat(rippleMinInput.value);
-          if (isFinite(v)) data.rippleMinM = v;
-        }
-        if (rippleMaxInput) {
-          const v = parseFloat(rippleMaxInput.value);
-          if (isFinite(v)) data.rippleMaxM = v;
-        }
-        if (rippleRateInput) {
-          const v = parseFloat(rippleRateInput.value);
-          if (isFinite(v)) data.rippleSpawnRate = v;
-        }
-        if (waveSpeedInput) {
-          const v = parseFloat(waveSpeedInput.value);
-          if (isFinite(v)) data.waveSpeed = v;
-        }
-        if (socket && socket.connected) {
-          socket.emit('shaderConfig', data);
-          log('shader emit: min=' + (data.rippleMinM ?? '-') +
-              ' max=' + (data.rippleMaxM ?? '-') +
-              ' rate=' + (data.rippleSpawnRate ?? '-') +
-              ' speed=' + (data.waveSpeed ?? '-'), 'ok');
-        }
-      }
+      const shaderInputs = {
+        rippleMinM:      document.getElementById('m-ripple-min'),
+        rippleMaxM:      document.getElementById('m-ripple-max'),
+        rippleSpawnRate: document.getElementById('m-ripple-rate'),
+        waveSpeed:       document.getElementById('m-wave-speed'),
+      };
+      const shaderApplyBtn = document.getElementById('m-shader-apply');
+      const applyShaderConfig = createApplyEmit('shaderConfig', shaderInputs, 'shader emit');
       if (shaderApplyBtn) shaderApplyBtn.addEventListener('click', applyShaderConfig);
-      [rippleMinInput, rippleMaxInput, rippleRateInput, waveSpeedInput].forEach((el) => {
-        if (!el) return;
-        el.addEventListener('keydown', (ev) => {
-          if (ev.key === 'Enter') {
-            ev.preventDefault();
-            applyShaderConfig();
-            el.blur();
-          }
-        });
-      });
+      bindApplyOnEnter(shaderInputs, applyShaderConfig);
 
       // クリックでアバター選択 (raycaster はオブザーバー側にあるので簡易追加)
       const dom = renderer.domElement;
@@ -3493,32 +3473,23 @@
       });
 
       // シェーダー制御パラメータ (master 変更を全員に反映)
+      //   4 フィールドを (dataKey → configKey → inputId → sideEffect?) の表で単一処理
+      const SHADER_FIELDS = [
+        ['rippleMinM',      'rippleMinM',      'm-ripple-min',  null],
+        ['rippleMaxM',      'rippleMaxM',      'm-ripple-max',  null],
+        ['waveSpeed',       'waveSpeed',       'm-wave-speed',  (v) => applyWaveSpeed(v)],
+        ['rippleSpawnRate', 'rippleSpawnRate', 'm-ripple-rate', () => { _lastRandomBucket = -1; }],
+      ];
       socket.on('shaderConfig', (data) => {
         if (!data || typeof data !== 'object') return;
-        if (typeof data.rippleMinM === 'number' && isFinite(data.rippleMinM)) {
-          waveSimConfig.rippleMinM = data.rippleMinM;
-        }
-        if (typeof data.rippleMaxM === 'number' && isFinite(data.rippleMaxM)) {
-          waveSimConfig.rippleMaxM = data.rippleMaxM;
-        }
-        if (typeof data.waveSpeed === 'number' && isFinite(data.waveSpeed)) {
-          waveSimConfig.waveSpeed = data.waveSpeed;
-          applyWaveSpeed(waveSimConfig.waveSpeed);
-        }
-        if (typeof data.rippleSpawnRate === 'number' && isFinite(data.rippleSpawnRate)) {
-          waveSimConfig.rippleSpawnRate = data.rippleSpawnRate;
-          // rate 変更時は _lastRandomBucket をリセット (次バケットからの取り直し)
-          _lastRandomBucket = -1;
-        }
-        // master UI 入力欄を反映 (フォーカス中は上書きしない)
-        const setInp = (id, v) => {
+        for (const [dk, ck, id, sideEffect] of SHADER_FIELDS) {
+          const v = data[dk];
+          if (typeof v !== 'number' || !isFinite(v)) continue;
+          waveSimConfig[ck] = v;
+          if (sideEffect) sideEffect(v);
           const el = document.getElementById(id);
           if (el && document.activeElement !== el) el.value = v.toFixed(2);
-        };
-        setInp('m-ripple-min',  waveSimConfig.rippleMinM);
-        setInp('m-ripple-max',  waveSimConfig.rippleMaxM);
-        setInp('m-wave-speed',  waveSimConfig.waveSpeed);
-        setInp('m-ripple-rate', waveSimConfig.rippleSpawnRate);
+        }
         try {
           log('shaderConfig: min=' + waveSimConfig.rippleMinM.toFixed(2) +
               'm max=' + waveSimConfig.rippleMaxM.toFixed(2) +
@@ -3537,39 +3508,33 @@
           _serverClockOffset = data.serverNow - Date.now();
           try { log('clock sync: server offset = ' + _serverClockOffset + ' ms', 'ok'); } catch (_) {}
         }
-        const updateUiInput = (factor, inputId) => {
-          if (typeof factor !== 'number' || !isFinite(factor)) return;
-          const el = document.getElementById(inputId);
-          if (el && document.activeElement !== el) el.value = factor.toFixed(2);
-        };
-        function applyState(state, factor, phase, t0) {
+        function applyOrbitStateUpdate(state, factor, phase, t0) {
           if (typeof phase === 'number' && typeof t0 === 'number' && isFinite(phase) && isFinite(t0)) {
-            // 新プロトコル: phase + t0 + factor を全部更新 (位相凍結状態を再現)
-            state.phase = phase;
-            state.t0 = t0;
-            state.factor = factor;
+            // 新プロトコル: phase + t0 + factor を全部更新
+            state.phase = phase; state.t0 = t0; state.factor = factor;
           } else {
-            // 旧プロトコル: factor だけが来た場合、ローカルで位相凍結
+            // 旧プロトコル: factor のみ → ローカルで位相凍結
             state.phase = state.phase + state.factor * (Date.now() - state.t0) / 1000;
             state.t0 = Date.now();
             state.factor = factor;
           }
         }
-        if (typeof data.whale === 'number' && isFinite(data.whale)) {
-          applyState(whaleOrbitState, data.whale, data.whalePhase, data.whaleT0);
-          updateUiInput(data.whale, 'm-whale-speed');
+        // 3 モデルを共通ループで処理 (旧: 3 × ~4行 の分岐を Map で単一化)
+        const ORBIT_KEYS = [
+          ['whale', 'whalePhase', 'whaleT0', 'm-whale-speed'],
+          ['fox',   'foxPhase',   'foxT0',   'm-fox-speed'],
+          ['human', 'humanPhase', 'humanT0', 'm-human-speed'],
+        ];
+        for (const [k, phaseK, t0K, inputId] of ORBIT_KEYS) {
+          const factor = data[k];
+          if (typeof factor !== 'number' || !isFinite(factor)) continue;
+          applyOrbitStateUpdate(orbitStates[k], factor, data[phaseK], data[t0K]);
+          const el = document.getElementById(inputId);
+          if (el && document.activeElement !== el) el.value = factor.toFixed(2);
         }
-        if (typeof data.fox === 'number' && isFinite(data.fox)) {
-          applyState(foxOrbitState, data.fox, data.foxPhase, data.foxT0);
-          updateUiInput(data.fox, 'm-fox-speed');
-        }
-        if (typeof data.human === 'number' && isFinite(data.human)) {
-          applyState(humanOrbitState, data.human, data.humanPhase, data.humanT0);
-          updateUiInput(data.human, 'm-human-speed');
-        }
-        log('orbit speeds: whale=' + whaleOrbitState.factor.toFixed(2) +
-            ' fox=' + foxOrbitState.factor.toFixed(2) +
-            ' human=' + humanOrbitState.factor.toFixed(2), 'ok');
+        log('orbit speeds: whale=' + orbitStates.whale.factor.toFixed(2) +
+            ' fox=' + orbitStates.fox.factor.toFixed(2) +
+            ' human=' + orbitStates.human.factor.toFixed(2), 'ok');
       });
 
       // 共通視点位置
