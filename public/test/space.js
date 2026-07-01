@@ -2042,18 +2042,22 @@
     const viewerEye = { x: 0, y: 2.0, z: 0 };
     const remoteDisplays = new Map(); // id -> display config
 
-    // 画面の物理サイズを推定 (PPI ベース)
-    // - スマホ/タブレット: 高 DPI 想定 (300 PPI)
-    // - ノート/モニタ: 100 PPI 想定
+    // 画面の物理サイズを推定 (DPR 基準の PPI 選択)
+    //   ブラウザは物理サイズを直接返さないので DPR から推定する:
+    //     DPR < 1.5  : 一般デスクトップモニタ / 4K フル HD 表示 → 96 PPI
+    //     DPR 1.5-2.5: Retina ラップトップ / 中位スマホ         → 200 PPI
+    //     DPR >= 2.5 : 高 DPI スマホ (iPhone / 高級 Android)   → 400 PPI
+    //   物理サイズ = (CSS 幅 × DPR) / PPI × 0.0254 m/inch
+    //   ※ 端末個体差 (実 PPI が 220 とか 460 とか) は残るので、Off-Axis を厳密に
+    //      揃えたい場合は Observer パネルの W/H 入力で実測値に上書きしてください。
     function estimateDisplayPhysicalSize() {
       const dpr = window.devicePixelRatio || 1;
-      const wPx = window.innerWidth * dpr;
-      const hPx = window.innerHeight * dpr;
-      // ヒューリスティック: pixel 総量が大きければ PC、小さければモバイル
-      const totalPx = wPx * hPx;
-      const ppi = (totalPx > 1500 * 800) ? 100 : 300;
+      let ppi;
+      if (dpr < 1.5)      ppi = 96;
+      else if (dpr < 2.5) ppi = 200;
+      else                ppi = 400;
       const inch2m = 0.0254;
-      myDisplay.width = (window.innerWidth * dpr / ppi) * inch2m;
+      myDisplay.width  = (window.innerWidth  * dpr / ppi) * inch2m;
       myDisplay.height = (window.innerHeight * dpr / ppi) * inch2m;
     }
     estimateDisplayPhysicalSize();
