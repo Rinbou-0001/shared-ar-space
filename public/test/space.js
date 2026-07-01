@@ -625,24 +625,28 @@
         varying vec3 vWorldNormal;
         uniform float u_time;
 
-        // 4 波の重ね合わせ (方向・波長・時間位相・振幅がバラバラ)
-        //   pos は plane local XY (メートル)。plane は後で -π/2 X回転され local Z → world Y。
+        // 6 波の重ね合わせ (方向・波長・時間位相・振幅が全て異なる)
+        //   波長: 1.0m 〜 7m (視覚的なうねりが 40m 内に 6〜40 山あるスケール感)
+        //   振幅: 総和で最大 ±25cm 程度 → 傾きが 5〜15% 出て法線が 3〜8°ブレる
+        //   → Fresnel / Specular が明確に反応し「うねり」として知覚される
         float waveHeight(vec2 pos, float t) {
           float h = 0.0;
-          h += sin(dot(pos, vec2( 0.30,  0.10)) + t * 0.9) * 0.10;
-          h += sin(dot(pos, vec2(-0.20,  0.35)) + t * 1.3) * 0.06;
-          h += sin(dot(pos, vec2( 0.60, -0.25)) + t * 1.9) * 0.035;
-          h += sin(dot(pos, vec2(-0.85, -0.40)) + t * 2.6) * 0.020;
+          h += sin(dot(pos, vec2( 0.80,  0.25)) + t * 0.70) * 0.11; // λ≈7.5m うねり本体
+          h += sin(dot(pos, vec2(-0.45,  0.95)) + t * 0.95) * 0.08; // λ≈6m
+          h += sin(dot(pos, vec2( 1.30, -0.60)) + t * 1.40) * 0.05; // λ≈4.4m
+          h += sin(dot(pos, vec2(-1.60, -0.90)) + t * 1.90) * 0.03; // λ≈3.4m
+          h += sin(dot(pos, vec2( 2.40,  1.10)) + t * 2.50) * 0.018;// λ≈2.4m
+          h += sin(dot(pos, vec2(-2.80,  1.90)) + t * 3.20) * 0.010;// λ≈1.85m 高周波さざ波
           return h;
         }
         // 中心差分で local 法線を算出 (up = 変位前の local +Z)
+        //   eps は最短波長の 1/8 程度 → 波形を潰さない
         vec3 waveNormalLocal(vec2 pos, float t) {
-          float eps = 0.20;
+          float eps = 0.08;
           float hL = waveHeight(pos - vec2(eps, 0.0), t);
           float hR = waveHeight(pos + vec2(eps, 0.0), t);
           float hD = waveHeight(pos - vec2(0.0, eps), t);
           float hU = waveHeight(pos + vec2(0.0, eps), t);
-          // 高さの X/Y 勾配 → 法線 (local +Z を up 基準に)
           return normalize(vec3(hL - hR, hD - hU, 2.0 * eps));
         }
 
@@ -675,26 +679,27 @@
           vec3 V = normalize(cameraPosition - vWorldPos);
           vec3 L = normalize(u_lightDir);
 
-          // Fresnel (Schlick): 見下ろすと透けて浅色、水平近くだと反射が強くて深色
+          // Fresnel: 指数を弱めて (^2) 法線変化への感度を高める
           float NdotV = clamp(dot(N, V), 0.0, 1.0);
-          float F = pow(1.0 - NdotV, 4.0);
-
-          // ベース水色: 浅↔深 を Fresnel で補間 + 微妙な水平位置揺らぎ
+          float F = pow(1.0 - NdotV, 2.0);
           vec3 waterColor = mix(u_shallowColor, u_deepColor, F);
 
-          // Blinn-Phong スペキュラ (太陽の反射)
+          // Lambertian: 波の斜面が光を捉えて明暗が付く (うねり視認の主役)
+          float diff = clamp(dot(N, L), 0.0, 1.0);
+          waterColor *= mix(0.55, 1.35, diff);
+
+          // Blinn-Phong スペキュラ (波の山でギラッと反射)
           vec3 H = normalize(L + V);
           float NdotH = max(dot(N, H), 0.0);
-          float spec = pow(NdotH, 80.0);
-          waterColor += u_specColor * spec * 0.6;
+          float spec = pow(NdotH, 60.0);
+          waterColor += u_specColor * spec * 1.2;
 
-          // 疑似コースティクス: 光が水面で屈折して床に当たったような明線
-          //   高周波の 2 波を掛け合わせ、明るい部分だけを強調
-          vec2 cp = vWorldPos.xz * 0.35 + N.xz * 0.6;
-          float c1 = sin(cp.x + u_time * 1.4);
-          float c2 = sin(cp.y - u_time * 1.7);
+          // 疑似コースティクス: 高周波の直交 sin を掛け合わせて明線化
+          vec2 cp = vWorldPos.xz * 0.55 + N.xz * 1.2;
+          float c1 = sin(cp.x + u_time * 1.6);
+          float c2 = sin(cp.y - u_time * 1.9);
           float caustic = max(c1 * c2, 0.0);
-          caustic = pow(caustic, 6.0) * 0.35;
+          caustic = pow(caustic, 5.0) * 0.28;
           waterColor += vec3(0.6, 0.9, 1.0) * caustic;
 
           // スプレーペイント (premultiplied) を水面上に OVER 合成
@@ -710,10 +715,10 @@
     // 環境構築: 床・グリッド・境界・スポーン体積 (中心原点)
     // ============================================================
     // 床: 中心(0,0,0)、40×40 の水面 (試験実装)
-    //   ・128×128 分割で頂点変位できる密度を確保 (16k 頂点、GPU 負荷は軽微)
-    //   ・法線を頂点シェーダで計算するため flatShading 不要
+    //   ・192×192 分割 = 20.8cm セグメント → 最短波長 1.85m でも余裕を持って再現
+    //   ・37k 頂点 (Nyquist 的に 2× のマージンで安全)
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE, 128, 128),
+      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE, 192, 192),
       floorMaterial
     );
     ground.rotation.x = -Math.PI / 2;
@@ -3366,9 +3371,12 @@
 
     function tick() {
       requestAnimationFrame(tick);
-      // 水面シェーダの時刻更新 (サーバー時刻ベース → 全クライアントで波が同位相)
+      // 水面シェーダの時刻更新
+      //   Unix ms をそのまま fp32 に渡すと 1.7e9 の桁で精度が破綻し sin が動かないため
+      //   100000ms = 100s でラップした値を渡す。全クライアントで syncedNow() を共有し、
+      //   同じ mod 値なので波位相は同期する。
       if (floorMaterial && floorMaterial.uniforms && floorMaterial.uniforms.u_time) {
-        floorMaterial.uniforms.u_time.value = syncedNow() * 0.001;
+        floorMaterial.uniforms.u_time.value = (syncedNow() % 100000) * 0.001;
       }
       // スプレー発射中の床ヒット位置リング更新 (発射者本人のみ可視)
       updateSprayConeVis();
