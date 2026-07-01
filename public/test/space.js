@@ -1045,6 +1045,122 @@
     boundary.position.set(0, 0.012, 0);
     scene.add(boundary);
 
+    // ============================================================
+    // 壁 (4 面) + 屋根 (1 面) - 高さ 20m の箱でフィールドを囲う
+    //   ・材質: ライト非依存 MeshBasicMaterial (床と同じベース色) 両面描画
+    //   ・グリッド: 床と同じ配色/密度 (1m 細線 + 5m 主格子)
+    //   ・境界 (外周輪郭): 床の boundary と同じ 0xc0c0c6
+    // ============================================================
+    const WALL_HEIGHT = 20;
+    const WALL_BASE_COLOR = 0x55555c;
+
+    // makeWallGrid: 幅 w × 高さ h の面に 1m 細線 + 5m 主格子を描く LineSegments を作る
+    //   ・cellMinor 間隔で細いグレー、cellMajor 倍数で明るいグレーに切替
+    //   ・戻り値は XY 面の LineSegments (Z=0)、呼び出し側で回転/位置決めする
+    function makeWallGrid(w, h, cellMinor, cellMajor) {
+      const cMinor = new THREE.Color(0x9a9aa0);
+      const cMajor = new THREE.Color(0xb0b0b6);
+      const positions = [];
+      const colors = [];
+      // 垂直線 (X 一定、Y を走る)
+      const nx = Math.round(w / cellMinor);
+      for (let i = 0; i <= nx; i++) {
+        const x = -w / 2 + i * cellMinor;
+        positions.push(x, 0, 0,  x, h, 0);
+        const c = (i % cellMajor === 0) ? cMajor : cMinor;
+        colors.push(c.r, c.g, c.b,  c.r, c.g, c.b);
+      }
+      // 水平線 (Y 一定、X を走る)
+      const ny = Math.round(h / cellMinor);
+      for (let j = 0; j <= ny; j++) {
+        const y = j * cellMinor;
+        positions.push(-w / 2, y, 0,  +w / 2, y, 0);
+        const c = (j % cellMajor === 0) ? cMajor : cMinor;
+        colors.push(c.r, c.g, c.b,  c.r, c.g, c.b);
+      }
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      return new THREE.LineSegments(
+        geom,
+        new THREE.LineBasicMaterial({ vertexColors: true, fog: false })
+      );
+    }
+
+    // 名前が既存 (8m 旧エンクロージャー) の wallMat と衝突するので別名にする
+    const fieldWallMat = new THREE.MeshBasicMaterial({
+      color: WALL_BASE_COLOR,
+      side: THREE.DoubleSide,
+    });
+
+    // 壁 4 面 + 各面のグリッドを作る helper
+    //   pos: 壁中心の world 位置
+    //   rotY: Y 軸回転 (rad) — 壁の向き (東西 or 南北)
+    //   width: 壁の幅 (m)
+    function addWall(name, pos, rotY, width) {
+      // ベース面
+      const w = new THREE.Mesh(
+        new THREE.PlaneGeometry(width, WALL_HEIGHT),
+        fieldWallMat
+      );
+      w.name = name;
+      w.position.copy(pos);
+      w.rotation.y = rotY;
+      // PlaneGeometry の中心は原点にあり、生成時に width×height。
+      //   Y 方向は中央 = 0 として上下対称なので、床から生えた壁にするために
+      //   親を y=0 の床面基準で position.y = WALL_HEIGHT/2 に置く (pos.y で指定済み)。
+      scene.add(w);
+
+      // グリッド
+      const g = makeWallGrid(width, WALL_HEIGHT, 1, 5);
+      g.position.copy(pos);
+      // ベース位置は壁と同じだが、makeWallGrid は下端 y=0 起点で作っているので
+      //   y オフセットを -WALL_HEIGHT/2 して下端を pos.y - WALL_HEIGHT/2 (= 床) に合わせる
+      g.position.y = pos.y - WALL_HEIGHT / 2;
+      g.rotation.y = rotY;
+      // 面から少し前 (内側) に浮かせてZ ファイティング回避 (0.02m)
+      const nx = Math.sin(rotY), nz = Math.cos(rotY);
+      g.position.x += nx * 0.02;
+      g.position.z += nz * 0.02;
+      scene.add(g);
+    }
+    // 4 面: 北 (+Z), 南 (-Z), 東 (+X), 西 (-X)。それぞれ内側 (= 中心側) が正面。
+    //   PlaneGeometry の front は local +Z なので、rotY で内向きに揃える。
+    //   ・北壁は z=+FIELD_HALF で内向き = -Z → rotY = π
+    //   ・南壁は z=-FIELD_HALF で内向き = +Z → rotY = 0
+    //   ・東壁は x=+FIELD_HALF で内向き = -X → rotY = -π/2
+    //   ・西壁は x=-FIELD_HALF で内向き = +X → rotY = +π/2
+    addWall('wall_north', new THREE.Vector3(0, WALL_HEIGHT / 2, +FIELD_HALF), Math.PI,        FIELD_SIZE);
+    addWall('wall_south', new THREE.Vector3(0, WALL_HEIGHT / 2, -FIELD_HALF), 0,              FIELD_SIZE);
+    addWall('wall_east',  new THREE.Vector3(+FIELD_HALF, WALL_HEIGHT / 2, 0), -Math.PI / 2,   FIELD_SIZE);
+    addWall('wall_west',  new THREE.Vector3(-FIELD_HALF, WALL_HEIGHT / 2, 0), +Math.PI / 2,   FIELD_SIZE);
+
+    // 屋根 - 高さ WALL_HEIGHT の水平面。裏面 (下向き = 内側) がフィールドに向く。
+    const roof = new THREE.Mesh(
+      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
+      fieldWallMat
+    );
+    roof.name = 'roof';
+    roof.rotation.x = Math.PI / 2;      // 水平面に (下向きが法線)
+    roof.position.set(0, WALL_HEIGHT, 0);
+    scene.add(roof);
+
+    // 屋根のグリッド (床と同じ配色/密度)
+    const roofGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x9a9aa0, 0x7a7a80);
+    roofGrid.position.set(0, WALL_HEIGHT - 0.02, 0);
+    scene.add(roofGrid);
+    const roofMajor = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xb0b0b6, 0xb0b0b6);
+    roofMajor.position.set(0, WALL_HEIGHT - 0.025, 0);
+    scene.add(roofMajor);
+
+    // 屋根の外周 (床の boundary と対応)
+    const roofBoundary = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
+      new THREE.LineBasicMaterial({ color: 0xc0c0c6, linewidth: 2 })
+    );
+    roofBoundary.position.set(0, WALL_HEIGHT - 0.012, 0);
+    scene.add(roofBoundary);
+
     // スポーン体積 - 中間〜明るいグレー
     const spawnVolume = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(4, 1, 4)),
