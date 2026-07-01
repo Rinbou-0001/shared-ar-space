@@ -6,7 +6,7 @@
 //                     near=0.005m なので自分の15cm球は視界に映らない (FrontSideのため内側は描画されない)
 //   observer (PC)   : 三人称、自前OrbitControls + WASD移動
 //
-// 共通空間: 20m × 20m × 高さ自由 (中心原点)
+// 共通空間: 40m × 40m × 高さ自由 (中心原点)
 //   座標範囲: X/Z は -10〜+10 (20m)、Y は 0〜+ (床から上)
 //   マーカー: 1m の机上 (VR 上では (0, 1, 0) と扱う)
 //   スポーン体積: 4m × 1m × 4m (中心 0,1.5,0 → 机周辺 + 目線高さ)
@@ -491,15 +491,15 @@
 
     // ============================================================
     // スプレーペイント システム (シングル RT + 加算ブレンド版)
-    //   - 床面 (20m × 20m) を共有キャンバスとして扱う
+    //   - 床面 (40m × 40m) を共有キャンバスとして扱う
     //   - 1 枚の RenderTarget へ Fragment Shader で粒を「premultiplied alpha + 加算ブレンド」で蓄積
     //     → ping-pong 不要 / RT を読み戻さない / 同フレーム read-write 競合なし
     //   - 床マテリアル: baseColor を背景に paint テクスチャ (premultiplied) を OVER 合成
     //   - スプレーイベント (位置・方向・色・半径・時刻) は Socket.IO で全クライアントへ
     //   - 全クライアントが同じ処理 (raycast→UV→shader pass) を実行 → 結果は決定的に一致
     // ============================================================
-    const FIELD_HALF = 10;      // 床は ±10m
-    const FIELD_SIZE = 20;      // 全幅 20m
+    const FIELD_HALF = 20;      // 床は ±20m
+    const FIELD_SIZE = 40;      // 全幅 40m
     const PAINT_RES = 1024;     // ペイントテクスチャ解像度
     const paintRTOpts = {
       format: THREE.RGBAFormat,
@@ -631,7 +631,7 @@
     // ============================================================
     // 環境構築: 床・グリッド・境界・スポーン体積 (中心原点)
     // ============================================================
-    // 床: 中心(0,0,0)、20×20 (スプレーペイント可能な ShaderMaterial)
+    // 床: 中心(0,0,0)、40×40 (スプレーペイント可能な ShaderMaterial)
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
       floorMaterial
@@ -1027,19 +1027,19 @@
       sprayHitDisk.scale.setScalar(scale);
     }
 
-    // 1m グリッド - 暗い床に映えるよう明るめグレー
-    const grid = new THREE.GridHelper(20, 20, 0x9a9aa0, 0x7a7a80);
+    // 1m グリッド - 暗い床に映えるよう明るめグレー (40m を 40 分割 = 1m 間隔)
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x9a9aa0, 0x7a7a80);
     grid.position.set(0, 0.01, 0);
     scene.add(grid);
 
-    // 5m 主格子 - もっと明るいグレーで強調
-    const majorGrid = new THREE.GridHelper(20, 4, 0xb0b0b6, 0xb0b0b6);
+    // 5m 主格子 - もっと明るいグレーで強調 (40m を 8 分割 = 5m 間隔)
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xb0b0b6, 0xb0b0b6);
     majorGrid.position.set(0, 0.015, 0);
     scene.add(majorGrid);
 
-    // 20m 境界 - 明るいグレー (はっきり区別)
+    // 40m 境界 - 明るいグレー (はっきり区別)
     const boundary = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(20, 0.02, 20)),
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
       new THREE.LineBasicMaterial({ color: 0xc0c0c6, linewidth: 2 })
     );
     boundary.position.set(0, 0.012, 0);
@@ -3274,9 +3274,9 @@
         foxOrbitGroup.rotation.y = Math.atan2(tx, tz) + Math.PI;
       }
 
-      // フィールド範囲 (20m × 20m 中心原点) 内なら表示、外なら非表示。
+      // フィールド範囲 (40m × 40m 中心原点) 内なら表示、外なら非表示。
       //   visible 切替は描画のみに影響し、親 Group の周回更新は止まらない。
-      const FIELD_HALF = 10;
+      //   ※ 外側 FIELD_HALF (=20) と同名変数を再宣言せず、そのまま参照する。
       function _isInsideField(obj) {
         if (!obj) return false;
         const p = obj.getWorldPosition(_fieldVisVec);
