@@ -600,16 +600,14 @@
       applyPaintTo(paintRT, uv, uvRadius, color, seed);
     }
 
-    // 床マテリアル: 水面シミュレーション (試験実装)
-    //   ・頂点シェーダ: 4 波長の sin 合成で頂点を Y 方向に変位 → 3D 波
-    //   ・フラグメントシェーダ:
-    //     - 波の勾配から法線を数値微分で算出
-    //     - Fresnel で浅色↔深色を混合
-    //     - Blinn-Phong 風のスペキュラでハイライト
-    //     - 高周波の疑似コースティクスを加算
-    //     - スプレーペイントは水面の上に浮かぶ形で OVER 合成 (paint.a 依存)
-    //   ・u_time は tick() で毎フレーム更新
-    //   ・全クライアントで同期させたい場合は syncedNow() を渡す
+    // 床マテリアル: フラグメントシェーダのみのランダム波紋 (試験実装)
+    //   ・頂点は変位させない (床は完全に平面)
+    //   ・N 個の "リップルスロット" が SLOT_PERIOD ごとに新しい波紋を独立に発生
+    //   ・各波紋は cycleIndex に対する hash から発生位置を決定 → 常にランダム
+    //   ・発生時刻も slot ごとに位相オフセット → 全部が同時発生せず時間的に分散
+    //   ・ガウス包絡 × 余弦振動で "広がる明線" として表現
+    //   ・勾配から法線を解析的に算出、Fresnel / Lambertian / Specular で立体感付与
+    //   ・スプレーペイントは水面の上に浮かぶ形で OVER 合成 (paint.a 依存)
     const floorMaterial = new THREE.ShaderMaterial({
       uniforms: {
         u_time:          { value: 0 },
@@ -622,43 +620,10 @@
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vWorldPos;
-        varying vec3 vWorldNormal;
-        uniform float u_time;
-
-        // 6 波の重ね合わせ (方向・波長・時間位相・振幅が全て異なる)
-        //   波長: 1.0m 〜 7m (視覚的なうねりが 40m 内に 6〜40 山あるスケール感)
-        //   振幅: 総和で最大 ±25cm 程度 → 傾きが 5〜15% 出て法線が 3〜8°ブレる
-        //   → Fresnel / Specular が明確に反応し「うねり」として知覚される
-        float waveHeight(vec2 pos, float t) {
-          float h = 0.0;
-          h += sin(dot(pos, vec2( 0.80,  0.25)) + t * 0.70) * 0.11; // λ≈7.5m うねり本体
-          h += sin(dot(pos, vec2(-0.45,  0.95)) + t * 0.95) * 0.08; // λ≈6m
-          h += sin(dot(pos, vec2( 1.30, -0.60)) + t * 1.40) * 0.05; // λ≈4.4m
-          h += sin(dot(pos, vec2(-1.60, -0.90)) + t * 1.90) * 0.03; // λ≈3.4m
-          h += sin(dot(pos, vec2( 2.40,  1.10)) + t * 2.50) * 0.018;// λ≈2.4m
-          h += sin(dot(pos, vec2(-2.80,  1.90)) + t * 3.20) * 0.010;// λ≈1.85m 高周波さざ波
-          return h;
-        }
-        // 中心差分で local 法線を算出 (up = 変位前の local +Z)
-        //   eps は最短波長の 1/8 程度 → 波形を潰さない
-        vec3 waveNormalLocal(vec2 pos, float t) {
-          float eps = 0.08;
-          float hL = waveHeight(pos - vec2(eps, 0.0), t);
-          float hR = waveHeight(pos + vec2(eps, 0.0), t);
-          float hD = waveHeight(pos - vec2(0.0, eps), t);
-          float hU = waveHeight(pos + vec2(0.0, eps), t);
-          return normalize(vec3(hL - hR, hD - hU, 2.0 * eps));
-        }
-
         void main() {
           vUv = uv;
-          vec3 p = position;
-          p.z = waveHeight(p.xy, u_time);
-          vec4 wp = modelMatrix * vec4(p, 1.0);
+          vec4 wp = modelMatrix * vec4(position, 1.0);
           vWorldPos = wp.xyz;
-          vec3 nLocal = waveNormalLocal(p.xy, u_time);
-          // 局所法線をワールド空間へ (床は -π/2 X 回転で local +Z が world +Y になる)
-          vWorldNormal = normalize(mat3(modelMatrix) * nLocal);
           gl_Position = projectionMatrix * viewMatrix * wp;
         }
       `,
@@ -666,7 +631,6 @@
         precision highp float;
         varying vec2 vUv;
         varying vec3 vWorldPos;
-        varying vec3 vWorldNormal;
         uniform float u_time;
         uniform vec3  u_deepColor;
         uniform vec3  u_shallowColor;
@@ -674,35 +638,105 @@
         uniform vec3  u_lightDir;
         uniform sampler2D u_paint;
 
+        // 疑似乱数 (安定した 32bit 整数演算相当を fract で近似)
+        float hash11(float p) {
+          p = fract(p * 0.1031);
+          p *= p + 33.33;
+          p *= p + p;
+          return fract(p);
+        }
+        vec2 hash22(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.xx + p3.yz) * p3.zy);
+        }
+
+        // 単一波紋の (高さ, 勾配XZ) を返す
+        //   center: 発生位置 (world XZ)
+        //   age: この波紋の経過時間 (秒)
+        vec3 rippleContribution(vec2 pos, vec2 center, float age) {
+          const float LIFE   = 3.0;    // 寿命 3 秒
+          const float SPEED  = 3.2;    // 波面拡大速度 3.2 m/s → 最大半径 ~10m
+          const float FREQ   = 14.0;   // 波面上の余弦振動 (rad/m)
+          const float WIDTH  = 0.32;   // ガウス包絡の半幅 (m)
+          const float AMP    = 0.055;  // 振幅 (仮想高さ, m相当)
+
+          if (age < 0.0 || age > LIFE) return vec3(0.0);
+
+          vec2 d  = pos - center;
+          float dist = length(d);
+          float r    = age * SPEED;
+          float dw   = dist - r;          // 波面までの符号付き距離
+          float w2   = WIDTH * WIDTH;
+          float env  = exp(-dw * dw / w2);// ガウス包絡
+          float osc  = cos(dw * FREQ);    // 明暗を作る余弦
+
+          // 誕生時にフェードイン、寿命末でフェードアウト
+          float ageT = age / LIFE;
+          float fade = 4.0 * ageT * (1.0 - ageT); // 放物線 0→1→0
+          float amp  = AMP * fade;
+
+          float h = amp * env * osc;
+          // ∂h/∂dist を解析的に:
+          //   env' = -2 dw / w^2 * env
+          //   osc' = -FREQ * sin(dw*FREQ)
+          float dEnv = (-2.0 * dw / w2) * env;
+          float dOsc = -FREQ * sin(dw * FREQ);
+          float dh_dr = amp * (dEnv * osc + env * dOsc);
+          vec2 grad = (dist > 0.001) ? (d / dist * dh_dr) : vec2(0.0);
+          return vec3(h, grad);
+        }
+
         void main() {
-          vec3 N = normalize(vWorldNormal);
+          vec2 pos = vWorldPos.xz;
+
+          const int   NUM_SLOTS  = 16;
+          const float SLOT_PERIOD = 2.5;    // 各スロットが 2.5s ごとに 1 発生
+          const float FIELD_RANGE = 40.0;   // ±20 の範囲に散布
+
+          float totalH = 0.0;
+          vec2  totalGrad = vec2(0.0);
+
+          for (int i = 0; i < NUM_SLOTS; i++) {
+            float slot = float(i);
+            // 各スロットの発生時刻をずらす (位相オフセット)
+            float phaseOffset = hash11(slot * 7.13) * SLOT_PERIOD;
+            float shiftedT = u_time + phaseOffset;
+            float cycleIdx = floor(shiftedT / SLOT_PERIOD);
+            float birthTime = cycleIdx * SLOT_PERIOD - phaseOffset;
+            // このサイクル分の発生位置 (毎サイクルで hash が変わる)
+            vec2 rnd = hash22(vec2(slot * 1.71, cycleIdx));
+            vec2 center = (rnd - 0.5) * FIELD_RANGE;
+            float age = u_time - birthTime;
+            vec3 rc = rippleContribution(pos, center, age);
+            totalH   += rc.x;
+            totalGrad += rc.yz;
+          }
+
+          // 勾配から擬似法線を構築 (Y=1 を基準に xz 成分を勾配で摂動)
+          vec3 N = normalize(vec3(-totalGrad.x, 1.0, -totalGrad.y));
           vec3 V = normalize(cameraPosition - vWorldPos);
           vec3 L = normalize(u_lightDir);
 
-          // Fresnel: 指数を弱めて (^2) 法線変化への感度を高める
+          // Fresnel
           float NdotV = clamp(dot(N, V), 0.0, 1.0);
           float F = pow(1.0 - NdotV, 2.0);
           vec3 waterColor = mix(u_shallowColor, u_deepColor, F);
 
-          // Lambertian: 波の斜面が光を捉えて明暗が付く (うねり視認の主役)
+          // Lambertian で明暗
           float diff = clamp(dot(N, L), 0.0, 1.0);
-          waterColor *= mix(0.55, 1.35, diff);
+          waterColor *= mix(0.65, 1.30, diff);
 
-          // Blinn-Phong スペキュラ (波の山でギラッと反射)
+          // Blinn-Phong (波紋の稜線でギラッと反射)
           vec3 H = normalize(L + V);
           float NdotH = max(dot(N, H), 0.0);
-          float spec = pow(NdotH, 60.0);
-          waterColor += u_specColor * spec * 1.2;
+          float spec = pow(NdotH, 90.0);
+          waterColor += u_specColor * spec * 1.8;
 
-          // 疑似コースティクス: 高周波の直交 sin を掛け合わせて明線化
-          vec2 cp = vWorldPos.xz * 0.55 + N.xz * 1.2;
-          float c1 = sin(cp.x + u_time * 1.6);
-          float c2 = sin(cp.y - u_time * 1.9);
-          float caustic = max(c1 * c2, 0.0);
-          caustic = pow(caustic, 5.0) * 0.28;
-          waterColor += vec3(0.6, 0.9, 1.0) * caustic;
+          // 波紋の高さそのものも僅かに明暗として上乗せ (中央の "点滴痕" 感)
+          waterColor += vec3(0.15, 0.25, 0.30) * clamp(totalH * 8.0, -0.4, 0.6);
 
-          // スプレーペイント (premultiplied) を水面上に OVER 合成
+          // スプレーペイント合成
           vec4 paint = texture2D(u_paint, vUv);
           vec3 col = waterColor * (1.0 - paint.a) + paint.rgb;
 
@@ -715,10 +749,9 @@
     // 環境構築: 床・グリッド・境界・スポーン体積 (中心原点)
     // ============================================================
     // 床: 中心(0,0,0)、40×40 の水面 (試験実装)
-    //   ・192×192 分割 = 20.8cm セグメント → 最短波長 1.85m でも余裕を持って再現
-    //   ・37k 頂点 (Nyquist 的に 2× のマージンで安全)
+    //   波紋はフラグメントシェーダのみで表現するので頂点分割は不要 (1×1 = 4 頂点で足りる)
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE, 192, 192),
+      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
       floorMaterial
     );
     ground.rotation.x = -Math.PI / 2;
