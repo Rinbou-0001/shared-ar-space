@@ -2549,10 +2549,10 @@
       // observer もアバター付き = 入室済み扱い
       state.entered = true;
 
-      // 初期視点: (0, 1.7, 1) 目線の高さ、原点の少し手前
-      camera.position.set(0, 1.7, 1);
-      // FPS スタイルの yaw/pitch (初期回転 Yaw=180°, Pitch=0, Roll=0)
-      let yaw = Math.PI;  // 180°
+      // 初期視点: (0, 1.7, -1.0) 目線の高さ、原点の少し奥
+      camera.position.set(0, 1.7, -1.0);
+      // FPS スタイルの yaw/pitch (初期回転 Yaw=0°, Pitch=0, Roll=0 = 恒等回転)
+      let yaw = 0;
       let pitch = 0;
       const _eulerObs = new THREE.Euler(0, 0, 0, 'YXZ');
       function applyYawPitch() {
