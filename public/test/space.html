@@ -164,16 +164,14 @@
       transition: transform 0.12s, background 0.15s, border-color 0.15s;
       padding: 0;
     }
-    body.ui-hidden #ui-long-press-btn { display: block; }
+    /* スプレーボタンは常に非表示 (ユーザー指示によりスマホ UI から除外) */
+    #ui-long-press-btn,
+    body.ui-hidden #ui-long-press-btn { display: none !important; }
     #ui-long-press-btn:active,
     #ui-long-press-btn.pressing {
       background: rgba(190, 190, 200, 0.95);
       border-color: rgba(80, 80, 90, 0.95);
       transform: translateX(-50%) scale(0.94);
-    }
-    /* PC や大画面では非表示 */
-    @media (min-width: 820px) {
-      body.ui-hidden #ui-long-press-btn { display: none; }
     }
 
     /* スマホ用 Off-Axis トグル (画面上部、左寄せの小型ボタン) */
