@@ -63,7 +63,7 @@ let viewerEye = { x: 0, y: 2.0, z: 0 };
 //   rippleMinM / rippleMaxM: 発生する波紋の直径 min / max (メートル)
 //   waveSpeed              : 0-20 の抽象値、client 側で c² にマップ
 //   rippleSpawnRate        : 自動発生の頻度 (回/秒、0 = 自動発生なし)
-let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 12.5, rippleSpawnRate: 0.30 };
+let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpawnRate: 0.05 };
 
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)

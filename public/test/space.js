@@ -737,8 +737,8 @@
     const waveSimConfig = {
       rippleMinM: 0.5,
       rippleMaxM: 1.5,
-      waveSpeed:  12.5,
-      rippleSpawnRate: 0.30,  // 自動発生の頻度 (回/秒)。0 = 自動発生なし
+      waveSpeed:  0.6,
+      rippleSpawnRate: 0.05,  // 自動発生の頻度 (回/秒)。0 = 自動発生なし
     };
     function applyWaveSpeed(v) {
       // 0..20 を c² 0..0.48 に線形マップ (CFL 安定条件 c²<0.5 の範囲内で最大化)
