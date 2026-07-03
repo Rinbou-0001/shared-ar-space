@@ -3277,6 +3277,11 @@
       state.selfGroup = null;
 
       document.getElementById('enter-overlay').style.display = 'none';
+      // 入室と同時に UI 非表示ボタンを自動発火 (VR 描画に集中できる状態でスタート)
+      const uiToggle = document.getElementById('ui-toggle');
+      if (uiToggle && !document.body.classList.contains('ui-hidden')) {
+        uiToggle.click();
+      }
       setupDeviceOrientation();
     }
 

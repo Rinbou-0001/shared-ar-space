@@ -208,25 +208,32 @@
       body.is-camera #cam-offaxis-toggle { display: none; }
     }
 
-    /* スマホ入室オーバーレイ */
+    /* スマホ入室オーバーレイ
+       ・下地は透過カバー (背後シーンを覗ける程度)
+       ・z-index は既存 UI (#ui-toggle #cam-offaxis-toggle 等 = 最大 10003) より高くして
+         入室前のタッチはすべて吸収し、いかなる UI 操作もできないようにする */
     #enter-overlay {
       position: fixed; inset: 0;
-      background: rgba(10, 10, 20, 0.92);
-      z-index: 8000;
+      background: rgba(10, 10, 20, 0.35);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      z-index: 20000;
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
       color: white; font-family: sans-serif;
       text-align: center; padding: 20px;
+      pointer-events: auto;   /* すべてのタップをこのレイヤで受け止める */
     }
-    #enter-overlay h2 { margin: 0 0 8px; }
+    #enter-overlay h2 { margin: 0 0 8px; text-shadow: 0 2px 8px rgba(0,0,0,0.75); }
     #enter-overlay p {
-      opacity: 0.8; max-width: 320px; line-height: 1.5;
-      margin: 0 0 20px;
+      opacity: 0.9; max-width: 320px; line-height: 1.5;
+      margin: 0 0 20px; text-shadow: 0 1px 4px rgba(0,0,0,0.75);
     }
     #enter-overlay button {
       padding: 16px 36px; font-size: 16px; font-weight: bold;
       background: #4ade80; color: #0a0a14;
       border: none; border-radius: 8px; cursor: pointer;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.5);
     }
 
     /* PCオブザーバーパネル */
