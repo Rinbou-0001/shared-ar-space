@@ -3264,11 +3264,8 @@
 
     function enterAsCamera() {
       state.entered = true;
-      // 机 (y=1m) 周辺 + 目線高さを想定したスポーン体積
-      //   4m × 1m × 4m、中心 (0, 1.5, 0) → x±2, y 1〜2, z±2
-      const x = 0 + (Math.random() - 0.5) * 4;
-      const y = 1.5 + (Math.random() - 0.5) * 1;
-      const z = 0 + (Math.random() - 0.5) * 4;
+      // 入室時の初期地点は原点直上、目線高さ (0, 1.7, 0) に固定
+      const x = 0, y = 1.7, z = 0;
       state.mySpawn = { x, y, z };
 
       camera.position.set(x, y, z);
