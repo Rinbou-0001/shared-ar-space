@@ -3285,6 +3285,29 @@
         uiToggle.click();
       }
       setupDeviceOrientation();
+
+      // ============================================================
+      // UI 非表示時のタップで波紋発生
+      //   ・タップ位置 → NDC → Raycaster → 床 (ground) との交点 UV を取得
+      //   ・emitRipple で全クライアントへ broadcast (同期)
+      //   ・ボタン領域 (SPRAY / Off-Axis / UI トグル) のタップは伝播抑制済みなので無反応
+      //   ・UI 表示中はタップ→ボタン反応を優先させたいので、ui-hidden 中のみ有効化
+      // ============================================================
+      const tapRaycaster = new THREE.Raycaster();
+      const tapNDC = new THREE.Vector2();
+      renderer.domElement.addEventListener('touchstart', (e) => {
+        if (!document.body.classList.contains('ui-hidden')) return;
+        const t = e.touches && e.touches[0];
+        if (!t) return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        tapNDC.x =  ((t.clientX - rect.left) / rect.width)  * 2 - 1;
+        tapNDC.y = -((t.clientY - rect.top)  / rect.height) * 2 + 1;
+        tapRaycaster.setFromCamera(tapNDC, camera);
+        const hits = tapRaycaster.intersectObject(ground, false);
+        if (hits.length === 0 || !hits[0].uv) return;
+        const hit = hits[0];
+        emitRipple(hit.uv.x, hit.uv.y, 0.6, 0.02);
+      }, { passive: true });
     }
 
     function setupDeviceOrientation() {
