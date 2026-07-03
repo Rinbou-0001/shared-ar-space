@@ -3269,7 +3269,9 @@
       state.mySpawn = { x, y, z };
 
       camera.position.set(x, y, z);
-      log(`spawn: (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`, 'ok');
+      // 初期回転: Yaw=180°, Pitch=0, Roll=0 (DeviceOrientation が発火するまでの初期値)
+      camera.quaternion.setFromEuler(new THREE.Euler(0, Math.PI, 0, 'YXZ'));
+      log(`spawn: (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) yaw=180`, 'ok');
 
       // 自分のアバターは "自分の端末のシーンには追加しない"。
       // 他クライアントでは pose ブロードキャスト経由で makeAvatar されるので問題なし。
