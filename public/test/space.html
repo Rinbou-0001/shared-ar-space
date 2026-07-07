@@ -164,9 +164,11 @@
       transition: transform 0.12s, background 0.15s, border-color 0.15s;
       padding: 0;
     }
-    /* スプレーボタンは常に非表示 (ユーザー指示によりスマホ UI から除外) */
+    /* スプレーボタンは既定非表示。
+       body.spray-unlocked (UI トグルを 5 回押下で付与) + ui-hidden 中のみ復活。 */
     #ui-long-press-btn,
     body.ui-hidden #ui-long-press-btn { display: none !important; }
+    body.spray-unlocked.ui-hidden #ui-long-press-btn { display: block !important; }
     #ui-long-press-btn:active,
     #ui-long-press-btn.pressing {
       background: rgba(190, 190, 200, 0.95);

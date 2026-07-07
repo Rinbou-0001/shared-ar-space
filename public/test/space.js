@@ -2386,13 +2386,25 @@
     });
 
     // UI 表示・非表示トグル
+    //   スマホ (camera) では 5 回押下でスプレーボタン解禁 (spray-unlocked class 付与)。
+    //   カウンタは各クライアントのメモリ内 (リロードでリセット、共有なし)。
     const uiToggleBtn = document.getElementById('ui-toggle');
+    let _uiToggleCount = 0;
+    const SPRAY_UNLOCK_THRESHOLD = 5;
     if (uiToggleBtn) {
       uiToggleBtn.addEventListener('click', () => {
         document.body.classList.toggle('ui-hidden');
         uiToggleBtn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
         // tabbar 表示/非表示に合わせて canvas サイズも再計算
         resizeRenderer();
+        // カウント + 解禁判定 (スマホのみ、既に解禁済みならスキップ)
+        if (ROLE === 'camera' && !document.body.classList.contains('spray-unlocked')) {
+          _uiToggleCount++;
+          if (_uiToggleCount >= SPRAY_UNLOCK_THRESHOLD) {
+            document.body.classList.add('spray-unlocked');
+            try { log('spray 解禁 (UI トグル ' + _uiToggleCount + ' 回)', 'ok'); } catch (_) {}
+          }
+        }
       });
       uiToggleBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); });
     }
