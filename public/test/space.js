@@ -937,11 +937,20 @@
     // ============================================================
     // 環境構築: 床・グリッド・境界・スポーン体積 (中心原点)
     // ============================================================
-    // 床: 中心(0,0,0)、40×40 の水面 (試験実装)
-    //   波紋はフラグメントシェーダのみで表現するので頂点分割は不要 (1×1 = 4 頂点で足りる)
+    // 床モード切替:
+    //   'grid'  : 壁面と同じ MeshBasicMaterial + 既存 GridHelper で構成
+    //   'water' : 既存の波動シェーダ + Ping-Pong RT で水面表現 (シェーダ機能は保持)
+    //   ※ 'water' に戻したい場合はここを 'water' に変更するだけで復帰する。
+    //     関連コード (floorMaterial / paint RT / wave sim / tap ripple 等) はすべて残置。
+    const FLOOR_MODE = 'grid';
+    const floorGridMat = new THREE.MeshBasicMaterial({
+      color: 0x55555c,   // WALL_BASE_COLOR と同色 (壁面と統一)
+      side: THREE.DoubleSide,
+    });
+    // 床: 中心(0,0,0)、40×40
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
-      floorMaterial
+      FLOOR_MODE === 'water' ? floorMaterial : floorGridMat
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(0, 0, 0);
@@ -2386,25 +2395,13 @@
     });
 
     // UI 表示・非表示トグル
-    //   スマホ (camera) では 5 回押下でスプレーボタン解禁 (spray-unlocked class 付与)。
-    //   カウンタは各クライアントのメモリ内 (リロードでリセット、共有なし)。
     const uiToggleBtn = document.getElementById('ui-toggle');
-    let _uiToggleCount = 0;
-    const SPRAY_UNLOCK_THRESHOLD = 5;
     if (uiToggleBtn) {
       uiToggleBtn.addEventListener('click', () => {
         document.body.classList.toggle('ui-hidden');
         uiToggleBtn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
         // tabbar 表示/非表示に合わせて canvas サイズも再計算
         resizeRenderer();
-        // カウント + 解禁判定 (スマホのみ、既に解禁済みならスキップ)
-        if (ROLE === 'camera' && !document.body.classList.contains('spray-unlocked')) {
-          _uiToggleCount++;
-          if (_uiToggleCount >= SPRAY_UNLOCK_THRESHOLD) {
-            document.body.classList.add('spray-unlocked');
-            try { log('spray 解禁 (UI トグル ' + _uiToggleCount + ' 回)', 'ok'); } catch (_) {}
-          }
-        }
       });
       uiToggleBtn.addEventListener('touchstart', (e) => { e.stopPropagation(); });
     }
@@ -3296,6 +3293,11 @@
       if (uiToggle && !document.body.classList.contains('ui-hidden')) {
         uiToggle.click();
       }
+      // 入室と同時に Off-Axis を自動 ON (スマホは gyro でマジックウィンドウ体験)
+      const camOa = document.getElementById('cam-offaxis-toggle');
+      if (camOa && !myDisplay.offaxis) {
+        camOa.click();
+      }
       setupDeviceOrientation();
 
       // ============================================================
@@ -3707,9 +3709,12 @@
 
     function tick() {
       requestAnimationFrame(tick);
-      // GPU 波動シミュレーション: ランダム波紋 + 保留イベント処理 + 1 ステップ更新
-      maybeSpawnRandomRipple();
-      simulateWaveStep();
+      // GPU 波動シミュレーション: 床が 'water' モードのときだけ実行
+      //   'grid' モードでは床が水面シェーダを使わないので、GPU 節約のため停止
+      if (FLOOR_MODE === 'water') {
+        maybeSpawnRandomRipple();
+        simulateWaveStep();
+      }
       // スプレー発射中の床ヒット位置リング更新 (発射者本人のみ可視)
       updateSprayConeVis();
 

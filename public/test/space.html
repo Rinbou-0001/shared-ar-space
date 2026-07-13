@@ -132,7 +132,8 @@
     body.ui-hidden #master-panel,
     body.ui-hidden #marker-status,
     body.ui-hidden #log,
-    body.ui-hidden #enter-overlay {
+    body.ui-hidden #enter-overlay,
+    body.ui-hidden #cam-offaxis-toggle {
       display: none !important;
     }
     body.ui-hidden .tab-content { top: 0; }
@@ -164,11 +165,13 @@
       transition: transform 0.12s, background 0.15s, border-color 0.15s;
       padding: 0;
     }
-    /* スプレーボタンは既定非表示。
-       body.spray-unlocked (UI トグルを 5 回押下で付与) + ui-hidden 中のみ復活。 */
-    #ui-long-press-btn,
-    body.ui-hidden #ui-long-press-btn { display: none !important; }
-    body.spray-unlocked.ui-hidden #ui-long-press-btn { display: block !important; }
+    /* スプレーボタン: UI 非表示中は常時表示 (スマホ向け)。
+       PC/大画面ではスマホ操作を想定しないので非表示のまま。 */
+    #ui-long-press-btn { display: none; }
+    body.ui-hidden #ui-long-press-btn { display: block !important; }
+    @media (min-width: 820px) {
+      body.ui-hidden #ui-long-press-btn { display: none !important; }
+    }
     #ui-long-press-btn:active,
     #ui-long-press-btn.pressing {
       background: rgba(190, 190, 200, 0.95);
