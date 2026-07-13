@@ -964,8 +964,17 @@
     // ============================================================
     const paintables = [];
     // 床を登録
-    ground.userData.paintRT = paintRT;
-    paintables.push(ground);
+    //   ・water モード: floorMaterial (ShaderMaterial) が自前で u_paint 合成をやるので
+    //                    レジストリ登録のみで OK
+    //   ・grid モード:  MeshBasicMaterial に paint 合成を後から onBeforeCompile 経由で
+    //                    注入 (共有 paintRT を再利用) — makePaintable/applyPaintTo は
+    //                    下の関数宣言でホイストされるので呼び出し可
+    if (FLOOR_MODE === 'water') {
+      ground.userData.paintRT = paintRT;
+      paintables.push(ground);
+    } else {
+      makePaintable(ground, { rt: paintRT });
+    }
 
     // 汎用ペイント書き込み (任意の RT へ shader pass)
     function applyPaintTo(rt, uvCenter, uvRadius, color, seed) {
@@ -1052,20 +1061,27 @@
 
       let rt = mat.userData.paintRT;
       if (!rt) {
-        // このマテリアル用 paintRT を新規作成
-        const res = opts.res || 512;
-        rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
-        // 透明クリア
-        const prevTarget = renderer.getRenderTarget();
-        const prevClearColor = new THREE.Color();
-        renderer.getClearColor(prevClearColor);
-        const prevClearAlpha = renderer.getClearAlpha();
-        renderer.setClearColor(0x000000, 0);
-        renderer.setRenderTarget(rt);
-        renderer.clear();
-        renderer.setRenderTarget(prevTarget);
-        renderer.setClearColor(prevClearColor, prevClearAlpha);
-        mat.userData.paintRT = rt;
+        if (opts.rt) {
+          // 既存 RT を再利用 (床の共有 paintRT を使うケース)
+          //   → 別途クリア済み前提
+          rt = opts.rt;
+          mat.userData.paintRT = rt;
+        } else {
+          // このマテリアル用 paintRT を新規作成
+          const res = opts.res || 512;
+          rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
+          // 透明クリア
+          const prevTarget = renderer.getRenderTarget();
+          const prevClearColor = new THREE.Color();
+          renderer.getClearColor(prevClearColor);
+          const prevClearAlpha = renderer.getClearAlpha();
+          renderer.setClearColor(0x000000, 0);
+          renderer.setRenderTarget(rt);
+          renderer.clear();
+          renderer.setRenderTarget(prevTarget);
+          renderer.setClearColor(prevClearColor, prevClearAlpha);
+          mat.userData.paintRT = rt;
+        }
 
         // onBeforeCompile はマテリアル毎に 1 度だけ注入
         const userUniform = { value: rt.texture };
@@ -1158,6 +1174,17 @@
     //   - 半径は cone 半角 (rad) で送信し、受信側で「距離 × tan(半角)」から世界半径を計算
     //     → 全クライアントで同じ床面 UV / 半径 / シードが算出され、結果が一致する
     // ============================================================
+    // 40m フィールドを構成する平面サーフェス (床/壁×4/屋根) 判定
+    //   → uvRadius 算出でこれらは共通の worldR / FIELD_SIZE スケール
+    function _isFieldSurface(obj) {
+      if (!obj || !obj.name) return false;
+      return obj.name === 'ground' ||
+             obj.name === 'roof'   ||
+             obj.name === 'wall_north' ||
+             obj.name === 'wall_south' ||
+             obj.name === 'wall_east'  ||
+             obj.name === 'wall_west';
+    }
     const SPRAY_HALF_ANGLE = Math.PI / 9;    // 20° (円錐半角) - 視認性重視
     const SPRAY_EMIT_HZ    = 20;             // 1 秒間に何回発射するか
     const SPRAY_MAX_DIST   = 30;             // 30m を越えたら床に届かないものとして無視
@@ -1251,7 +1278,14 @@
       if (hit.distance <= 0 || hit.distance > SPRAY_MAX_DIST) return;
 
       const worldRadius = hit.distance * Math.tan(halfAngle);
-      let uvRadius = (hit.object === ground) ? worldRadius / FIELD_SIZE : 0.035;
+      // 40m スケールのフィールドサーフェス (床 / 壁 / 屋根) は共通スケールで UV 半径を算出。
+      // FBX モデルは体感で 0.035 UV 固定 (bbox が可変で正確なスケールを取りにくいため)
+      let uvRadius;
+      if (hit.object === ground || _isFieldSurface(hit.object)) {
+        uvRadius = worldRadius / FIELD_SIZE;
+      } else {
+        uvRadius = 0.035;
+      }
       uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvRadius));
 
       const rt = hit.object.userData.paintRT;
@@ -1303,7 +1337,9 @@
         const hit = hits[0];
         if (hit.uv && hit.distance > 0 && hit.distance <= SPRAY_MAX_DIST) {
           const worldR = hit.distance * Math.tan(halfAngle);
-          const uvR = (hit.object === ground) ? worldR / FIELD_SIZE : 0.035;
+          // 40m フィールドサーフェス (床 / 壁 / 屋根) は共通スケール、FBX は固定
+          const isField = (hit.object === ground) || _isFieldSurface(hit.object);
+          const uvR = isField ? (worldR / FIELD_SIZE) : 0.035;
           data.targetName = (hit.object === ground) ? 'ground' : (hit.object.name || '');
           data.hitU = hit.uv.x;
           data.hitV = hit.uv.y;
@@ -1410,6 +1446,8 @@
     }
 
     // 名前が既存 (8m 旧エンクロージャー) の wallMat と衝突するので別名にする
+    //   ※ 各壁 / 屋根で独立の paintRT を持たせるために、実際の使用時は clone() する
+    //     (同じマテリアル参照だと 4 壁の UV 空間が共有され、1 面塗ると全面塗られる)
     const fieldWallMat = new THREE.MeshBasicMaterial({
       color: WALL_BASE_COLOR,
       side: THREE.DoubleSide,
@@ -1420,10 +1458,11 @@
     //   rotY: Y 軸回転 (rad) — 壁の向き (東西 or 南北)
     //   width: 壁の幅 (m)
     function addWall(name, pos, rotY, width) {
-      // ベース面
+      // ベース面 (マテリアルはこの壁専用に clone → makePaintable で独立 RT + shader 注入)
+      const wMat = fieldWallMat.clone();
       const w = new THREE.Mesh(
         new THREE.PlaneGeometry(width, WALL_HEIGHT),
-        fieldWallMat
+        wMat
       );
       w.name = name;
       w.position.copy(pos);
@@ -1432,6 +1471,9 @@
       //   Y 方向は中央 = 0 として上下対称なので、床から生えた壁にするために
       //   親を y=0 の床面基準で position.y = WALL_HEIGHT/2 に置く (pos.y で指定済み)。
       scene.add(w);
+      // 壁をペイント可能化 (raycast ヒット時に paintRT へ書き込み → shader が合成)
+      //   res=1024: 40m×20m の壁面を細かく塗れる解像度
+      makePaintable(w, { res: 1024 });
 
       // グリッド
       const g = makeWallGrid(width, WALL_HEIGHT, 1, 5);
@@ -1458,14 +1500,18 @@
     addWall('wall_west',  new THREE.Vector3(-FIELD_HALF, WALL_HEIGHT / 2, 0), +Math.PI / 2,   FIELD_SIZE);
 
     // 屋根 - 高さ WALL_HEIGHT の水平面。裏面 (下向き = 内側) がフィールドに向く。
+    //   マテリアルは独立 clone → 屋根単独の paint RT を持てるように
+    const roofMat = fieldWallMat.clone();
     const roof = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
-      fieldWallMat
+      roofMat
     );
     roof.name = 'roof';
     roof.rotation.x = Math.PI / 2;      // 水平面に (下向きが法線)
     roof.position.set(0, WALL_HEIGHT, 0);
     scene.add(roof);
+    // 屋根もペイント可能化
+    makePaintable(roof, { res: 1024 });
 
     // 屋根のグリッド (床と同じ配色/密度)
     const roofGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x9a9aa0, 0x7a7a80);
