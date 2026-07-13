@@ -1054,31 +1054,23 @@
       // UV 属性が無いジオメトリには平面投影 UV を生成
       ensureUV(mesh.geometry);
 
-      // mesh.material が配列の場合はサポート外 (FBX は通常単一マテリアル)
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-      if (!mat) return;
-      if (!mat.userData) mat.userData = {};
+      // ★ material 配列対応: FBX (Fox など) はマルチマテリアル構成のことがあり、
+      //   従来は先頭要素にしか paint 注入されず [1]..[N-1] のフラグメント描画で paint が消えていた。
+      //   → 配列全要素に注入 (同じ paintRT / 同じ uniform を共有)。UV 空間はメッシュで 1 つなので RT 共有で問題なし。
+      const matsArr = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      if (matsArr.length === 0 || !matsArr[0]) return;
 
-      // opts.doubleSide: FBX などで法線が内向きの面がある場合、FrontSide だと
-      //   ・raycast が backface と判定してスキップ → paint されない (下から Whale の腹)
-      //   ・レンダも culling で描画されない
-      //   両面化で raycast も描画も通す。副作用: 内側の面も見える (通常は問題なし)
-      if (opts.doubleSide) {
-        mat.side = THREE.DoubleSide;
+      // 全材質共通 paintRT (このメッシュ用) - opts.rt があれば流用、なければ新規作成
+      let rt = null;
+      for (const _m of matsArr) {
+        if (_m && _m.userData && _m.userData.paintRT) { rt = _m.userData.paintRT; break; }
       }
-
-      let rt = mat.userData.paintRT;
       if (!rt) {
         if (opts.rt) {
-          // 既存 RT を再利用 (床の共有 paintRT を使うケース)
-          //   → 別途クリア済み前提
           rt = opts.rt;
-          mat.userData.paintRT = rt;
         } else {
-          // このマテリアル用 paintRT を新規作成
           const res = opts.res || 512;
           rt = new THREE.WebGLRenderTarget(res, res, paintRTOpts);
-          // 透明クリア
           const prevTarget = renderer.getRenderTarget();
           const prevClearColor = new THREE.Color();
           renderer.getClearColor(prevClearColor);
@@ -1088,16 +1080,32 @@
           renderer.clear();
           renderer.setRenderTarget(prevTarget);
           renderer.setClearColor(prevClearColor, prevClearAlpha);
+        }
+      }
+
+      // 全材質に注入
+      let _injectedCount = 0;
+      for (const mat of matsArr) {
+        if (!mat) continue;
+        if (!mat.userData) mat.userData = {};
+
+        // opts.doubleSide: 法線内向きの面でも raycast+描画を通す
+        if (opts.doubleSide) mat.side = THREE.DoubleSide;
+
+        // 既に注入済み材質なら paintRT だけ最新化して次へ
+        if (mat.userData.paintInjected) {
           mat.userData.paintRT = rt;
+          continue;
         }
 
-        // onBeforeCompile はマテリアル毎に 1 度だけ注入
+        mat.userData.paintRT = rt;
+
+        // このマテリアル固有の userUniform (プログラムキャッシュキーごとに独立)
         const userUniform = { value: rt.texture };
         mat.userData.paintUniform = userUniform;
         const origOBC = mat.onBeforeCompile;
         mat.onBeforeCompile = (shader, renderer2) => {
           if (typeof origOBC === 'function') origOBC(shader, renderer2);
-          // ★ 動作診断: 各マテリアル初回コンパイル時に 1 度だけログ
           try {
             log('paint inject: ' + (mat.type || 'mat') +
                 ' uuid=' + mat.uuid.substr(0, 8) +
@@ -1105,11 +1113,8 @@
                 ' has <opaque_fragment>=' + (shader.fragmentShader.indexOf('#include <opaque_fragment>') !== -1),
               'ok');
           } catch (_) {}
-          // 重要: 新たに作る uniform をシェーダーへ追加
           shader.uniforms.u_paint = userUniform;
           // vertex: UV を varying で渡す
-          //   - `uv` attribute は Three.js prefix で常に宣言される
-          //   - skinning など既存ロジックは触らない
           if (shader.vertexShader.indexOf('#include <common>') !== -1) {
             shader.vertexShader = shader.vertexShader.replace(
               '#include <common>',
@@ -1123,8 +1128,6 @@
             'void main() {\n  vPaintUv = uv;'
           );
           // fragment: 最終色直後に paint を OVER 合成
-          //   - output_fragment (r150) / opaque_fragment (r152+) の両方を試す
-          //   - どちらも無ければ最後の `}` 直前に挿入
           if (shader.fragmentShader.indexOf('#include <common>') !== -1) {
             shader.fragmentShader = shader.fragmentShader.replace(
               '#include <common>',
@@ -1137,7 +1140,6 @@
           vec4 _paint = texture2D(u_paint, vPaintUv);
           gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
           let fs = shader.fragmentShader;
-          const before = fs;
           const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
           let injected = false;
           for (const m of markers) {
@@ -1148,20 +1150,25 @@
             }
           }
           if (!injected) {
-            // 最後の `}` (main 関数末尾) の直前に挿入
             fs = fs.replace(/\}\s*$/, paintCompose + '\n}');
           }
           shader.fragmentShader = fs;
         };
-        // 重要: customProgramCacheKey を一意化して別プログラムを強制
-        //   ・無いと 3 つの MeshStandardMaterial が同一 onBeforeCompile 文字列 + 同一プロパティで
-        //     プログラムキャッシュキー衝突 → 1 プログラム共有 → shader.uniforms.u_paint が
-        //     後発マテリアルで上書きされ全モデルが「最後に登録された RT」を参照する事象を回避
+        // customProgramCacheKey を一意化 (プログラムキャッシュ衝突による uniform 上書きを防止)
         const _key = 'paintable_' + mat.uuid;
         mat.customProgramCacheKey = function() { return _key; };
         mat.userData.paintInjected = true;
         mat.needsUpdate = true;
+        _injectedCount++;
       }
+
+      // 診断: このメッシュに注入した材質数 (Fox のマルチマテリアル検知用)
+      try {
+        log('paint mats: ' + (mesh.name || '(anon)') +
+            ' matsTotal=' + matsArr.length +
+            ' newlyInjected=' + _injectedCount,
+            'ok');
+      } catch (_) {}
 
       mesh.userData.paintRT = rt;
 
@@ -1187,11 +1194,12 @@
       }
       mesh.userData.worldSpanM = _spanFinal;
 
-      // 診断: worldSpanM と side をログ (paint inject と同時に見えるように)
+      // 診断: worldSpanM と side (先頭材質) をログ (paint inject と同時に見えるように)
       try {
+        const _s0 = matsArr[0].side;
         log('paint mesh: ' + (mesh.name || '(anon)') +
             ' span=' + _spanFinal.toFixed(3) + 'm' +
-            ' side=' + (mat.side === THREE.DoubleSide ? 'DBL' : (mat.side === THREE.BackSide ? 'BK' : 'FR')),
+            ' side[0]=' + (_s0 === THREE.DoubleSide ? 'DBL' : (_s0 === THREE.BackSide ? 'BK' : 'FR')),
             'ok');
       } catch (_) {}
 
@@ -1220,14 +1228,26 @@
       }
       // FBX モデルは法線が信用できない (belly が backface 扱いされる等) → 両面描画+raycast
       if (opts.doubleSide === undefined) opts.doubleSide = true;
+      let _meshSeen = 0;
+      let _meshWithMat = 0;
+      let _meshMultiMat = 0;
+      root.traverse((c) => {
+        if (!c.isMesh) return;
+        _meshSeen++;
+        if (c.material) {
+          _meshWithMat++;
+          if (Array.isArray(c.material)) _meshMultiMat++;
+        }
+        makePaintable(c, opts);
+      });
       try {
         log('paintify: root=' + (root.name || 'anon') +
             ' worldSpanM=' + (typeof opts.worldSpanM === 'number' ? opts.worldSpanM.toFixed(3) : '?') +
-            ' doubleSide=' + opts.doubleSide, 'ok');
+            ' doubleSide=' + opts.doubleSide +
+            ' meshTotal=' + _meshSeen +
+            ' meshWithMat=' + _meshWithMat +
+            ' meshMultiMat=' + _meshMultiMat, 'ok');
       } catch (_) {}
-      root.traverse((c) => {
-        if (c.isMesh) makePaintable(c, opts);
-      });
     }
 
     // ============================================================
