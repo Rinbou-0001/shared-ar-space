@@ -1769,7 +1769,26 @@
           // ピボット内のローカル位置: 半径方向に ORBIT_R オフセット
           obj.position.set(ORBIT_R, 0, 0);
 
-          // Whale はマテリアルそのままで白 OK
+          // マテリアル差し替え: FBX オリジナル材質を独立の MeshStandardMaterial に置換
+          //   ・目的: Fox や他 FBX モデルとの program cache 衝突 (u_paint uniform 上書き) を回避
+          //   ・元の diffuse map / color は引き継ぎ、外観は維持
+          obj.traverse((c) => {
+            if (c.isMesh && c.material) {
+              const oldMats = Array.isArray(c.material) ? c.material : [c.material];
+              const newMats = oldMats.map((oldMat) => {
+                if (!oldMat) return null;
+                return new THREE.MeshStandardMaterial({
+                  color: oldMat.color ? oldMat.color.clone() : new THREE.Color(0xffffff),
+                  map: oldMat.map || null,
+                  normalMap: oldMat.normalMap || null,
+                  roughness: 0.8,
+                  metalness: 0.0,
+                });
+              });
+              c.material = Array.isArray(c.material) ? newMats : newMats[0];
+            }
+          });
+
           obj.name = 'kujira_1';
           whaleOrbitPivot.add(obj);
           whaleObj = obj;
@@ -1857,7 +1876,27 @@
           box2.getCenter(center);
           obj.position.set(-center.x, -box2.min.y, -center.z);
 
-          // Fox はマテリアルそのままで白 OK
+          // マテリアル差し替え: FBX オリジナル材質を独立の MeshStandardMaterial に置換
+          //   ・目的: Whale や他 FBX モデルとの program cache 衝突 (u_paint uniform 上書き) を回避
+          //   ・元の diffuse map / color は引き継ぎ、外観は維持
+          //   ・SkinnedMesh の skeleton binding は c.material 差し替えでは壊れない
+          obj.traverse((c) => {
+            if (c.isMesh && c.material) {
+              const oldMats = Array.isArray(c.material) ? c.material : [c.material];
+              const newMats = oldMats.map((oldMat) => {
+                if (!oldMat) return null;
+                return new THREE.MeshStandardMaterial({
+                  color: oldMat.color ? oldMat.color.clone() : new THREE.Color(0xffffff),
+                  map: oldMat.map || null,
+                  normalMap: oldMat.normalMap || null,
+                  roughness: 0.8,
+                  metalness: 0.0,
+                });
+              });
+              c.material = Array.isArray(c.material) ? newMats : newMats[0];
+            }
+          });
+
           obj.name = 'Fox_1';
           foxOrbitGroup.add(obj);
           foxObj = obj;
