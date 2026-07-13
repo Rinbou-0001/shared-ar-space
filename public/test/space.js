@@ -1156,6 +1156,23 @@
       }
 
       mesh.userData.paintRT = rt;
+
+      // 【統一スケールモード】 世界最大寸法をキャッシュ
+      //   uvRadius = clampedWorldR / worldSpanM でオブジェクト UV に変換される
+      //   ・Field surface (床/壁/屋根) は _isFieldSurface() で FIELD_SIZE を使うため
+      //     ここでのキャッシュ値は使われないが、フォールバック用に設定
+      //   ・FBX サブメッシュはロード直後 (scale 適用後) にここに来るので Box3 で正しく計測できる
+      try {
+        mesh.updateWorldMatrix(true, false);
+        const _bb = new THREE.Box3().setFromObject(mesh);
+        const _sz = new THREE.Vector3();
+        _bb.getSize(_sz);
+        const _maxDim = Math.max(_sz.x, _sz.y, _sz.z);
+        mesh.userData.worldSpanM = (isFinite(_maxDim) && _maxDim > 0.01) ? _maxDim : 1.0;
+      } catch (_) {
+        mesh.userData.worldSpanM = 1.0;
+      }
+
       paintables.push(mesh);
     }
 
@@ -1188,11 +1205,18 @@
     const SPRAY_HALF_ANGLE = Math.PI / 9;    // 20° (円錐半角) - 視認性重視
     const SPRAY_EMIT_HZ    = 40;             // 1 秒間に何回発射するか (前回 20 → 40 で連続性向上)
     const SPRAY_MAX_DIST   = 30;             // 30m を越えたら床に届かないものとして無視
-    // UV 半径の上下限。UV 空間は 40m フィールドを [0,1] に張るので UV×FIELD_SIZE = 世界半径 (m)
-    //   MIN 0.003 ≈ 世界半径 0.12m → 直径 0.24m (小さすぎず視認可能な最小粒)
-    //   MAX 0.025  = 世界半径 1.0m → 直径 2.0m (最大直径 2m 制限)
-    const SPRAY_MIN_UVR    = 0.003;
-    const SPRAY_MAX_UVR    = 0.025;
+    // 【統一スケールモード】 試験的実装
+    //   従来: uvRadius を UV 空間 (無次元) でクランプ → 床とオブジェクトで見かけ物理サイズが桁違い
+    //   統一: 世界半径 (m) 側でクランプ → その後オブジェクトの worldSpanM で UV に変換
+    //         これで床でも Fox でも「見かけの世界直径」が同じ paint 円になる
+    //   Fox サイズ 1m 未満 & 距離 2.75m 以上 で 1 発 Fox 全塗り (仕様) となる副作用あり
+    const SPRAY_MAX_WORLD_DIAM = 2.0;                 // 最大世界直径 (m)
+    const SPRAY_MAX_WORLD_R    = SPRAY_MAX_WORLD_DIAM * 0.5;
+    // UV 半径の下限。paint 粒が消えないよう最低ここまで大きく (無次元 UV)
+    const SPRAY_MIN_UVR        = 0.003;
+    // (旧) SPRAY_MAX_UVR による UV 上限クランプは統一スケールモードでは撤去
+    //     paint シェーダは vUv - center の距離判定なので UV 範囲外は自動 discard、
+    //     UV 半径 1.0 を渡すとオブジェクト全体が塗料色で覆われる (Fox 全塗り現象)
     const _spraySource = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
     const _sprayHit    = new THREE.Vector3();
@@ -1228,8 +1252,9 @@
           typeof data.hitV === 'number') {
         const target = lookupPaintableByName(data.targetName);
         if (target && target.userData.paintRT) {
+          // 【統一スケール】 上限クランプは送信側で世界半径ベースに済み。受信側は下限のみ。
           const uvR = (typeof data.uvRadius === 'number')
-            ? Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, data.uvRadius))
+            ? Math.max(SPRAY_MIN_UVR, data.uvRadius)
             : 0.035;
           _sprayUv.set(data.hitU, data.hitV);
           applyPaintTo(target.userData.paintRT, _sprayUv, uvR, color, time);
@@ -1271,15 +1296,14 @@
       if (hit.distance <= 0 || hit.distance > SPRAY_MAX_DIST) return;
 
       const worldRadius = hit.distance * Math.tan(halfAngle);
-      // 40m スケールのフィールドサーフェス (床 / 壁 / 屋根) は共通スケールで UV 半径を算出。
-      // FBX モデルは体感で 0.035 UV 固定 (bbox が可変で正確なスケールを取りにくいため)
-      let uvRadius;
-      if (hit.object === ground || _isFieldSurface(hit.object)) {
-        uvRadius = worldRadius / FIELD_SIZE;
-      } else {
-        uvRadius = 0.035;
-      }
-      uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvRadius));
+      // 【統一スケール】 世界半径を上限クランプ → 各オブジェクトの UV スケールに変換
+      const clampedWR2 = Math.min(worldRadius, SPRAY_MAX_WORLD_R);
+      const isField2 = (hit.object === ground) || _isFieldSurface(hit.object);
+      const worldSpan2 = isField2
+        ? FIELD_SIZE
+        : (hit.object.userData.worldSpanM || 1.0);
+      let uvRadius = clampedWR2 / worldSpan2;
+      uvRadius = Math.max(SPRAY_MIN_UVR, uvRadius);   // 下限のみ
 
       const rt = hit.object.userData.paintRT;
       if (!rt) return;
@@ -1353,19 +1377,25 @@
 
       const hit = hits[0];
       const worldR = hit.distance * Math.tan(halfAngle);
+      // 【統一スケール】 世界半径を上限クランプ → オブジェクト UV スケールに変換
+      const clampedWorldR = Math.min(worldR, SPRAY_MAX_WORLD_R);
       const isField = (hit.object === ground) || _isFieldSurface(hit.object);
-      const uvR = isField ? (worldR / FIELD_SIZE) : 0.035;
-      const uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvR));
+      const worldSpan = isField
+        ? FIELD_SIZE
+        : (hit.object.userData.worldSpanM || 1.0);
+      let uvR = clampedWorldR / worldSpan;
+      uvR = Math.max(SPRAY_MIN_UVR, uvR);   // 下限のみ (上限は世界半径側で処理済み)
+      const uvRadius = uvR;
       const targetName = (hit.object === ground) ? 'ground' : (hit.object.name || '');
 
       // ---- interpolation: 前フレームのヒット点が同一ターゲット上にあれば間を分割 ----
       //   分割数: 現フレームの塗り直径の 40% を基準ステップに、必要数だけ足す。
-      //   これで頭を素早く振っても点線ではなく連続した帯になる。
+      //   塗り直径は clampedWorldR × 2 (上限含む) が実際の物理直径。
       let steps = 1;
       if (_prevSprayHitValid && _prevSprayHitTarget === hit.object) {
         const dWorld = _prevSprayHitPos.distanceTo(hit.point);
-        const diameter = 2.0 * worldR;
-        const stepWorld = Math.max(0.02, diameter * 0.4);   // 直径の 40% を目安
+        const paintDiameter = 2.0 * clampedWorldR;
+        const stepWorld = Math.max(0.02, paintDiameter * 0.4);   // 直径の 40% を目安
         steps = Math.min(24, Math.max(1, Math.ceil(dWorld / stepWorld)));
       }
 
