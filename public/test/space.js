@@ -1059,6 +1059,14 @@
       if (!mat) return;
       if (!mat.userData) mat.userData = {};
 
+      // opts.doubleSide: FBX などで法線が内向きの面がある場合、FrontSide だと
+      //   ・raycast が backface と判定してスキップ → paint されない (下から Whale の腹)
+      //   ・レンダも culling で描画されない
+      //   両面化で raycast も描画も通す。副作用: 内側の面も見える (通常は問題なし)
+      if (opts.doubleSide) {
+        mat.side = THREE.DoubleSide;
+      }
+
       let rt = mat.userData.paintRT;
       if (!rt) {
         if (opts.rt) {
@@ -1159,26 +1167,64 @@
 
       // 【統一スケールモード】 世界最大寸法をキャッシュ
       //   uvRadius = clampedWorldR / worldSpanM でオブジェクト UV に変換される
-      //   ・Field surface (床/壁/屋根) は _isFieldSurface() で FIELD_SIZE を使うため
-      //     ここでのキャッシュ値は使われないが、フォールバック用に設定
-      //   ・FBX サブメッシュはロード直後 (scale 適用後) にここに来るので Box3 で正しく計測できる
-      try {
-        mesh.updateWorldMatrix(true, false);
-        const _bb = new THREE.Box3().setFromObject(mesh);
-        const _sz = new THREE.Vector3();
-        _bb.getSize(_sz);
-        const _maxDim = Math.max(_sz.x, _sz.y, _sz.z);
-        mesh.userData.worldSpanM = (isFinite(_maxDim) && _maxDim > 0.01) ? _maxDim : 1.0;
-      } catch (_) {
-        mesh.userData.worldSpanM = 1.0;
+      //   優先順位:
+      //     1) opts.worldSpanM が来ていればそれを使う (paintifyModel からモデル全体 bbox の値)
+      //        → 全サブメッシュで共通値になるので、サブメッシュ単位の bbox 誤差の影響を受けない
+      //     2) 無ければ mesh 単独の Box3.setFromObject() を試行 (SkinnedMesh は bind pose 前提)
+      //     3) 0 or NaN なら 1.0 (フォールバック)
+      let _spanFinal = 1.0;
+      if (typeof opts.worldSpanM === 'number' && isFinite(opts.worldSpanM) && opts.worldSpanM > 0.01) {
+        _spanFinal = opts.worldSpanM;
+      } else {
+        try {
+          mesh.updateWorldMatrix(true, false);
+          const _bb = new THREE.Box3().setFromObject(mesh);
+          const _sz = new THREE.Vector3();
+          _bb.getSize(_sz);
+          const _maxDim = Math.max(_sz.x, _sz.y, _sz.z);
+          if (isFinite(_maxDim) && _maxDim > 0.01) _spanFinal = _maxDim;
+        } catch (_) { /* keep fallback 1.0 */ }
       }
+      mesh.userData.worldSpanM = _spanFinal;
+
+      // 診断: worldSpanM と side をログ (paint inject と同時に見えるように)
+      try {
+        log('paint mesh: ' + (mesh.name || '(anon)') +
+            ' span=' + _spanFinal.toFixed(3) + 'm' +
+            ' side=' + (mat.side === THREE.DoubleSide ? 'DBL' : (mat.side === THREE.BackSide ? 'BK' : 'FR')),
+            'ok');
+      } catch (_) {}
 
       paintables.push(mesh);
     }
 
     // モデル全体 (Group) を traverse し isMesh 全てをペイント可能化
+    //   - モデル全体の Box3 から worldSpanM を 1 度だけ計算 → 全サブメッシュで共通値
+    //     (サブメッシュ単位 bbox の分散で uvRadius が極端に振れるのを防ぐ)
+    //   - FBX モデル用のデフォルトとして DoubleSide 化 (法線逆・下側面 raycast 対応)
     function paintifyModel(root, opts) {
       if (!root) return;
+      opts = Object.assign({}, opts || {});
+      // 呼び出し側で明示指定が無ければ、モデル全体の bbox から worldSpanM を求める
+      if (typeof opts.worldSpanM !== 'number') {
+        try {
+          root.updateWorldMatrix(true, true);
+          const _bb = new THREE.Box3().setFromObject(root);
+          const _sz = new THREE.Vector3();
+          _bb.getSize(_sz);
+          const _maxDim = Math.max(_sz.x, _sz.y, _sz.z);
+          if (isFinite(_maxDim) && _maxDim > 0.01) {
+            opts.worldSpanM = _maxDim;
+          }
+        } catch (_) { /* fallback は makePaintable 内で 1.0 */ }
+      }
+      // FBX モデルは法線が信用できない (belly が backface 扱いされる等) → 両面描画+raycast
+      if (opts.doubleSide === undefined) opts.doubleSide = true;
+      try {
+        log('paintify: root=' + (root.name || 'anon') +
+            ' worldSpanM=' + (typeof opts.worldSpanM === 'number' ? opts.worldSpanM.toFixed(3) : '?') +
+            ' doubleSide=' + opts.doubleSide, 'ok');
+      } catch (_) {}
       root.traverse((c) => {
         if (c.isMesh) makePaintable(c, opts);
       });
