@@ -1188,25 +1188,18 @@
     const SPRAY_HALF_ANGLE = Math.PI / 9;    // 20° (円錐半角) - 視認性重視
     const SPRAY_EMIT_HZ    = 20;             // 1 秒間に何回発射するか
     const SPRAY_MAX_DIST   = 30;             // 30m を越えたら床に届かないものとして無視
-    const SPRAY_MIN_UVR    = 0.015;          // UV 半径下限 (約 0.3m: 床ピクセルでも見える大きさ)
-    const SPRAY_MAX_UVR    = 0.25;
+    // UV 半径の上下限。UV 空間は 40m フィールドを [0,1] に張るので UV×FIELD_SIZE = 世界半径 (m)
+    //   MIN 0.003 ≈ 世界半径 0.12m → 直径 0.24m (小さすぎず視認可能な最小粒)
+    //   MAX 0.0125 = 世界半径 0.5m → 直径 1.0m (最大直径 1m 制限)
+    const SPRAY_MIN_UVR    = 0.003;
+    const SPRAY_MAX_UVR    = 0.0125;
     const _spraySource = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
     const _sprayHit    = new THREE.Vector3();
     const _sprayUv     = new THREE.Vector2();
     const _sprayRaycaster = new THREE.Raycaster();
 
-    // スプレー視覚化用 (発射者本人の手元から床に伸びる円錐 + 床ヒット円)
-    const sprayConeVis = new THREE.Group();
-    sprayConeVis.visible = false;
-    scene.add(sprayConeVis);
-    const sprayHitDisk = new THREE.Mesh(
-      new THREE.RingGeometry(0.05, 0.18, 32),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, side: THREE.DoubleSide })
-    );
-    sprayHitDisk.rotation.x = -Math.PI / 2;
-    sprayConeVis.add(sprayHitDisk);
-
+    // スプレー着色範囲サークルは廃止 (着色そのもので位置が視認できるため)
     let _spraySeen = false;
     const _spraySeenObjects = new Set();
 
@@ -1353,37 +1346,19 @@
     function startSpray() {
       if (sprayState.active) return;
       sprayState.active = true;
-      sprayConeVis.visible = true;
-      sprayHitDisk.material.color.set(state.myColor || '#ffaa00');
       emitSprayPulse(); // 押下直後に 1 発
       sprayState.emitInterval = setInterval(emitSprayPulse, Math.round(1000 / SPRAY_EMIT_HZ));
     }
     function stopSpray() {
       sprayState.active = false;
-      sprayConeVis.visible = false;
       if (sprayState.emitInterval) {
         clearInterval(sprayState.emitInterval);
         sprayState.emitInterval = null;
       }
     }
-    // フレーム毎に発射者本人にだけ「床ヒット位置リング」を表示
-    function updateSprayConeVis() {
-      if (!sprayState.active) return;
-      camera.getWorldPosition(_spraySource);
-      camera.getWorldDirection(_sprayDir);
-      if (_sprayDir.y >= -0.001) { sprayHitDisk.visible = false; return; }
-      const t = -_spraySource.y / _sprayDir.y;
-      if (t <= 0 || t > SPRAY_MAX_DIST) { sprayHitDisk.visible = false; return; }
-      _sprayHit.copy(_spraySource).addScaledVector(_sprayDir, t);
-      if (Math.abs(_sprayHit.x) > FIELD_HALF || Math.abs(_sprayHit.z) > FIELD_HALF) {
-        sprayHitDisk.visible = false; return;
-      }
-      const wR = t * Math.tan(SPRAY_HALF_ANGLE);
-      sprayHitDisk.visible = true;
-      sprayHitDisk.position.set(_sprayHit.x, 0.02, _sprayHit.z);
-      const scale = Math.max(0.1, wR / 0.18);
-      sprayHitDisk.scale.setScalar(scale);
-    }
+    // (旧) updateSprayConeVis: 床ヒット位置リング更新関数は廃止済み。
+    //   呼び出し側のフレームループから参照を削除。着色サークルは着色そのもので代替。
+    function updateSprayConeVis() { /* no-op (retained for tick 呼び出し互換) */ }
 
     // 1m グリッド - 暗い床に映えるよう明るめグレー (40m を 40 分割 = 1m 間隔)
     const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x9a9aa0, 0x7a7a80);
@@ -2604,8 +2579,8 @@
       // observer もアバター付き = 入室済み扱い
       state.entered = true;
 
-      // 初期視点: (0, 1.7, -1.0) 目線の高さ、原点の少し奥
-      camera.position.set(0, 1.7, -1.0);
+      // 初期視点: (0, 1.7, -0.5) 目線の高さ、原点の少し奥
+      camera.position.set(0, 1.7, -0.5);
       // FPS スタイルの yaw/pitch (初期回転 Yaw=0°, Pitch=0, Roll=0 = 恒等回転)
       let yaw = 0;
       let pitch = 0;
