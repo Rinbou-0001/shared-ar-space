@@ -1157,6 +1157,15 @@
         // customProgramCacheKey を一意化 (プログラムキャッシュ衝突による uniform 上書きを防止)
         const _key = 'paintable_' + mat.uuid;
         mat.customProgramCacheKey = function() { return _key; };
+        // 追加防御: `mat.defines` に material 固有トークンを注入して shader source そのものを
+        //   絶対にユニーク化する。customProgramCacheKey だけでは Three.js 内部の shader
+        //   ソース同一性判定で稀に同じ program 実体が再利用され、後発の onBeforeCompile が
+        //   先発の shader.uniforms.u_paint binding を上書きする race が発生することがある
+        //   (特に USE_MAP + USE_NORMALMAP を持つ MeshStandardMaterial 同士など、
+        //    Human は map 無しなのでこの類の衝突から自然に外れていた)
+        if (!mat.defines) mat.defines = {};
+        const _uidHex = mat.uuid.replace(/-/g, '').toUpperCase().substring(0, 16);
+        mat.defines['PAINTABLE_MAT_' + _uidHex] = 1;
         mat.userData.paintInjected = true;
         mat.needsUpdate = true;
         _injectedCount++;
