@@ -1186,13 +1186,13 @@
              obj.name === 'wall_west';
     }
     const SPRAY_HALF_ANGLE = Math.PI / 9;    // 20° (円錐半角) - 視認性重視
-    const SPRAY_EMIT_HZ    = 20;             // 1 秒間に何回発射するか
+    const SPRAY_EMIT_HZ    = 40;             // 1 秒間に何回発射するか (前回 20 → 40 で連続性向上)
     const SPRAY_MAX_DIST   = 30;             // 30m を越えたら床に届かないものとして無視
     // UV 半径の上下限。UV 空間は 40m フィールドを [0,1] に張るので UV×FIELD_SIZE = 世界半径 (m)
     //   MIN 0.003 ≈ 世界半径 0.12m → 直径 0.24m (小さすぎず視認可能な最小粒)
-    //   MAX 0.0125 = 世界半径 0.5m → 直径 1.0m (最大直径 1m 制限)
+    //   MAX 0.025  = 世界半径 1.0m → 直径 2.0m (最大直径 2m 制限)
     const SPRAY_MIN_UVR    = 0.003;
-    const SPRAY_MAX_UVR    = 0.0125;
+    const SPRAY_MAX_UVR    = 0.025;
     const _spraySource = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
     const _sprayHit    = new THREE.Vector3();
@@ -1304,13 +1304,31 @@
       emitInterval: null,
       lastEmitWall: 0,
     };
+    // 前フレームの着弾情報 (interpolation 用)。同一ターゲット上を高速に振ったとき、
+    //   飛び石になった軌跡を補間して連続的な塗りにする。
+    let _prevSprayHitTarget = null;
+    let _prevSprayHitUV     = null;   // Vector2
+    const _prevSprayHitPos  = new THREE.Vector3();
+    let _prevSprayHitValid  = false;
+    // 実際にヒットを applyPaintTo + broadcast する共通処理
+    function _spraySendHit(color, halfAngle, time, targetName, hitU, hitV, uvRadius) {
+      const data = {
+        // 旧仕様フィールド (受信側 raycast フォールバック用) — 位置/方向はサブサンプル間で不変
+        x: _spraySource.x, y: _spraySource.y, z: _spraySource.z,
+        dx: _sprayDir.x,   dy: _sprayDir.y,   dz: _sprayDir.z,
+        color, halfAngle, time,
+        targetName, hitU, hitV, uvRadius,
+      };
+      processSprayEvent(data);
+      if (socket && socket.connected) socket.emit('spray', data);
+    }
     function emitSprayPulse() {
       // 発射元 = カメラ位置、方向 = カメラ前方
       camera.getWorldPosition(_spraySource);
       camera.getWorldDirection(_sprayDir);
       const color = state.myColor || '#ffaa00';
       const halfAngle = SPRAY_HALF_ANGLE;
-      const time = Date.now();
+      const baseTime = Date.now();
 
       // 発射側で raycast → 当たったオブジェクト名と UV を確定させ、データに同梱
       //   送信側でヒット確定させることで受信側はモデルの移動に影響されず同じ場所を着色できる
@@ -1319,29 +1337,57 @@
       _sprayRaycaster.near = 0;
       const hits = _sprayRaycaster.intersectObjects(paintables, false);
 
-      const data = {
-        // 旧仕様フィールド (位置・方向) — 受信側 raycast フォールバック用
-        x: _spraySource.x, y: _spraySource.y, z: _spraySource.z,
-        dx: _sprayDir.x,   dy: _sprayDir.y,   dz: _sprayDir.z,
-        color, halfAngle, time,
-      };
-
-      if (hits.length > 0) {
-        const hit = hits[0];
-        if (hit.uv && hit.distance > 0 && hit.distance <= SPRAY_MAX_DIST) {
-          const worldR = hit.distance * Math.tan(halfAngle);
-          // 40m フィールドサーフェス (床 / 壁 / 屋根) は共通スケール、FBX は固定
-          const isField = (hit.object === ground) || _isFieldSurface(hit.object);
-          const uvR = isField ? (worldR / FIELD_SIZE) : 0.035;
-          data.targetName = (hit.object === ground) ? 'ground' : (hit.object.name || '');
-          data.hitU = hit.uv.x;
-          data.hitV = hit.uv.y;
-          data.uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvR));
-        }
+      // ヒットが無い場合: 位置/方向だけを broadcast (旧仕様、受信側は raycast で試行) + 補間履歴クリア
+      if (hits.length === 0 || !hits[0].uv ||
+          hits[0].distance <= 0 || hits[0].distance > SPRAY_MAX_DIST) {
+        _prevSprayHitValid = false;
+        const data = {
+          x: _spraySource.x, y: _spraySource.y, z: _spraySource.z,
+          dx: _sprayDir.x,   dy: _sprayDir.y,   dz: _sprayDir.z,
+          color, halfAngle, time: baseTime,
+        };
+        processSprayEvent(data);
+        if (socket && socket.connected) socket.emit('spray', data);
+        return;
       }
 
-      processSprayEvent(data);
-      if (socket && socket.connected) socket.emit('spray', data);
+      const hit = hits[0];
+      const worldR = hit.distance * Math.tan(halfAngle);
+      const isField = (hit.object === ground) || _isFieldSurface(hit.object);
+      const uvR = isField ? (worldR / FIELD_SIZE) : 0.035;
+      const uvRadius = Math.max(SPRAY_MIN_UVR, Math.min(SPRAY_MAX_UVR, uvR));
+      const targetName = (hit.object === ground) ? 'ground' : (hit.object.name || '');
+
+      // ---- interpolation: 前フレームのヒット点が同一ターゲット上にあれば間を分割 ----
+      //   分割数: 現フレームの塗り直径の 40% を基準ステップに、必要数だけ足す。
+      //   これで頭を素早く振っても点線ではなく連続した帯になる。
+      let steps = 1;
+      if (_prevSprayHitValid && _prevSprayHitTarget === hit.object) {
+        const dWorld = _prevSprayHitPos.distanceTo(hit.point);
+        const diameter = 2.0 * worldR;
+        const stepWorld = Math.max(0.02, diameter * 0.4);   // 直径の 40% を目安
+        steps = Math.min(24, Math.max(1, Math.ceil(dWorld / stepWorld)));
+      }
+
+      if (steps > 1 && _prevSprayHitUV) {
+        // 前回 UV → 今回 UV を steps 分割して打つ (i=1..steps、i=steps が今回の点)
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const iu = _prevSprayHitUV.x + (hit.uv.x - _prevSprayHitUV.x) * t;
+          const iv = _prevSprayHitUV.y + (hit.uv.y - _prevSprayHitUV.y) * t;
+          // 各サブサンプル固有の time (シード衝突回避 + 個別 broadcast イベント)
+          _spraySendHit(color, halfAngle, baseTime + i, targetName, iu, iv, uvRadius);
+        }
+      } else {
+        _spraySendHit(color, halfAngle, baseTime, targetName, hit.uv.x, hit.uv.y, uvRadius);
+      }
+
+      // 次フレーム用に今回情報を保存
+      _prevSprayHitTarget = hit.object;
+      _prevSprayHitUV     = _prevSprayHitUV || new THREE.Vector2();
+      _prevSprayHitUV.set(hit.uv.x, hit.uv.y);
+      _prevSprayHitPos.copy(hit.point);
+      _prevSprayHitValid  = true;
     }
     function startSpray() {
       if (sprayState.active) return;
@@ -1351,6 +1397,9 @@
     }
     function stopSpray() {
       sprayState.active = false;
+      // 補間履歴をクリア (次回発射時、押下開始点から遠隔補間しないように)
+      _prevSprayHitValid = false;
+      _prevSprayHitTarget = null;
       if (sprayState.emitInterval) {
         clearInterval(sprayState.emitInterval);
         sprayState.emitInterval = null;
