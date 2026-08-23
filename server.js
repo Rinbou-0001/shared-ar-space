@@ -69,6 +69,10 @@ let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpa
 //   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密 (デフォルト)
 let fogConfig = { density: 0.3 };
 
+// オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
+//   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
+let moveConfig = { sensitivity: 40 };
+
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
 //   サーバーは baseOmega を知らないが phase/t0/factor だけで完全に同期させられる。
@@ -131,6 +135,8 @@ io.on('connection', (socket) => {
   socket.emit('shaderConfig', shaderConfig);
   // 接続直後に現在の fog 設定 (space2 のみ利用、他クライアントは無視)
   socket.emit('fogConfig', fogConfig);
+  // 接続直後に現在の移動感度 (space2 のみ利用)
+  socket.emit('moveConfig', moveConfig);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -259,6 +265,17 @@ io.on('connection', (socket) => {
       shaderConfig.rippleMaxM = t;
     }
     io.emit('shaderConfig', shaderConfig);
+  });
+
+  // Master からのオブジェクト移動感度設定 (space2 で使用)
+  socket.on('moveConfig', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.sensitivity === 'number' && isFinite(data.sensitivity)) {
+      moveConfig.sensitivity = Math.max(5, Math.min(500, data.sensitivity));
+    }
+    io.emit('moveConfig', moveConfig);
   });
 
   // Master からの FogExp2 密度設定 (space2 で使用)

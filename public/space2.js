@@ -91,13 +91,14 @@
       window.innerWidth / window.innerHeight,
       0.05, 500
     );
-    // 全ロール共通: 入室座標 (0, 2, 0)、初期方向 = +Y (真上を見る)
-    //   pitch = π/2 で Euler(π/2, 0, 0, 'YXZ') → 前方ベクトル = (0, +1, 0)
-    const SPAWN_POS = { x: 0, y: 2, z: 0 };
-    const INIT_YAW = 0;
-    const INIT_PITCH = Math.PI / 2;   // +Y (真上) を向く
+    // 全ロール共通: 入室座標 (0, 1, 0)、初期回転 Yaw=-90°, Pitch=0, Roll=0
+    //   Euler(pitch=0, yaw=-π/2, roll=0, 'YXZ') → +X 方向を見る
+    const SPAWN_POS = { x: 0, y: 1, z: 0 };
+    const INIT_YAW = -Math.PI / 2;   // -90°
+    const INIT_PITCH = 0;
+    const INIT_ROLL = 0;
     camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
-    camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
+    camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, INIT_ROLL, 'YXZ'));
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
@@ -206,6 +207,8 @@
     let selectedObject = null;
     const CUBE_STEP = 1.0;
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
+    // ドラッグ移動感度 (px / 1m)。master が変更 → server 経由で全クライアントへ配信される
+    let moveSensitivity = 40;
     function selectObject(obj) {
       if (selectedObject === obj) return;
       // 前の選択解除表示
@@ -378,6 +381,16 @@
         }
       });
 
+      socket.on('moveConfig', (data) => {
+        if (!data || typeof data.sensitivity !== 'number') return;
+        moveSensitivity = Math.max(5, Math.min(500, data.sensitivity));
+        const inp = document.getElementById('m-move-sens');
+        if (inp && document.activeElement !== inp) inp.value = moveSensitivity;
+        const cur = document.getElementById('m-move-sens-current');
+        if (cur) cur.textContent = moveSensitivity;
+        log('move sensitivity → ' + moveSensitivity + ' px/m', 'ok');
+      });
+
       socket.on('fogConfig', (data) => {
         if (!data || !scene.fog) return;
         if (typeof data.density === 'number' && isFinite(data.density)) {
@@ -536,29 +549,93 @@
     }
 
     // ============================================================
-    // 共有 canvas インタラクション: tap/click で cube1 等を選択
-    //   ・observer/master : マウス左クリック (drag と区別、移動 < 6px = tap)
-    //   ・camera (mobile) : タップ (touchstart→touchend、移動 < 10px = tap)
-    //   ・観測者のドラッグ回転や DeviceOrientation ジャイロと共存
+    // 共有 canvas インタラクション: tap = 選択、drag = 選択中オブジェクトを 1m 単位移動
+    //   ・observer/master マウス左クリック、camera スマホタップの両方に対応
+    //   ・選択中に drag/swipe → cube1 を XZ 平面 (床) 上でスナップ移動
+    //     - カメラの right/forward を XZ 平面に投影し、画面 dx/dy → 世界 offset に写像
+    //     - Math.round で 1m グリッドスナップ
+    //     - moveSensitivity (px/m) で感度調整 (master → server → 全クライアント配信)
+    //   ・選択中でも "移動 < slop" の press+release は tap 扱いで選択/選択解除
+    //   ・observer カメラ回転ドラッグは "未選択時のみ" 発火 (setupObserver 側で判定)
+    // 外部から参照される:
+    //   window.__cubeDragActive : 選択中のドラッグ移動中かどうか (observer が回転抑制に使う)
     // ============================================================
+    window.__cubeDragActive = false;
     {
       const _canvas = renderer.domElement;
       const _rayTap = new THREE.Raycaster();
       const _ndcTap = new THREE.Vector2();
-      let _tapStart = null;
+      let _pressAt = null;
       let _tapMoved = false;
+      let _dragState = null;   // 選択中の drag 移動状態
       const TAP_SLOP_MOUSE = 6;
       const TAP_SLOP_TOUCH = 10;
 
-      function _tapBegin(x, y) { _tapStart = { x, y }; _tapMoved = false; }
-      function _tapCheck(x, y, slop) {
-        if (!_tapStart) return;
-        if (Math.hypot(x - _tapStart.x, y - _tapStart.y) > slop) _tapMoved = true;
+      function _computeCamBasis() {
+        const camR = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        camR.y = 0;
+        if (camR.lengthSq() < 1e-6) camR.set(1, 0, 0); else camR.normalize();
+        const camF = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        camF.y = 0;
+        if (camF.lengthSq() < 1e-6) camF.set(0, 0, -1); else camF.normalize();
+        return { camR, camF };
       }
-      function _tapEnd(x, y) {
-        const wasTap = _tapStart && !_tapMoved;
-        _tapStart = null;
+
+      function _pressBegin(x, y) {
+        _pressAt = { x, y };
+        _tapMoved = false;
+        // 選択中ならドラッグ移動用の初期状態を用意 (実際の移動は _pressCheck 内で発生)
+        if (selectedObject) {
+          const basis = _computeCamBasis();
+          _dragState = {
+            startCube: selectedObject.position.clone(),
+            startX: x,
+            startY: y,
+            camR: basis.camR,
+            camF: basis.camF,
+            moved: false,
+          };
+          window.__cubeDragActive = true;
+        } else {
+          _dragState = null;
+        }
+      }
+      function _pressCheck(x, y, slop) {
+        if (!_pressAt) return;
+        const dx = x - _pressAt.x, dy = y - _pressAt.y;
+        if (Math.hypot(dx, dy) > slop) _tapMoved = true;
+        if (_dragState) {
+          const wr = (x - _dragState.startX) / moveSensitivity;
+          const wf = -(y - _dragState.startY) / moveSensitivity;
+          const off = _dragState.camR.clone().multiplyScalar(wr)
+                        .add(_dragState.camF.clone().multiplyScalar(wf));
+          const ix = Math.round(off.x);
+          const iz = Math.round(off.z);
+          if (ix !== 0 || iz !== 0) _dragState.moved = true;
+          const p = selectedObject.position;
+          const newX = _dragState.startCube.x + ix;
+          const newZ = _dragState.startCube.z + iz;
+          if (newX !== p.x || newZ !== p.z) {
+            p.x = newX;
+            p.z = newZ;
+            snapAndClamp(p);
+          }
+        }
+      }
+      function _pressEnd(x, y) {
+        const hadDragMove = _dragState && _dragState.moved;
+        _dragState = null;
+        window.__cubeDragActive = false;
+        const wasTap = _pressAt && !_tapMoved && !hadDragMove;
+        _pressAt = null;
+        if (hadDragMove) {
+          log('move ' + selectedObject.name + ' → (' +
+              selectedObject.position.x + ',' + selectedObject.position.y + ',' +
+              selectedObject.position.z + ')', 'ok');
+          return;
+        }
         if (!wasTap) return;
+        // tap: raycast → 選択 / 選択解除
         const rect = _canvas.getBoundingClientRect();
         _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
         _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
@@ -571,29 +648,31 @@
       // Mouse
       _canvas.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
-        _tapBegin(e.clientX, e.clientY);
+        _pressBegin(e.clientX, e.clientY);
       });
-      window.addEventListener('mousemove', (e) => _tapCheck(e.clientX, e.clientY, TAP_SLOP_MOUSE));
+      window.addEventListener('mousemove', (e) => _pressCheck(e.clientX, e.clientY, TAP_SLOP_MOUSE));
       window.addEventListener('mouseup', (e) => {
         if (e.button !== 0) return;
-        _tapEnd(e.clientX, e.clientY);
+        _pressEnd(e.clientX, e.clientY);
       });
 
       // Touch (mobile)
       _canvas.addEventListener('touchstart', (e) => {
-        if (e.touches.length !== 1) { _tapStart = null; return; }
+        if (e.touches.length !== 1) { _pressAt = null; _dragState = null; window.__cubeDragActive = false; return; }
         const t = e.touches[0];
-        _tapBegin(t.clientX, t.clientY);
+        _pressBegin(t.clientX, t.clientY);
       }, { passive: true });
       _canvas.addEventListener('touchmove', (e) => {
         const t = e.touches[0]; if (!t) return;
-        _tapCheck(t.clientX, t.clientY, TAP_SLOP_TOUCH);
+        _pressCheck(t.clientX, t.clientY, TAP_SLOP_TOUCH);
       }, { passive: true });
       _canvas.addEventListener('touchend', (e) => {
-        const t = e.changedTouches[0]; if (!t) { _tapStart = null; return; }
-        _tapEnd(t.clientX, t.clientY);
+        const t = e.changedTouches[0]; if (!t) { _pressAt = null; _dragState = null; window.__cubeDragActive = false; return; }
+        _pressEnd(t.clientX, t.clientY);
       }, { passive: true });
-      _canvas.addEventListener('touchcancel', () => { _tapStart = null; });
+      _canvas.addEventListener('touchcancel', () => {
+        _pressAt = null; _dragState = null; window.__cubeDragActive = false;
+      });
     }
 
     // ============================================================
@@ -619,24 +698,27 @@
       const dom = renderer.domElement;
       dom.style.cursor = 'grab';
 
-      // 左ドラッグ = look (yaw/pitch)。tap 選択は共有 canvas ハンドラで処理される。
+      // 左ドラッグ = look (yaw/pitch)。ただし選択中は cube 移動を優先し、カメラ回転は抑制。
       let dragging = false, lastX = 0, lastY = 0;
       dom.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
+        // 選択中は共有ハンドラが drag-move を担当 → カメラ回転を開始しない
+        if (selectedObject) return;
         dragging = true; lastX = e.clientX; lastY = e.clientY;
         dom.style.cursor = 'grabbing';
       });
       window.addEventListener('mousemove', (e) => {
         if (!dragging) return;
+        // 途中で選択された場合も抑制 (drag-move 側が動く)
+        if (window.__cubeDragActive) return;
         const dx = e.clientX - lastX, dy = e.clientY - lastY;
         lastX = e.clientX; lastY = e.clientY;
         const SENS = 0.0035;
         yaw -= dx * SENS;
         pitch -= dy * SENS;
-        // pitch 上限を +π/2 まで拡張 (初期方向 +Y = π/2 を許容)。下限は -π/2+ε
-        const PL_UP = Math.PI / 2;
-        const PL_DN = Math.PI / 2 - 0.05;
-        pitch = Math.max(-PL_DN, Math.min(PL_UP, pitch));
+        // pitch は ±88° にクランプ (ジンバルロック回避)
+        const PL = Math.PI / 2 - 0.05;
+        pitch = Math.max(-PL, Math.min(PL, pitch));
         applyYawPitch();
       });
       window.addEventListener('mouseup', () => { dragging = false; dom.style.cursor = 'grab'; });
@@ -849,6 +931,18 @@
         if (socket && socket.connected) socket.emit('viewerEye', { x, y, z });
         log('viewerEye → (' + x + ',' + y + ',' + z + ')', 'ok');
       });
+
+      // 移動感度 (master が変更 → server 経由で全クライアントに配信)
+      function applyMoveSens() {
+        const el = _by('m-move-sens');
+        if (!el) return;
+        const v = parseFloat(el.value);
+        if (isNaN(v)) return;
+        if (socket && socket.connected) socket.emit('moveConfig', { sensitivity: v });
+        log('move sens emit → ' + v + ' px/m', 'ok');
+      }
+      _bind('m-move-sens-apply', 'click', applyMoveSens);
+      _bind('m-move-sens', 'keydown', (e) => { if (e.key === 'Enter') applyMoveSens(); });
 
       // FogExp2 密度 (master が変更 → server 経由で全クライアントに配信)
       function applyFogDensity() {
