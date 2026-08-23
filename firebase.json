@@ -40,7 +40,8 @@
     ],
     "cleanUrls": true,
     "rewrites": [
-      { "source": "/test/space/master", "destination": "/test/space.html" }
+      { "source": "/test/space/master", "destination": "/test/space.html" },
+      { "source": "/space2/master", "destination": "/space2.html" }
     ]
   }
 }

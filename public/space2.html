@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>共有3D空間 space2 (実験)</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #101018; }
+    canvas { display: block; outline: none; }
+
+    #stage { position: fixed; inset: 0; background: #101018; }
+
+    /* ステータスバー */
+    #status {
+      position: fixed; top: 8px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.65); color: white;
+      padding: 10px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999; pointer-events: none;
+    }
+    #status .pill {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #888;
+      margin-right: 6px; vertical-align: middle;
+    }
+    #status .pill.ok { background: #4ade80; }
+    #role-badge {
+      display: inline-block;
+      padding: 1px 8px; border-radius: 8px;
+      font-size: 10px; font-weight: bold;
+      margin-left: 8px;
+    }
+    #role-badge.observer { background: #fbbf24; color: #422006; }
+    #role-badge.camera   { background: #4ade80; color: #064e3b; }
+    #role-badge.master   { background: #06b6d4; color: #083344; }
+
+    #log {
+      position: fixed; bottom: 8px; left: 8px; right: 56px;
+      max-height: 14vh; overflow-y: auto;
+      background: rgba(0,0,0,0.62); color: #ddd;
+      padding: 6px 10px; border-radius: 6px;
+      font-family: monospace; font-size: 11px;
+      line-height: 1.4; z-index: 9999;
+      white-space: pre-wrap; word-break: break-all;
+      pointer-events: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    #log .err { color: #ff8080; }
+    #log .ok  { color: #80ff80; }
+
+    /* UI 表示・非表示トグル */
+    #ui-toggle {
+      position: fixed; bottom: 8px; right: 8px;
+      width: 40px; height: 40px; z-index: 10001;
+      background: rgba(0,0,0,0.7); color: white;
+      border: 1px solid rgba(255,255,255,0.3); border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 13px; font-weight: bold; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    body.ui-hidden #status,
+    body.ui-hidden #observer-panel,
+    body.ui-hidden #master-panel,
+    body.ui-hidden #log { display: none !important; }
+
+    /* Observer パネル (observer / master で表示) */
+    #observer-panel {
+      position: fixed; top: 60px; right: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 12px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+      display: none; min-width: 240px;
+    }
+    #observer-panel h3 { margin: 0 0 6px; font-size: 12px; color: #fbbf24; letter-spacing: 0.05em; }
+    #observer-panel .hint { font-size: 10px; opacity: 0.75; margin-bottom: 10px; line-height: 1.4; }
+    #observer-panel .row { display: flex; gap: 4px; margin-bottom: 6px; align-items: center; }
+    #observer-panel input[type="number"] {
+      width: 60px; padding: 4px 6px;
+      border: 1px solid #4b5563; border-radius: 4px;
+      background: #1f2937; color: white;
+      font-family: monospace; font-size: 12px;
+    }
+    #observer-panel label { display: inline-block; width: 14px; text-align: center; font-weight: bold; font-family: monospace; }
+    #observer-panel button {
+      padding: 6px 12px; background: #fbbf24; color: #422006;
+      border: none; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer;
+    }
+
+    /* Master パネル (master のみ表示) */
+    #master-panel {
+      position: fixed; top: 60px; left: 8px;
+      background: rgba(0,0,0,0.7); color: white;
+      padding: 12px 14px; border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px; z-index: 9999;
+      display: none; min-width: 260px;
+    }
+    #master-panel h3 { margin: 0 0 6px; font-size: 12px; color: #06b6d4; letter-spacing: 0.05em; }
+    #master-panel .hint { font-size: 10px; opacity: 0.75; margin-bottom: 8px; line-height: 1.4; }
+    #master-panel .row { display: flex; gap: 4px; margin-bottom: 6px; align-items: center; }
+    #master-panel input[type="number"] {
+      width: 60px; padding: 4px 6px;
+      border: 1px solid #4b5563; border-radius: 4px;
+      background: #1f2937; color: white; font-family: monospace; font-size: 12px;
+    }
+    #master-panel select {
+      border: 1px solid #4b5563; border-radius: 4px;
+      background: #1f2937; color: white; font-size: 12px;
+    }
+    #master-panel button { padding: 6px 12px; border: none; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer; }
+    #master-panel label { display: inline-block; width: 28px; text-align: center; font-weight: bold; font-family: monospace; }
+    #master-panel .m-section { border-top: 1px solid #334; margin: 8px 0; padding-top: 6px; }
+    #master-panel .m-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+  </style>
+
+  <script>
+    window.__logs = [];
+    window.uiLog = function(msg, cls) {
+      window.__logs.push({ msg: String(msg), cls: cls || '' });
+      const el = document.getElementById('log');
+      if (el) {
+        el.innerHTML = window.__logs.slice(-14).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
+        el.scrollTop = el.scrollHeight;
+      }
+    };
+    window.addEventListener('error', (e) => window.uiLog('[ERROR] ' + (e.message || e.error), 'err'));
+  </script>
+
+  <script src="/vendor/three.min.js" onload="uiLog('three.js loaded','ok')"></script>
+  <script src="/config.js"></script>
+  <script>
+    (function () {
+      const cfg = window.APP_CONFIG || {};
+      const base = cfg.socketUrl ? cfg.socketUrl.replace(/\/$/, '') : '';
+      const s = document.createElement('script');
+      s.src = base + '/socket.io/socket.io.js';
+      s.onload = () => window.uiLog('socket.io loaded from ' + (cfg.socketUrl || 'same-origin'), 'ok');
+      s.onerror = () => window.uiLog('socket.io FAILED: ' + s.src, 'err');
+      document.head.appendChild(s);
+    })();
+  </script>
+</head>
+<body>
+
+<div id="stage"></div>
+
+<div id="status">
+  <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>
+  <span id="role-badge"></span>
+  &nbsp;|&nbsp;
+  <span id="count">0</span>人 |
+  自分: (<span id="my-pos">--</span>)
+</div>
+
+<!-- Master 制御パネル (master のみ、observer-panel と並置) -->
+<div id="master-panel">
+  <h3>MASTER 制御</h3>
+  <div class="m-section">
+    <div class="hint">クライアント一覧から選択 → 座標/角度を入力して適用</div>
+    <div class="row">
+      <select id="m-client-select" style="flex:1; padding: 4px;">
+        <option value="">-- 未選択 --</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>X</label><input type="number" id="m-x" value="0" step="0.1">
+      <label>Y</label><input type="number" id="m-y" value="1.7" step="0.1">
+      <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
+    </div>
+    <div class="row">
+      <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
+      <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
+      <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
+    </div>
+    <div class="row">
+      <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+      <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
+    </div>
+  </div>
+  <div class="m-section">
+    <div class="hint">オフアクシス投影 (選択中クライアント)</div>
+    <div class="row">
+      <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
+      <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+    </div>
+  </div>
+  <div class="m-section">
+    <div class="hint">共通視点 (viewerEye)</div>
+    <div class="row">
+      <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
+      <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
+      <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
+    </div>
+    <div class="row">
+      <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
+    </div>
+  </div>
+</div>
+
+<!-- Observer パネル (observer / master 両方で表示) -->
+<div id="observer-panel">
+  <h3>OBSERVER MODE</h3>
+  <div class="hint">
+    左ドラッグ: 視点回転 / WASD: 移動 / QE: 上下 / Shift: 速い
+  </div>
+  <div class="row">
+    <label>X</label><input type="number" id="obs-x" value="0" step="0.5">
+    <label>Y</label><input type="number" id="obs-y" value="1.7" step="0.5">
+    <label>Z</label><input type="number" id="obs-z" value="5" step="0.5">
+  </div>
+  <div class="row">
+    <button id="obs-teleport">移動</button>
+    <button id="obs-overview" style="background: #60a5fa; color: #1e3a8a">俯瞰</button>
+    <button id="obs-top" style="background: #4ade80; color: #064e3b">真上</button>
+  </div>
+  <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
+    <label>Off-Axis</label>
+    <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+  </div>
+  <div class="row">
+    <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.01" min="0.05" max="3.0">
+    <label>H(m)</label><input type="number" id="obs-display-h" value="0.20" step="0.01" min="0.05" max="3.0">
+  </div>
+</div>
+
+<div id="log"></div>
+<button id="ui-toggle" title="UI 表示切替">UI</button>
+
+<script src="space2.js"></script>
+</body>
+</html>
