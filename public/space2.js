@@ -29,6 +29,23 @@
   function start() {
     log('THREE r' + THREE.REVISION + ' loaded', 'ok');
 
+    // ========== 診断: id → 要素を返す。null なら「どの id が欠けているか」ログして
+    //   その後の .addEventListener の連鎖エラーを未然に防ぐ (機能欠落として続行) ==========
+    function _bind(id, evt, fn) {
+      const el = document.getElementById(id);
+      if (!el) {
+        log('bind FAIL: #' + id + ' が DOM に無い (HTML が古い/未デプロイ の可能性)', 'err');
+        return null;
+      }
+      el.addEventListener(evt, fn);
+      return el;
+    }
+    function _by(id) {
+      const el = document.getElementById(id);
+      if (!el) log('$: #' + id + ' が DOM に無い', 'err');
+      return el;
+    }
+
     // ========== ロール判定 ==========
     //   優先順:
     //     1) URL ハッシュ #master
@@ -415,35 +432,33 @@
         if (typeof pitchDeg === 'number') pitch = THREE.MathUtils.degToRad(pitchDeg);
         applyYawPitch();
       }
-      document.getElementById('obs-teleport').addEventListener('click', () => {
-        const x = parseFloat(document.getElementById('obs-x').value) || 0;
-        const y = parseFloat(document.getElementById('obs-y').value) || 1.7;
-        const z = parseFloat(document.getElementById('obs-z').value) || 0;
+      _bind('obs-teleport', 'click', () => {
+        const x = parseFloat((_by('obs-x') || {}).value) || 0;
+        const y = parseFloat((_by('obs-y') || {}).value) || 1.7;
+        const z = parseFloat((_by('obs-z') || {}).value) || 0;
         teleport(x, y, z);
       });
-      document.getElementById('obs-overview').addEventListener('click', () => {
-        teleport(0, 15, 20, 0, -40);
-      });
-      document.getElementById('obs-top').addEventListener('click', () => {
-        teleport(0, 20, 0, 0, -89);
-      });
+      _bind('obs-overview', 'click', () => teleport(0, 15, 20, 0, -40));
+      _bind('obs-top',      'click', () => teleport(0, 20, 0, 0, -89));
       // Enter で apply
       ['obs-x','obs-y','obs-z'].forEach((id) => {
-        const el = document.getElementById(id);
-        el.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') document.getElementById('obs-teleport').click();
+        _bind(id, 'keydown', (e) => {
+          if (e.key === 'Enter') {
+            const t = _by('obs-teleport'); if (t) t.click();
+          }
         });
       });
 
       // Off-Axis トグル (自分に適用) — サーバーへ notify
-      const obsOaBtn = document.getElementById('obs-offaxis-toggle');
+      const obsOaBtn = _by('obs-offaxis-toggle');
       window.syncObsOaBtn = function() {
+        if (!obsOaBtn) return;
         obsOaBtn.textContent = myDisplay.offaxis ? 'ON' : 'OFF';
         obsOaBtn.style.background = myDisplay.offaxis ? '#06b6d4' : '#475569';
         obsOaBtn.style.color = myDisplay.offaxis ? '#083344' : 'white';
       };
       syncObsOaBtn();
-      obsOaBtn.addEventListener('click', () => {
+      _bind('obs-offaxis-toggle', 'click', () => {
         myDisplay.offaxis = !myDisplay.offaxis;
         syncObsOaBtn();
         if (socket && socket.connected) {
@@ -453,13 +468,13 @@
       });
       // 表示サイズ入力
       function pushDisplaySize() {
-        const w = parseFloat(document.getElementById('obs-display-w').value) || 0.3;
-        const h = parseFloat(document.getElementById('obs-display-h').value) || 0.2;
+        const w = parseFloat((_by('obs-display-w') || {}).value) || 0.3;
+        const h = parseFloat((_by('obs-display-h') || {}).value) || 0.2;
         myDisplay.width = w; myDisplay.height = h;
         if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
       }
-      document.getElementById('obs-display-w').addEventListener('change', pushDisplaySize);
-      document.getElementById('obs-display-h').addEventListener('change', pushDisplaySize);
+      _bind('obs-display-w', 'change', pushDisplaySize);
+      _bind('obs-display-h', 'change', pushDisplaySize);
     }
 
     // ============================================================
@@ -467,24 +482,21 @@
     // ============================================================
     function setupMaster() {
       // クライアント選択
-      const selEl = document.getElementById('m-client-select');
-      selEl.addEventListener('change', () => {
-        selectedClientId = selEl.value;
+      const selEl = _by('m-client-select');
+      _bind('m-client-select', 'change', () => {
+        selectedClientId = selEl ? selEl.value : '';
         readCurrentToInputs();
-        // 選択中クライアントの display info を Off-Axis ボタンに反映
-        // (現在の display 情報を再取得するには init/join に含まれる情報を使う: 簡易実装)
-        // ここでは avatars.get() から拾える範囲で
       });
 
       // 適用 (強制ポーズ)
       function applyForcePose() {
         if (!selectedClientId) { log('未選択', 'err'); return; }
-        const x = parseFloat(document.getElementById('m-x').value) || 0;
-        const y = parseFloat(document.getElementById('m-y').value) || 0;
-        const z = parseFloat(document.getElementById('m-z').value) || 0;
-        const yaw   = THREE.MathUtils.degToRad(parseFloat(document.getElementById('m-yaw').value)   || 0);
-        const pitch = THREE.MathUtils.degToRad(parseFloat(document.getElementById('m-pitch').value) || 0);
-        const roll  = THREE.MathUtils.degToRad(parseFloat(document.getElementById('m-roll').value)  || 0);
+        const x = parseFloat((_by('m-x') || {}).value) || 0;
+        const y = parseFloat((_by('m-y') || {}).value) || 0;
+        const z = parseFloat((_by('m-z') || {}).value) || 0;
+        const yaw   = THREE.MathUtils.degToRad(parseFloat((_by('m-yaw')   || {}).value) || 0);
+        const pitch = THREE.MathUtils.degToRad(parseFloat((_by('m-pitch') || {}).value) || 0);
+        const roll  = THREE.MathUtils.degToRad(parseFloat((_by('m-roll')  || {}).value) || 0);
         const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, roll, 'YXZ'));
         if (socket && socket.connected) {
           socket.emit('controlPose', {
@@ -495,11 +507,9 @@
         }
         log('force pose → ' + selectedClientId.substring(0, 6), 'ok');
       }
-      document.getElementById('m-apply').addEventListener('click', applyForcePose);
+      _bind('m-apply', 'click', applyForcePose);
       ['m-x','m-y','m-z','m-yaw','m-pitch','m-roll'].forEach((id) => {
-        document.getElementById(id).addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') applyForcePose();
-        });
+        _bind(id, 'keydown', (e) => { if (e.key === 'Enter') applyForcePose(); });
       });
 
       // 現在値読込
@@ -508,34 +518,38 @@
         const a = avatars.get(selectedClientId);
         if (!a) return;
         const p = a.grp.position;
-        document.getElementById('m-x').value = p.x.toFixed(2);
-        document.getElementById('m-y').value = p.y.toFixed(2);
-        document.getElementById('m-z').value = p.z.toFixed(2);
+        const set = (id, v) => { const el = _by(id); if (el) el.value = v; };
+        set('m-x', p.x.toFixed(2));
+        set('m-y', p.y.toFixed(2));
+        set('m-z', p.z.toFixed(2));
         const e = new THREE.Euler().setFromQuaternion(a.grp.quaternion, 'YXZ');
-        document.getElementById('m-yaw').value   = THREE.MathUtils.radToDeg(e.y).toFixed(0);
-        document.getElementById('m-pitch').value = THREE.MathUtils.radToDeg(e.x).toFixed(0);
-        document.getElementById('m-roll').value  = THREE.MathUtils.radToDeg(e.z).toFixed(0);
+        set('m-yaw',   THREE.MathUtils.radToDeg(e.y).toFixed(0));
+        set('m-pitch', THREE.MathUtils.radToDeg(e.x).toFixed(0));
+        set('m-roll',  THREE.MathUtils.radToDeg(e.z).toFixed(0));
       }
-      document.getElementById('m-readcurrent').addEventListener('click', readCurrentToInputs);
+      _bind('m-readcurrent', 'click', readCurrentToInputs);
 
       // Off-Axis (選択中クライアントの display.offaxis をトグル)
-      // 選択中クライアントの現在 display state は displayConfig 受信で更新する
       const _masterDisplayCache = new Map(); // id → display
       window.syncMasterOaBtn = function(display) {
         if (display) _masterDisplayCache.set(selectedClientId, display);
         const d = _masterDisplayCache.get(selectedClientId) || {};
-        const btn = document.getElementById('m-offaxis-toggle');
-        btn.textContent = d.offaxis ? 'ON' : 'OFF';
-        btn.style.background = d.offaxis ? '#06b6d4' : '#475569';
-        btn.style.color = d.offaxis ? '#083344' : 'white';
-        const ds = document.getElementById('m-display-size');
-        if (typeof d.width === 'number' && typeof d.height === 'number') {
-          ds.textContent = 'サイズ: ' + d.width.toFixed(2) + '×' + d.height.toFixed(2) + 'm';
-        } else {
-          ds.textContent = 'サイズ: --';
+        const btn = _by('m-offaxis-toggle');
+        if (btn) {
+          btn.textContent = d.offaxis ? 'ON' : 'OFF';
+          btn.style.background = d.offaxis ? '#06b6d4' : '#475569';
+          btn.style.color = d.offaxis ? '#083344' : 'white';
+        }
+        const ds = _by('m-display-size');
+        if (ds) {
+          if (typeof d.width === 'number' && typeof d.height === 'number') {
+            ds.textContent = 'サイズ: ' + d.width.toFixed(2) + '×' + d.height.toFixed(2) + 'm';
+          } else {
+            ds.textContent = 'サイズ: --';
+          }
         }
       };
-      document.getElementById('m-offaxis-toggle').addEventListener('click', () => {
+      _bind('m-offaxis-toggle', 'click', () => {
         if (!selectedClientId) { log('未選択', 'err'); return; }
         const cur = _masterDisplayCache.get(selectedClientId) || { offaxis: false };
         const newVal = !cur.offaxis;
@@ -546,29 +560,25 @@
       });
 
       // viewerEye
-      document.getElementById('ve-apply').addEventListener('click', () => {
-        const x = parseFloat(document.getElementById('ve-x').value) || 0;
-        const y = parseFloat(document.getElementById('ve-y').value) || 2;
-        const z = parseFloat(document.getElementById('ve-z').value) || 0;
-        if (socket && socket.connected) {
-          socket.emit('viewerEye', { x, y, z });
-        }
+      _bind('ve-apply', 'click', () => {
+        const x = parseFloat((_by('ve-x') || {}).value) || 0;
+        const y = parseFloat((_by('ve-y') || {}).value) || 2;
+        const z = parseFloat((_by('ve-z') || {}).value) || 0;
+        if (socket && socket.connected) socket.emit('viewerEye', { x, y, z });
         log('viewerEye → (' + x + ',' + y + ',' + z + ')', 'ok');
       });
 
       // FogExp2 密度 (master が変更 → server 経由で全クライアントに配信)
       function applyFogDensity() {
-        const d = parseFloat(document.getElementById('m-fog-density').value);
+        const el = _by('m-fog-density');
+        if (!el) return;
+        const d = parseFloat(el.value);
         if (isNaN(d)) return;
-        if (socket && socket.connected) {
-          socket.emit('fogConfig', { density: d });
-        }
+        if (socket && socket.connected) socket.emit('fogConfig', { density: d });
         log('fog density emit → ' + d.toFixed(3), 'ok');
       }
-      document.getElementById('m-fog-apply').addEventListener('click', applyFogDensity);
-      document.getElementById('m-fog-density').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') applyFogDensity();
-      });
+      _bind('m-fog-apply', 'click', applyFogDensity);
+      _bind('m-fog-density', 'keydown', (e) => { if (e.key === 'Enter') applyFogDensity(); });
     }
 
     // ========== クライアント選択ドロップダウン ==========
@@ -587,13 +597,11 @@
     }
 
     // ========== UI 表示切替 ==========
-    const uiToggleBtn = document.getElementById('ui-toggle');
-    if (uiToggleBtn) {
-      uiToggleBtn.addEventListener('click', () => {
-        document.body.classList.toggle('ui-hidden');
-        uiToggleBtn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
-      });
-    }
+    _bind('ui-toggle', 'click', () => {
+      const btn = _by('ui-toggle');
+      document.body.classList.toggle('ui-hidden');
+      if (btn) btn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
+    });
 
     // ========== メインループ ==========
     const clock = new THREE.Clock();
