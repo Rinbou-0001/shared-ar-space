@@ -208,7 +208,7 @@
     const CUBE_STEP = 1.0;
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
     // ドラッグ移動感度 (px / 1m)。master が変更 → server 経由で全クライアントへ配信される
-    let moveSensitivity = 40;
+    let moveSensitivity = 60;
     function selectObject(obj) {
       if (selectedObject === obj) return;
       // 前の選択解除表示
@@ -238,6 +238,19 @@
       // 床貫通防止: cube 下面 = center.y - CUBE_HALF >= 0 → center.y >= CUBE_HALF
       if (p.y < CUBE_HALF) p.y = CUBE_HALF;
     }
+    // 選択中オブジェクトの現在位置をサーバーに送信 (他クライアントで同期される)
+    //   スロットル: 直前送信から 40ms 以内は連続送信抑制 (10 回/秒 程度)
+    let _lastObjSent = 0;
+    function emitObjectPose(obj, force) {
+      if (!obj || !socket || !socket.connected) return;
+      const now = performance.now();
+      if (!force && now - _lastObjSent < 40) return;
+      _lastObjSent = now;
+      socket.emit('objectPose', {
+        name: obj.name,
+        x: obj.position.x, y: obj.position.y, z: obj.position.z,
+      });
+    }
     function moveSelected(dx, dy, dz) {
       if (!selectedObject) return;
       const p = selectedObject.position;
@@ -246,6 +259,7 @@
       p.z += dz * CUBE_STEP;
       snapAndClamp(p);
       log('move ' + selectedObject.name + ' → (' + p.x + ',' + p.y + ',' + p.z + ')', 'ok');
+      emitObjectPose(selectedObject, true);
     }
     // グローバルキー: 選択中のみ反応。他ハンドラより先に preventDefault
     window.addEventListener('keydown', (e) => {
@@ -378,6 +392,20 @@
         // master パネル: 選択中クライアントの表示更新
         if (ROLE === 'master' && data.id === selectedClientId) {
           syncMasterOaBtn(data.display);
+        }
+      });
+
+      // 他クライアントからの objectPose (cube1 等の位置更新)
+      //   自分自身が emit した内容は broadcast 経由で戻らないが、名前一致すればどのオブジェクトも同期
+      socket.on('objectPose', (data) => {
+        if (!data || typeof data.name !== 'string') return;
+        // 現在サポートするのは cube1 のみ (将来 selectables に追加すれば拡張可)
+        if (data.name === 'cube1') {
+          // 自分が動かしている最中は上書きしない (ドラッグ中の一時ズレを防ぐ)
+          if (selectedObject === cube1 && window.__cubeDragActive) return;
+          if (typeof data.x === 'number') cube1.position.x = data.x;
+          if (typeof data.y === 'number') cube1.position.y = data.y;
+          if (typeof data.z === 'number') cube1.position.z = data.z;
         }
       });
 
@@ -619,6 +647,8 @@
             p.x = newX;
             p.z = newZ;
             snapAndClamp(p);
+            // ドラッグ中はスロットル付きで sync (最大 25 Hz)
+            emitObjectPose(selectedObject, false);
           }
         }
       }
@@ -632,6 +662,8 @@
           log('move ' + selectedObject.name + ' → (' +
               selectedObject.position.x + ',' + selectedObject.position.y + ',' +
               selectedObject.position.z + ')', 'ok');
+          // ドラッグ終了時に強制送信 (スロットルで最終位置が抜け落ちるのを防ぐ)
+          emitObjectPose(selectedObject, true);
           return;
         }
         if (!wasTap) return;

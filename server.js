@@ -71,7 +71,11 @@ let fogConfig = { density: 0.3 };
 
 // オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
 //   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
-let moveConfig = { sensitivity: 40 };
+let moveConfig = { sensitivity: 60 };
+
+// space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
+//   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
+const objectPoses = new Map();
 
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
@@ -137,6 +141,10 @@ io.on('connection', (socket) => {
   socket.emit('fogConfig', fogConfig);
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
+  // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
+  for (const [name, pose] of objectPoses.entries()) {
+    socket.emit('objectPose', { name, x: pose.x, y: pose.y, z: pose.z });
+  }
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -265,6 +273,17 @@ io.on('connection', (socket) => {
       shaderConfig.rippleMaxM = t;
     }
     io.emit('shaderConfig', shaderConfig);
+  });
+
+  // space2 オブジェクト位置同期 (誰でも emit 可 = 全クライアントで cube1 等を動かせる)
+  //   data: { name: 'cube1', x, y, z }
+  //   受信 → 保持 → 送信元以外に broadcast
+  socket.on('objectPose', (data) => {
+    if (!data || typeof data.name !== 'string') return;
+    if (typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
+    if (!isFinite(data.x) || !isFinite(data.y) || !isFinite(data.z)) return;
+    objectPoses.set(data.name, { x: data.x, y: data.y, z: data.z });
+    socket.broadcast.emit('objectPose', { name: data.name, x: data.x, y: data.y, z: data.z });
   });
 
   // Master からのオブジェクト移動感度設定 (space2 で使用)
