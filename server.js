@@ -66,8 +66,8 @@ let viewerEye = { x: 0, y: 2.0, z: 0 };
 let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpawnRate: 0.05 };
 
 // FogExp2 密度共有パラメータ (space2 で使用、master が変更 → 全クライアントへ配信)
-//   density: 0 = フォグ無し、0.06 = 中程度、0.2 以上 = 濃密
-let fogConfig = { density: 0.12 };
+//   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密 (デフォルト)
+let fogConfig = { density: 0.3 };
 
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)

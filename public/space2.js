@@ -84,7 +84,7 @@
     //   ★ 床面自体は純白 (0xffffff) なので視覚的変化なし (白+白=白)。
     //      グリッド/境界線 (濃グレー) と他クライアントのアバターだけがフェードして見える。
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
-    scene.fog = new THREE.FogExp2(0xffffff, 0.12);
+    scene.fog = new THREE.FogExp2(0xffffff, 0.3);
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -155,6 +155,21 @@
     );
     centerMarker.position.set(0, 0.035, 0);
     scene.add(centerMarker);
+
+    // テスト用 1m 立方体
+    //   ・XZ 中心 = (1.5, -0.5)、Y = 0.5 (床に接地する高さ)
+    //   ・MeshStandardMaterial は fog:true (default) なので遠ざかれば白に溶ける
+    const testCube = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({
+        color: 0x6b7280,
+        roughness: 0.8,
+        metalness: 0.0,
+      })
+    );
+    testCube.position.set(1.5, 0.5, -0.5);
+    testCube.name = 'test-cube';
+    scene.add(testCube);
 
     // ========== 他クライアントのアバター管理 ==========
     // avatars: id → { grp, mesh, color, role }
@@ -475,6 +490,38 @@
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
+
+      // ========== フルスクリーン (旧 /test/space から継承) ==========
+      //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
+      //   ・fs-exit-btn      : exitFullscreen
+      //   ・fullscreenchange 監視: body.fs-mode class を付け外し
+      //       → CSS で status/panel/log/ui-toggle 一括非表示、fs-exit-btn のみ表示
+      //   ・resize もイベント経由で呼ばれるが念のため手動更新
+      _bind('obs-fullscreen', 'click', () => {
+        const el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen().catch((e) => log('fullscreen err: ' + e.message, 'err'));
+        else log('requestFullscreen 非対応ブラウザ', 'err');
+      });
+      _bind('fs-exit-btn', 'click', () => {
+        if (document.exitFullscreen) document.exitFullscreen();
+      });
+      document.addEventListener('fullscreenchange', () => {
+        const active = !!document.fullscreenElement;
+        document.body.classList.toggle('fs-mode', active);
+        // canvas サイズ再計算
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        log('fullscreen ' + (active ? 'ON' : 'OFF'), 'ok');
+      });
+      // F キーでもフルスクリーン切替 (旧 /test/space 準拠)
+      window.addEventListener('keydown', (e) => {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+        if (e.code === 'KeyF') {
+          if (document.fullscreenElement) document.exitFullscreen();
+          else document.documentElement.requestFullscreen().catch(() => {});
+        }
+      });
     }
 
     // ============================================================
