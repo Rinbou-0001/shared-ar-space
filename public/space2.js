@@ -156,10 +156,11 @@
     centerMarker.position.set(0, 0.035, 0);
     scene.add(centerMarker);
 
-    // テスト用 1m 立方体
+    // cube1: 1m 立方体
     //   ・XZ 中心 = (1.5, -0.5)、Y = 0.5 (床に接地する高さ)
     //   ・MeshStandardMaterial は fog:true (default) なので遠ざかれば白に溶ける
-    const testCube = new THREE.Mesh(
+    //   ・クリックで選択 → 矢印/PageUp/PageDown で 1m グリッド移動 (床貫通不可)
+    const cube1 = new THREE.Mesh(
       new THREE.BoxGeometry(1, 1, 1),
       new THREE.MeshStandardMaterial({
         color: 0x6b7280,
@@ -167,9 +168,96 @@
         metalness: 0.0,
       })
     );
-    testCube.position.set(1.5, 0.5, -0.5);
-    testCube.name = 'test-cube';
-    scene.add(testCube);
+    cube1.position.set(1.5, 0.5, -0.5);
+    cube1.name = 'cube1';
+    scene.add(cube1);
+
+    // 選択ハイライト用: cube1 に黄色エッジを子オーバーレイ (parented → cube 移動に追従)
+    const cube1Edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(cube1.geometry),
+      new THREE.LineBasicMaterial({
+        color: 0xfbbf24,
+        transparent: true, opacity: 1.0,
+        depthTest: false,   // 手前に確実に描画
+        fog: false,         // ハイライトは遠くても消えないように
+      })
+    );
+    cube1Edges.renderOrder = 999;
+    cube1Edges.visible = false;
+    cube1.add(cube1Edges);
+
+    // ========== 選択/移動 (グリッド 1m 単位) ==========
+    //   ・selectables: raycast 対象のリスト (将来オブジェクト追加可能)
+    //   ・selectedObject: 現在選択中の Mesh (null なら未選択)
+    //   ・移動は 1m スナップ、cube 中心 Y >= CUBE_HALF (= 0.5) で床貫通防止
+    //   ・キー割り当て:
+    //       ← / →   : X ± 1  (左右)
+    //       ↑ / ↓   : Z ∓ 1  (奥 / 手前)
+    //       PageUp   : Y + 1 (上)
+    //       PageDown : Y - 1 (下、床で止まる)
+    //       Esc      : 選択解除
+    const selectables = [cube1];
+    let selectedObject = null;
+    const CUBE_STEP = 1.0;
+    const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
+    function selectObject(obj) {
+      if (selectedObject === obj) return;
+      // 前の選択解除表示
+      if (selectedObject) {
+        const prevEdges = selectedObject.getObjectByProperty('isLineSegments', true);
+        if (prevEdges) prevEdges.visible = false;
+      }
+      selectedObject = obj;
+      if (obj) {
+        const edges = obj.getObjectByProperty('isLineSegments', true);
+        if (edges) edges.visible = true;
+        log('select: ' + obj.name, 'ok');
+      } else {
+        log('deselect', 'ok');
+      }
+      updateSelectionHint();
+    }
+    function updateSelectionHint() {
+      const el = document.getElementById('obs-sel-info');
+      if (!el) return;
+      el.textContent = selectedObject ? selectedObject.name : '--';
+    }
+    function snapAndClamp(p) {
+      p.x = Math.round(p.x - CUBE_HALF) + CUBE_HALF;
+      p.z = Math.round(p.z - CUBE_HALF) + CUBE_HALF;
+      p.y = Math.round(p.y - CUBE_HALF) + CUBE_HALF;
+      // 床貫通防止: cube 下面 = center.y - CUBE_HALF >= 0 → center.y >= CUBE_HALF
+      if (p.y < CUBE_HALF) p.y = CUBE_HALF;
+    }
+    function moveSelected(dx, dy, dz) {
+      if (!selectedObject) return;
+      const p = selectedObject.position;
+      p.x += dx * CUBE_STEP;
+      p.y += dy * CUBE_STEP;
+      p.z += dz * CUBE_STEP;
+      snapAndClamp(p);
+      log('move ' + selectedObject.name + ' → (' + p.x + ',' + p.y + ',' + p.z + ')', 'ok');
+    }
+    // グローバルキー: 選択中のみ反応。他ハンドラより先に preventDefault
+    window.addEventListener('keydown', (e) => {
+      if (!selectedObject) {
+        if (e.code === 'Escape') selectObject(null);
+        return;
+      }
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+      let handled = true;
+      switch (e.code) {
+        case 'ArrowLeft':  moveSelected(-1, 0, 0); break;
+        case 'ArrowRight': moveSelected(+1, 0, 0); break;
+        case 'ArrowUp':    moveSelected(0, 0, -1); break;   // 奥
+        case 'ArrowDown':  moveSelected(0, 0, +1); break;   // 手前
+        case 'PageUp':     moveSelected(0, +1, 0); break;   // 上
+        case 'PageDown':   moveSelected(0, -1, 0); break;   // 下 (床で止まる)
+        case 'Escape':     selectObject(null); break;
+        default: handled = false;
+      }
+      if (handled) e.preventDefault();
+    });
 
     // ========== 他クライアントのアバター管理 ==========
     // avatars: id → { grp, mesh, color, role }
@@ -386,10 +474,17 @@
       const dom = renderer.domElement;
       dom.style.cursor = 'grab';
 
-      // 左ドラッグ = look
+      // click 判定用: mousedown 座標を覚え、mouseup で移動量が小さければ click 扱い
+      //   → click かつ selectables を raycast ヒットしたら選択、外れなら選択解除
+      const _raycaster = new THREE.Raycaster();
+      const _ndc = new THREE.Vector2();
+      let _pressAt = null;   // { x, y }
+
+      // 左ドラッグ = look、短距離の press+release = click (選択)
       let dragging = false, lastX = 0, lastY = 0;
       dom.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
+        _pressAt = { x: e.clientX, y: e.clientY };
         dragging = true; lastX = e.clientX; lastY = e.clientY;
         dom.style.cursor = 'grabbing';
       });
@@ -404,7 +499,24 @@
         pitch = Math.max(-PL, Math.min(PL, pitch));
         applyYawPitch();
       });
-      window.addEventListener('mouseup', () => { dragging = false; dom.style.cursor = 'grab'; });
+      window.addEventListener('mouseup', (e) => {
+        dragging = false; dom.style.cursor = 'grab';
+        if (_pressAt) {
+          const dx = e.clientX - _pressAt.x;
+          const dy = e.clientY - _pressAt.y;
+          // 移動 4px 未満 = click 扱い (drag ではない)
+          if (Math.hypot(dx, dy) < 4) {
+            const rect = dom.getBoundingClientRect();
+            _ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            _ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            _raycaster.setFromCamera(_ndc, camera);
+            const hits = _raycaster.intersectObjects(selectables, false);
+            if (hits.length > 0) selectObject(hits[0].object);
+            else selectObject(null);
+          }
+          _pressAt = null;
+        }
+      });
       dom.addEventListener('contextmenu', (e) => e.preventDefault());
 
       // WASD 移動
