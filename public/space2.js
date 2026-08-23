@@ -624,8 +624,16 @@
             moved: false,
           };
           window.__cubeDragActive = true;
+          try {
+            log('drag begin: ' + selectedObject.name +
+                ' start=(' + _dragState.startCube.x.toFixed(2) + ',' + _dragState.startCube.z.toFixed(2) + ')' +
+                ' camR=(' + basis.camR.x.toFixed(2) + ',' + basis.camR.z.toFixed(2) + ')' +
+                ' camF=(' + basis.camF.x.toFixed(2) + ',' + basis.camF.z.toFixed(2) + ')' +
+                ' sens=' + moveSensitivity, 'ok');
+          } catch (_) {}
         } else {
           _dragState = null;
+          window.__cubeDragActive = false;
         }
       }
       function _pressCheck(x, y, slop) {
@@ -647,6 +655,7 @@
             p.x = newX;
             p.z = newZ;
             snapAndClamp(p);
+            try { log('drag step: ' + selectedObject.name + ' → (' + p.x.toFixed(2) + ',' + p.z.toFixed(2) + ') px=(' + dx + ',' + dy + ')', 'ok'); } catch (_) {}
             // ドラッグ中はスロットル付きで sync (最大 25 Hz)
             emitObjectPose(selectedObject, false);
           }
