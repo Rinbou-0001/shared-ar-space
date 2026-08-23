@@ -65,6 +65,10 @@ let viewerEye = { x: 0, y: 2.0, z: 0 };
 //   rippleSpawnRate        : 自動発生の頻度 (回/秒、0 = 自動発生なし)
 let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpawnRate: 0.05 };
 
+// FogExp2 密度共有パラメータ (space2 で使用、master が変更 → 全クライアントへ配信)
+//   density: 0 = フォグ無し、0.06 = 中程度、0.2 以上 = 濃密
+let fogConfig = { density: 0.12 };
+
 // 各周回オブジェクトの「累積位相 (factor-秒)」「位相凍結時刻 (ms)」「現在の倍率」
 //   theta(t) = phase + factor * (Date.now() - t0) / 1000     (factor-秒単位、client が baseOmega を掛けて rad/距離 にする)
 //   サーバーは baseOmega を知らないが phase/t0/factor だけで完全に同期させられる。
@@ -125,6 +129,8 @@ io.on('connection', (socket) => {
   socket.emit('orbitSpeed', orbitSpeedsBroadcastObj());
   // 接続直後に現在のシェーダー設定 (波紋 min/max, 波速) を送る
   socket.emit('shaderConfig', shaderConfig);
+  // 接続直後に現在の fog 設定 (space2 のみ利用、他クライアントは無視)
+  socket.emit('fogConfig', fogConfig);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -253,6 +259,18 @@ io.on('connection', (socket) => {
       shaderConfig.rippleMaxM = t;
     }
     io.emit('shaderConfig', shaderConfig);
+  });
+
+  // Master からの FogExp2 密度設定 (space2 で使用)
+  //   0-1 の範囲でクランプ、全クライアントへ配信 (未対応クライアントは受信して無視)
+  socket.on('fogConfig', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.density === 'number' && isFinite(data.density)) {
+      fogConfig.density = Math.max(0, Math.min(1, data.density));
+    }
+    io.emit('fogConfig', fogConfig);
   });
 
   // Master からの周回速度設定

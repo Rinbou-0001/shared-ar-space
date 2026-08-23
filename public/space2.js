@@ -62,9 +62,12 @@
     // 背景 = 白。距離フェード先の色と一致させると「遠方が空気に溶ける」ように見える
     scene.background = new THREE.Color(0xffffff);
     // 指数フォグ (視点から距離 d のフラグメントの色は color との mix になる):
-    //   c = exp(-density * d)^2  で減衰、density=0.06 なら約 20m で 76% 白混ざり、40m でほぼ純白
+    //   factor = exp(-(density * d)²), density=0.12 なら 10m で 24%→白 76%、15m でほぼ完全に白
     //   Fog (linear) より遠近の変化が自然。GridHelper (LineBasicMaterial) も対応する。
-    scene.fog = new THREE.FogExp2(0xffffff, 0.06);
+    //   ★ 床面自体は純白 (0xffffff) なので視覚的変化なし (白+白=白)。
+    //      グリッド/境界線 (濃グレー) と他クライアントのアバターだけがフェードして見える。
+    //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
+    scene.fog = new THREE.FogExp2(0xffffff, 0.12);
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -109,20 +112,21 @@
     floor.name = 'floor';
     scene.add(floor);
 
-    // 1m グリッド (グレー)
+    // 1m グリッド (中グレー) — フォグでフェードして遠方が薄く消える
     //   GridHelper は LineBasicMaterial (fog: true デフォルト) なので、
-    //   遠方の格子線も自動的に白フェードで薄くなる
-    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x6b7280, 0x9ca3af);
+    //   遠方の格子線が自動的に白フェードで薄くなる。
+    //   色を濃くすることで白 (背景) との差が大きくなり、フェードが視認しやすくなる。
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
     grid.position.set(0, 0.01, 0);
     scene.add(grid);
-    // 5m 主格子 (少し濃いグレー)
-    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x4b5563, 0x4b5563);
+    // 5m 主格子 (濃いグレー、はっきり見える)
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
     majorGrid.position.set(0, 0.015, 0);
     scene.add(majorGrid);
-    // 20m 境界 (濃いめグレー、視認性重視)
+    // 20m 境界 (ほぼ黒)
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
-      new THREE.LineBasicMaterial({ color: 0x374151 })
+      new THREE.LineBasicMaterial({ color: 0x111827 })
     );
     boundary.position.set(0, 0.012, 0);
     scene.add(boundary);
@@ -245,6 +249,19 @@
         // master パネル: 選択中クライアントの表示更新
         if (ROLE === 'master' && data.id === selectedClientId) {
           syncMasterOaBtn(data.display);
+        }
+      });
+
+      socket.on('fogConfig', (data) => {
+        if (!data || !scene.fog) return;
+        if (typeof data.density === 'number' && isFinite(data.density)) {
+          scene.fog.density = Math.max(0, Math.min(1, data.density));
+          // master パネルの入力欄と現在値表示を同期
+          const inp = document.getElementById('m-fog-density');
+          if (inp && document.activeElement !== inp) inp.value = scene.fog.density.toFixed(3);
+          const cur = document.getElementById('m-fog-current');
+          if (cur) cur.textContent = scene.fog.density.toFixed(3);
+          log('fog density → ' + scene.fog.density.toFixed(3), 'ok');
         }
       });
 
@@ -537,6 +554,20 @@
           socket.emit('viewerEye', { x, y, z });
         }
         log('viewerEye → (' + x + ',' + y + ',' + z + ')', 'ok');
+      });
+
+      // FogExp2 密度 (master が変更 → server 経由で全クライアントに配信)
+      function applyFogDensity() {
+        const d = parseFloat(document.getElementById('m-fog-density').value);
+        if (isNaN(d)) return;
+        if (socket && socket.connected) {
+          socket.emit('fogConfig', { density: d });
+        }
+        log('fog density emit → ' + d.toFixed(3), 'ok');
+      }
+      document.getElementById('m-fog-apply').addEventListener('click', applyFogDensity);
+      document.getElementById('m-fog-density').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') applyFogDensity();
       });
     }
 
