@@ -63,6 +63,35 @@
     body.ui-hidden #master-panel,
     body.ui-hidden #log { display: none !important; }
 
+    /* スマホ入室オーバーレイ (camera role でのみ表示)
+       ・スマホ 360° ジャイロは iOS 13+ で明示的な user gesture 経由の permission が必要
+       ・observer/master は setupObserver 内で hide される */
+    #enter-overlay {
+      position: fixed; inset: 0;
+      background: rgba(10, 10, 20, 0.7);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+      z-index: 20000;
+      display: none;
+      flex-direction: column;
+      align-items: center; justify-content: center;
+      color: white; font-family: sans-serif;
+      text-align: center; padding: 20px;
+      pointer-events: auto;
+    }
+    body.is-camera #enter-overlay { display: flex; }
+    #enter-overlay h2 { margin: 0 0 8px; text-shadow: 0 2px 8px rgba(0,0,0,0.75); }
+    #enter-overlay p {
+      opacity: 0.9; max-width: 320px; line-height: 1.5;
+      margin: 0 0 20px; text-shadow: 0 1px 4px rgba(0,0,0,0.75);
+    }
+    #enter-overlay button {
+      padding: 16px 36px; font-size: 16px; font-weight: bold;
+      background: #4ade80; color: #0a0a14;
+      border: none; border-radius: 8px; cursor: pointer;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+    }
+
     /* フルスクリーン解除ボタン (fs-mode 時のみ表示) */
     #fs-exit-btn {
       position: fixed; top: 10px; right: 10px;
@@ -163,6 +192,16 @@
 <body>
 
 <div id="stage"></div>
+
+<!-- スマホ用入室オーバーレイ (camera role のみ表示) -->
+<div id="enter-overlay">
+  <h2>共有3D空間 space2</h2>
+  <p>
+    入室するとアバターが (0, 2, 0) にスポーンし、<br>
+    スマホを動かして 360° 見回すマジックウィンドウが始まります。
+  </p>
+  <button id="enter-btn">入室する</button>
+</div>
 
 <div id="status">
   <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>

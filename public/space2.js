@@ -91,7 +91,13 @@
       window.innerWidth / window.innerHeight,
       0.05, 500
     );
-    camera.position.set(0, 1.7, 5);
+    // 全ロール共通: 入室座標 (0, 2, 0)、初期方向 = +Y (真上を見る)
+    //   pitch = π/2 で Euler(π/2, 0, 0, 'YXZ') → 前方ベクトル = (0, +1, 0)
+    const SPAWN_POS = { x: 0, y: 2, z: 0 };
+    const INIT_YAW = 0;
+    const INIT_PITCH = Math.PI / 2;   // +Y (真上) を向く
+    camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
+    camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
@@ -449,8 +455,145 @@
       setupObserver();
       setupMaster();
     } else {
-      // camera ロール: このスペースではアバターだけ生成、UI は最小
+      // camera ロール: 入室ボタン → iOS permission → DeviceOrientation で 360° マジックウィンドウ
+      setupCameraEntry();
+    }
+
+    // ============================================================
+    // CAMERA (スマホ): 入室 + DeviceOrientation (360° ジャイロ) + iOS permission
+    //   ・enter-btn 押下で DeviceOrientation/DeviceMotion 権限要求 (iOS 13+ 必須)
+    //   ・enterAsCamera で spawn 位置 (0,2,0) + 初期方向 +Y にセット
+    //   ・setupDeviceOrientation で毎フレーム phone 姿勢 → camera.quaternion
+    // ============================================================
+    function setupCameraEntry() {
+      _bind('enter-btn', 'click', async () => {
+        // iOS 13+ DeviceOrientation permission
+        try {
+          if (typeof DeviceOrientationEvent !== 'undefined'
+              && typeof DeviceOrientationEvent.requestPermission === 'function') {
+            const p = await DeviceOrientationEvent.requestPermission();
+            if (p !== 'granted') { log('DeviceOrientation 拒否', 'err'); return; }
+            log('DeviceOrientation 許可', 'ok');
+          }
+        } catch (e) {
+          log('requestPermission 例外: ' + e.message, 'err');
+        }
+        // iOS 13+ DeviceMotion permission (現状 space2 では未使用、将来歩行追跡用)
+        try {
+          if (typeof DeviceMotionEvent !== 'undefined'
+              && typeof DeviceMotionEvent.requestPermission === 'function') {
+            await DeviceMotionEvent.requestPermission();
+          }
+        } catch (_) {}
+        enterAsCamera();
+      });
+    }
+
+    function enterAsCamera() {
       state.entered = true;
+      camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
+      // 初期方向: +Y (真上、DeviceOrientation が来るまでの一瞬用)
+      camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
+      log('spawn(camera): (' + SPAWN_POS.x + ',' + SPAWN_POS.y + ',' + SPAWN_POS.z + ') 初期 +Y 向き', 'ok');
+      const overlay = _by('enter-overlay');
+      if (overlay) overlay.style.display = 'none';
+      setupDeviceOrientation();
+    }
+
+    // ========== DeviceOrientation → camera.quaternion (Three.js 旧 DeviceOrientationControls 準拠) ==========
+    let _cameraTickFn = null;   // tick で毎フレーム呼ばれる (camera role のみ設定される)
+    function setupDeviceOrientation() {
+      const euler = new THREE.Euler();
+      const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -π/2 X 軸オフセット
+      const zee = new THREE.Vector3(0, 0, 1);
+      const q0 = new THREE.Quaternion();
+
+      let alpha = 0, beta = 0, gamma = 0;
+      let hasEvent = false;
+      let screenOrient = (typeof window.orientation === 'number') ? window.orientation : 0;
+
+      window.addEventListener('orientationchange', () => {
+        screenOrient = window.orientation || 0;
+      });
+
+      window.addEventListener('deviceorientation', (e) => {
+        if (e.alpha === null) return;
+        alpha = THREE.MathUtils.degToRad(e.alpha);
+        beta  = THREE.MathUtils.degToRad(e.beta || 0);
+        gamma = THREE.MathUtils.degToRad(e.gamma || 0);
+        hasEvent = true;
+      }, true);
+
+      _cameraTickFn = () => {
+        if (!hasEvent) return;  // gyro が来るまで初期 +Y 向きを維持
+        const orient = THREE.MathUtils.degToRad(screenOrient);
+        euler.set(beta, alpha, -gamma, 'YXZ');
+        camera.quaternion.setFromEuler(euler);
+        camera.quaternion.multiply(q1);
+        camera.quaternion.multiply(q0.setFromAxisAngle(zee, -orient));
+      };
+      log('DeviceOrientation listener attached', 'ok');
+    }
+
+    // ============================================================
+    // 共有 canvas インタラクション: tap/click で cube1 等を選択
+    //   ・observer/master : マウス左クリック (drag と区別、移動 < 6px = tap)
+    //   ・camera (mobile) : タップ (touchstart→touchend、移動 < 10px = tap)
+    //   ・観測者のドラッグ回転や DeviceOrientation ジャイロと共存
+    // ============================================================
+    {
+      const _canvas = renderer.domElement;
+      const _rayTap = new THREE.Raycaster();
+      const _ndcTap = new THREE.Vector2();
+      let _tapStart = null;
+      let _tapMoved = false;
+      const TAP_SLOP_MOUSE = 6;
+      const TAP_SLOP_TOUCH = 10;
+
+      function _tapBegin(x, y) { _tapStart = { x, y }; _tapMoved = false; }
+      function _tapCheck(x, y, slop) {
+        if (!_tapStart) return;
+        if (Math.hypot(x - _tapStart.x, y - _tapStart.y) > slop) _tapMoved = true;
+      }
+      function _tapEnd(x, y) {
+        const wasTap = _tapStart && !_tapMoved;
+        _tapStart = null;
+        if (!wasTap) return;
+        const rect = _canvas.getBoundingClientRect();
+        _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
+        _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
+        _rayTap.setFromCamera(_ndcTap, camera);
+        const hits = _rayTap.intersectObjects(selectables, false);
+        if (hits.length > 0) selectObject(hits[0].object);
+        else selectObject(null);
+      }
+
+      // Mouse
+      _canvas.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        _tapBegin(e.clientX, e.clientY);
+      });
+      window.addEventListener('mousemove', (e) => _tapCheck(e.clientX, e.clientY, TAP_SLOP_MOUSE));
+      window.addEventListener('mouseup', (e) => {
+        if (e.button !== 0) return;
+        _tapEnd(e.clientX, e.clientY);
+      });
+
+      // Touch (mobile)
+      _canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) { _tapStart = null; return; }
+        const t = e.touches[0];
+        _tapBegin(t.clientX, t.clientY);
+      }, { passive: true });
+      _canvas.addEventListener('touchmove', (e) => {
+        const t = e.touches[0]; if (!t) return;
+        _tapCheck(t.clientX, t.clientY, TAP_SLOP_TOUCH);
+      }, { passive: true });
+      _canvas.addEventListener('touchend', (e) => {
+        const t = e.changedTouches[0]; if (!t) { _tapStart = null; return; }
+        _tapEnd(t.clientX, t.clientY);
+      }, { passive: true });
+      _canvas.addEventListener('touchcancel', () => { _tapStart = null; });
     }
 
     // ============================================================
@@ -458,8 +601,10 @@
     // ============================================================
     function setupObserver() {
       state.entered = true;
-
-      let yaw = 0, pitch = 0;
+      // 入室位置 (全ロール共通)
+      camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
+      // 初期方向 = +Y (真上)。ユーザーが下 (床) を見たい時は下方向にマウスドラッグ or PitchDown。
+      let yaw = INIT_YAW, pitch = INIT_PITCH;
       const _e = new THREE.Euler(0, 0, 0, 'YXZ');
       function applyYawPitch() {
         _e.set(pitch, yaw, 0, 'YXZ');
@@ -474,17 +619,10 @@
       const dom = renderer.domElement;
       dom.style.cursor = 'grab';
 
-      // click 判定用: mousedown 座標を覚え、mouseup で移動量が小さければ click 扱い
-      //   → click かつ selectables を raycast ヒットしたら選択、外れなら選択解除
-      const _raycaster = new THREE.Raycaster();
-      const _ndc = new THREE.Vector2();
-      let _pressAt = null;   // { x, y }
-
-      // 左ドラッグ = look、短距離の press+release = click (選択)
+      // 左ドラッグ = look (yaw/pitch)。tap 選択は共有 canvas ハンドラで処理される。
       let dragging = false, lastX = 0, lastY = 0;
       dom.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
-        _pressAt = { x: e.clientX, y: e.clientY };
         dragging = true; lastX = e.clientX; lastY = e.clientY;
         dom.style.cursor = 'grabbing';
       });
@@ -495,28 +633,13 @@
         const SENS = 0.0035;
         yaw -= dx * SENS;
         pitch -= dy * SENS;
-        const PL = Math.PI / 2 - 0.05;
-        pitch = Math.max(-PL, Math.min(PL, pitch));
+        // pitch 上限を +π/2 まで拡張 (初期方向 +Y = π/2 を許容)。下限は -π/2+ε
+        const PL_UP = Math.PI / 2;
+        const PL_DN = Math.PI / 2 - 0.05;
+        pitch = Math.max(-PL_DN, Math.min(PL_UP, pitch));
         applyYawPitch();
       });
-      window.addEventListener('mouseup', (e) => {
-        dragging = false; dom.style.cursor = 'grab';
-        if (_pressAt) {
-          const dx = e.clientX - _pressAt.x;
-          const dy = e.clientY - _pressAt.y;
-          // 移動 4px 未満 = click 扱い (drag ではない)
-          if (Math.hypot(dx, dy) < 4) {
-            const rect = dom.getBoundingClientRect();
-            _ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-            _ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-            _raycaster.setFromCamera(_ndc, camera);
-            const hits = _raycaster.intersectObjects(selectables, false);
-            if (hits.length > 0) selectObject(hits[0].object);
-            else selectObject(null);
-          }
-          _pressAt = null;
-        }
-      });
+      window.addEventListener('mouseup', () => { dragging = false; dom.style.cursor = 'grab'; });
       dom.addEventListener('contextmenu', (e) => e.preventDefault());
 
       // WASD 移動
@@ -767,6 +890,8 @@
     function tick() {
       requestAnimationFrame(tick);
       const dt = Math.min(clock.getDelta(), 0.1);
+      // camera role: DeviceOrientation で毎フレーム camera.quaternion 更新
+      if (_cameraTickFn) _cameraTickFn();
       for (const fn of updaters) fn(dt);
       sendPoseThrottled();
       // ステータス表示
