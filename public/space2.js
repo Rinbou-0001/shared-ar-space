@@ -59,7 +59,12 @@
 
     // ========== Three.js セットアップ ==========
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1c1c28);
+    // 背景 = 白。距離フェード先の色と一致させると「遠方が空気に溶ける」ように見える
+    scene.background = new THREE.Color(0xffffff);
+    // 指数フォグ (視点から距離 d のフラグメントの色は color との mix になる):
+    //   c = exp(-density * d)^2  で減衰、density=0.06 なら約 20m で 76% 白混ざり、40m でほぼ純白
+    //   Fog (linear) より遠近の変化が自然。GridHelper (LineBasicMaterial) も対応する。
+    scene.fog = new THREE.FogExp2(0xffffff, 0.06);
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -79,23 +84,24 @@
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    // ライト
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const dirLight = new THREE.DirectionalLight(0xd0d8e8, 0.6);
+    // ライト (床は白でフラットに見せるため、環境光を強めに)
+    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    // ========== 床: 20m × 20m at origin ==========
+    // ========== 床: 20m × 20m at origin (白) ==========
     const FIELD_SIZE = 20;
     const FIELD_HALF = FIELD_SIZE / 2;
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
       new THREE.MeshStandardMaterial({
-        color: 0x55555c,
-        roughness: 0.9,
+        color: 0xffffff,      // 純白
+        roughness: 1.0,
         metalness: 0.0,
         side: THREE.DoubleSide,
+        // fog: true はデフォルト有効 — 遠方は scene.fog の白に自動フェード
       })
     );
     floor.rotation.x = -Math.PI / 2;
@@ -103,18 +109,20 @@
     floor.name = 'floor';
     scene.add(floor);
 
-    // 1m グリッド
-    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x9a9aa0, 0x7a7a80);
+    // 1m グリッド (グレー)
+    //   GridHelper は LineBasicMaterial (fog: true デフォルト) なので、
+    //   遠方の格子線も自動的に白フェードで薄くなる
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x6b7280, 0x9ca3af);
     grid.position.set(0, 0.01, 0);
     scene.add(grid);
-    // 5m 主格子
-    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xb0b0b6, 0xb0b0b6);
+    // 5m 主格子 (少し濃いグレー)
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x4b5563, 0x4b5563);
     majorGrid.position.set(0, 0.015, 0);
     scene.add(majorGrid);
-    // 20m 境界
+    // 20m 境界 (濃いめグレー、視認性重視)
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
-      new THREE.LineBasicMaterial({ color: 0xc0c0c6 })
+      new THREE.LineBasicMaterial({ color: 0x374151 })
     );
     boundary.position.set(0, 0.012, 0);
     scene.add(boundary);
