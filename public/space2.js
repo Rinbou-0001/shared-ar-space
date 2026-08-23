@@ -399,6 +399,12 @@
       //   自分自身が emit した内容は broadcast 経由で戻らないが、名前一致すればどのオブジェクトも同期
       socket.on('objectPose', (data) => {
         if (!data || typeof data.name !== 'string') return;
+        try {
+          log('recv objectPose: ' + data.name + ' → (' +
+              (typeof data.x === 'number' ? data.x.toFixed(2) : '?') + ',' +
+              (typeof data.y === 'number' ? data.y.toFixed(2) : '?') + ',' +
+              (typeof data.z === 'number' ? data.z.toFixed(2) : '?') + ')', 'ok');
+        } catch (_) {}
         // 現在サポートするのは cube1 のみ (将来 selectables に追加すれば拡張可)
         if (data.name === 'cube1') {
           // 自分が動かしている最中は上書きしない (ドラッグ中の一時ズレを防ぐ)
