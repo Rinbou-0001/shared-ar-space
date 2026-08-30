@@ -534,6 +534,7 @@
           if (typeof data.display.pitch === 'number') myDisplay.pitch = data.display.pitch;
           if (typeof data.display.roll === 'number') myDisplay.roll = data.display.roll;
           syncObsOaBtn();
+          if (typeof window.__syncYprInputs === 'function') window.__syncYprInputs();
         }
         // master パネル: 選択中クライアントの表示更新
         if (ROLE === 'master' && data.id === selectedClientId) {
@@ -1038,6 +1039,37 @@
         log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
       });
 
+      // ========== 画面姿勢 YPR (deg) 手動入力 ==========
+      //   myDisplay.yaw/pitch/roll に反映 + server に displayConfig emit
+      //   0/0/0 のときは off-axis 側で avatar × flipY を使う従来ロジック
+      //   0/0/0 以外なら Euler(pitch, yaw, roll, YXZ) で world 座標の display 姿勢を直接指定
+      function _syncYprInputs() {
+        const y = _by('obs-display-yaw');
+        const p = _by('obs-display-pitch');
+        const r = _by('obs-display-roll');
+        if (y && document.activeElement !== y) y.value = (myDisplay.yaw   || 0).toFixed(0);
+        if (p && document.activeElement !== p) p.value = (myDisplay.pitch || 0).toFixed(0);
+        if (r && document.activeElement !== r) r.value = (myDisplay.roll  || 0).toFixed(0);
+      }
+      _syncYprInputs();
+      window.__syncYprInputs = _syncYprInputs;   // socket.on('displayConfig') から呼び戻す
+      _bind('obs-display-ypr-apply', 'click', () => {
+        const y = parseFloat((_by('obs-display-yaw')   || {}).value) || 0;
+        const p = parseFloat((_by('obs-display-pitch') || {}).value) || 0;
+        const r = parseFloat((_by('obs-display-roll')  || {}).value) || 0;
+        myDisplay.yaw = y; myDisplay.pitch = p; myDisplay.roll = r;
+        if (socket && socket.connected) {
+          socket.emit('displayConfig', { yaw: y, pitch: p, roll: r });
+        }
+        log('display YPR: (' + y + ',' + p + ',' + r + ') 適用 → off-axis 姿勢に反映', 'ok');
+      });
+      // Enter でも apply
+      ['obs-display-yaw','obs-display-pitch','obs-display-roll'].forEach((id) => {
+        _bind(id, 'keydown', (e) => {
+          if (e.key === 'Enter') { const b = _by('obs-display-ypr-apply'); if (b) b.click(); }
+        });
+      });
+
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
       //   ・fs-exit-btn      : exitFullscreen
@@ -1227,6 +1259,8 @@
     const _oaDispQuat   = new THREE.Quaternion();
     const _oaEye        = new THREE.Vector3();
     const _oaTmp        = new THREE.Vector3();
+    const _oaEulerYpr   = new THREE.Euler(0, 0, 0, 'YXZ');
+    const _oaQuatYpr    = new THREE.Quaternion();
     const CAM_WINDOW_DIST = 0.20;   // スマホ: 画面が視線 20cm 前にあると仮定
     const _oaFlipQ = new THREE.Quaternion(0, 1, 0, 0); // Y 軸 180° (Observer の avatar 反転用)
     let _oaLastState = null;
@@ -1296,10 +1330,27 @@
           _oaDispCenter.copy(_oaSavePos).addScaledVector(_oaTmp, CAM_WINDOW_DIST);
           _oaDispQuat.copy(_oaSaveQuat);
         } else {
-          // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置、姿勢 = avatar × 180°flip
+          // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置
+          //   姿勢は以下 2 モード:
+          //     ・myDisplay.yaw/pitch/roll が全て 0 → avatar 姿勢 × 180°Y flip (従来)
+          //     ・いずれか ≠ 0 → world 座標系で Euler(pitch, yaw, roll, YXZ) を直接使用
           _oaDispCenter.copy(_oaSavePos);
           _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
-          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
+          const y = myDisplay.yaw   || 0;
+          const p = myDisplay.pitch || 0;
+          const r = myDisplay.roll  || 0;
+          if (y === 0 && p === 0 && r === 0) {
+            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
+          } else {
+            _oaEulerYpr.set(
+              THREE.MathUtils.degToRad(p),
+              THREE.MathUtils.degToRad(y),
+              THREE.MathUtils.degToRad(r),
+              'YXZ'
+            );
+            _oaQuatYpr.setFromEuler(_oaEulerYpr);
+            _oaDispQuat.copy(_oaQuatYpr);
+          }
         }
         const ok = applyOffAxisProjection(
           camera, _oaEye, _oaDispCenter, _oaDispQuat,
