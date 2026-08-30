@@ -534,7 +534,6 @@
           if (typeof data.display.pitch === 'number') myDisplay.pitch = data.display.pitch;
           if (typeof data.display.roll === 'number') myDisplay.roll = data.display.roll;
           syncObsOaBtn();
-          if (typeof window.__syncYprInputs === 'function') window.__syncYprInputs();
         }
         // master パネル: 選択中クライアントの表示更新
         if (ROLE === 'master' && data.id === selectedClientId) {
@@ -951,23 +950,39 @@
       // update ループへ登録
       updaters.push(updateMove);
 
-      // テレポート系
-      function teleport(x, y, z, yawDeg, pitchDeg) {
+      // テレポート系 — XYZ + YPR (deg) をまとめて camera に反映
+      //   ・yawDeg/pitchDeg/rollDeg が渡されればそれで上書き
+      //   ・roll は observer 標準の yaw/pitch 内部変数以外に Euler(pitch, yaw, roll) で直接 quat を組む
+      function teleport(x, y, z, yawDeg, pitchDeg, rollDeg) {
         camera.position.set(x, y, z);
-        if (typeof yawDeg === 'number') yaw = THREE.MathUtils.degToRad(yawDeg);
+        if (typeof yawDeg   === 'number') yaw   = THREE.MathUtils.degToRad(yawDeg);
         if (typeof pitchDeg === 'number') pitch = THREE.MathUtils.degToRad(pitchDeg);
-        applyYawPitch();
+        const rollRad = (typeof rollDeg === 'number') ? THREE.MathUtils.degToRad(rollDeg) : 0;
+        // Roll があるときは applyYawPitch では扱えないので Euler 全成分で直接構築
+        if (rollRad !== 0) {
+          _e.set(pitch, yaw, rollRad, 'YXZ');
+          camera.quaternion.setFromEuler(_e);
+        } else {
+          applyYawPitch();
+        }
       }
       _bind('obs-teleport', 'click', () => {
         const x = parseFloat((_by('obs-x') || {}).value) || 0;
-        const y = parseFloat((_by('obs-y') || {}).value) || 1.7;
+        const y = parseFloat((_by('obs-y') || {}).value) || 1;
         const z = parseFloat((_by('obs-z') || {}).value) || 0;
-        teleport(x, y, z);
+        const yawD   = parseFloat((_by('obs-yaw')   || {}).value);
+        const pitchD = parseFloat((_by('obs-pitch') || {}).value);
+        const rollD  = parseFloat((_by('obs-roll')  || {}).value);
+        teleport(x, y, z,
+          isFinite(yawD)   ? yawD   : undefined,
+          isFinite(pitchD) ? pitchD : undefined,
+          isFinite(rollD)  ? rollD  : undefined);
+        log('teleport (' + x + ',' + y + ',' + z + ') YPR=(' + yawD + ',' + pitchD + ',' + rollD + ')', 'ok');
       });
-      _bind('obs-overview', 'click', () => teleport(0, 15, 20, 0, -40));
-      _bind('obs-top',      'click', () => teleport(0, 20, 0, 0, -89));
-      // Enter で apply
-      ['obs-x','obs-y','obs-z'].forEach((id) => {
+      _bind('obs-overview', 'click', () => teleport(0, 15, 20, 0, -40, 0));
+      _bind('obs-top',      'click', () => teleport(0, 20, 0, 0, -89, 0));
+      // Enter で apply (XYZ / YPR どのフィールドからも)
+      ['obs-x','obs-y','obs-z','obs-yaw','obs-pitch','obs-roll'].forEach((id) => {
         _bind(id, 'keydown', (e) => {
           if (e.key === 'Enter') {
             const t = _by('obs-teleport'); if (t) t.click();
@@ -1039,50 +1054,27 @@
         log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
       });
 
-      // ========== 画面姿勢 YPR (deg) 手動入力 ==========
-      //   myDisplay.yaw/pitch/roll に反映 + server に displayConfig emit
-      //   0/0/0 のときは off-axis 側で avatar × flipY を使う従来ロジック
-      //   0/0/0 以外なら Euler(pitch, yaw, roll, YXZ) で world 座標の display 姿勢を直接指定
-      function _syncYprInputs() {
-        const y = _by('obs-display-yaw');
-        const p = _by('obs-display-pitch');
-        const r = _by('obs-display-roll');
-        if (y && document.activeElement !== y) y.value = (myDisplay.yaw   || 0).toFixed(0);
-        if (p && document.activeElement !== p) p.value = (myDisplay.pitch || 0).toFixed(0);
-        if (r && document.activeElement !== r) r.value = (myDisplay.roll  || 0).toFixed(0);
+      // ========== camera XYZ + YPR リアルタイム反映 ==========
+      //   毎フレーム camera.position/quaternion を入力欄に書き戻す (フォーカス中は除く)
+      //   これで WASD / ドラッグで動かした後も入力欄が実座標に追従、
+      //   さらに master からの forcePose で移動した時も自動反映される。
+      const _obsYprInputs = ['obs-x','obs-y','obs-z','obs-yaw','obs-pitch','obs-roll'].map(_by);
+      const _obsEulerRead = new THREE.Euler(0, 0, 0, 'YXZ');
+      function _obsSyncInputsFromCamera() {
+        const focused = document.activeElement;
+        const [ix, iy, iz, iyaw, ip, ir] = _obsYprInputs;
+        if (ix && focused !== ix) ix.value = camera.position.x.toFixed(2);
+        if (iy && focused !== iy) iy.value = camera.position.y.toFixed(2);
+        if (iz && focused !== iz) iz.value = camera.position.z.toFixed(2);
+        _obsEulerRead.setFromQuaternion(camera.quaternion, 'YXZ');
+        if (iyaw && focused !== iyaw) iyaw.value = THREE.MathUtils.radToDeg(_obsEulerRead.y).toFixed(0);
+        if (ip   && focused !== ip)   ip.value   = THREE.MathUtils.radToDeg(_obsEulerRead.x).toFixed(0);
+        if (ir   && focused !== ir)   ir.value   = THREE.MathUtils.radToDeg(_obsEulerRead.z).toFixed(0);
       }
-      _syncYprInputs();
-      window.__syncYprInputs = _syncYprInputs;   // socket.on('displayConfig') から呼び戻す
-      _bind('obs-display-ypr-apply', 'click', () => {
-        const y = parseFloat((_by('obs-display-yaw')   || {}).value) || 0;
-        const p = parseFloat((_by('obs-display-pitch') || {}).value) || 0;
-        const r = parseFloat((_by('obs-display-roll')  || {}).value) || 0;
-        myDisplay.yaw = y; myDisplay.pitch = p; myDisplay.roll = r;
-        if (socket && socket.connected) {
-          socket.emit('displayConfig', { yaw: y, pitch: p, roll: r });
-        }
-        log('display YPR: (' + y + ',' + p + ',' + r + ') 適用 → off-axis 姿勢に反映', 'ok');
-      });
-      // Enter でも apply
-      ['obs-display-yaw','obs-display-pitch','obs-display-roll'].forEach((id) => {
-        _bind(id, 'keydown', (e) => {
-          if (e.key === 'Enter') { const b = _by('obs-display-ypr-apply'); if (b) b.click(); }
-        });
-      });
-      // プリセット: 「↑面」= Y0/P90/R0 (viewerEye が真上のとき成立するプリセット)
-      _bind('obs-display-ypr-preset-up', 'click', () => {
-        myDisplay.yaw = 0; myDisplay.pitch = 90; myDisplay.roll = 0;
-        _syncYprInputs();
-        if (socket && socket.connected) socket.emit('displayConfig', { yaw: 0, pitch: 90, roll: 0 });
-        log('display YPR preset: ↑面 (Y0/P90/R0)', 'ok');
-      });
-      // リセット: 0,0,0 (avatar × flipY モードに戻す)
-      _bind('obs-display-ypr-reset', 'click', () => {
-        myDisplay.yaw = 0; myDisplay.pitch = 0; myDisplay.roll = 0;
-        _syncYprInputs();
-        if (socket && socket.connected) socket.emit('displayConfig', { yaw: 0, pitch: 0, roll: 0 });
-        log('display YPR reset: (0,0,0) — avatar × 180°Y flip モード', 'ok');
-      });
+      // updater として毎フレーム呼ぶ
+      updaters.push(() => _obsSyncInputsFromCamera());
+      // 起動直後にも一度反映
+      _obsSyncInputsFromCamera();
 
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
@@ -1273,8 +1265,6 @@
     const _oaDispQuat   = new THREE.Quaternion();
     const _oaEye        = new THREE.Vector3();
     const _oaTmp        = new THREE.Vector3();
-    const _oaEulerYpr   = new THREE.Euler(0, 0, 0, 'YXZ');
-    const _oaQuatYpr    = new THREE.Quaternion();
     const CAM_WINDOW_DIST = 0.20;   // スマホ: 画面が視線 20cm 前にあると仮定
     const _oaFlipQ = new THREE.Quaternion(0, 1, 0, 0); // Y 軸 180° (Observer の avatar 反転用)
     let _oaLastState = null;
@@ -1345,26 +1335,11 @@
           _oaDispQuat.copy(_oaSaveQuat);
         } else {
           // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置
-          //   姿勢は以下 2 モード:
-          //     ・myDisplay.yaw/pitch/roll が全て 0 → avatar 姿勢 × 180°Y flip (従来)
-          //     ・いずれか ≠ 0 → world 座標系で Euler(pitch, yaw, roll, YXZ) を直接使用
+          //   display 姿勢 = camera 姿勢 × 180°Y flip
+          //   → 観測者が YPR を動かすと自動で display 姿勢も追従する
           _oaDispCenter.copy(_oaSavePos);
           _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
-          const y = myDisplay.yaw   || 0;
-          const p = myDisplay.pitch || 0;
-          const r = myDisplay.roll  || 0;
-          if (y === 0 && p === 0 && r === 0) {
-            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
-          } else {
-            _oaEulerYpr.set(
-              THREE.MathUtils.degToRad(p),
-              THREE.MathUtils.degToRad(y),
-              THREE.MathUtils.degToRad(r),
-              'YXZ'
-            );
-            _oaQuatYpr.setFromEuler(_oaEulerYpr);
-            _oaDispQuat.copy(_oaQuatYpr);
-          }
+          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
         }
         const ok = applyOffAxisProjection(
           camera, _oaEye, _oaDispCenter, _oaDispQuat,

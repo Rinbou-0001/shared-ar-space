@@ -287,11 +287,16 @@
   </div>
   <div class="row">
     <label>X</label><input type="number" id="obs-x" value="0" step="0.5">
-    <label>Y</label><input type="number" id="obs-y" value="1.7" step="0.5">
-    <label>Z</label><input type="number" id="obs-z" value="5" step="0.5">
+    <label>Y</label><input type="number" id="obs-y" value="1" step="0.5">
+    <label>Z</label><input type="number" id="obs-z" value="0" step="0.5">
   </div>
   <div class="row">
-    <button id="obs-teleport">移動</button>
+    <label>Y</label><input type="number" id="obs-yaw"   value="-90" step="5">
+    <label>P</label><input type="number" id="obs-pitch" value="0"   step="5">
+    <label>R</label><input type="number" id="obs-roll"  value="0"   step="5">
+  </div>
+  <div class="row">
+    <button id="obs-teleport">移動 (XYZ+YPR)</button>
     <button id="obs-overview" style="background: #60a5fa; color: #1e3a8a">俯瞰</button>
     <button id="obs-top" style="background: #4ade80; color: #064e3b">真上</button>
   </div>
@@ -313,19 +318,9 @@
     <label>Off-Axis</label>
     <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
   </div>
-  <div class="row" style="margin-top:4px; flex-wrap: wrap;">
-    <label style="width:auto; margin-right:2px;">Y</label><input type="number" id="obs-display-yaw"   value="0" step="5" style="width:48px;">
-    <label style="width:auto; margin-right:2px;">P</label><input type="number" id="obs-display-pitch" value="0" step="5" style="width:48px;">
-    <label style="width:auto; margin-right:2px;">R</label><input type="number" id="obs-display-roll"  value="0" step="5" style="width:48px;">
-  </div>
-  <div class="row" style="margin-top:2px;">
-    <button id="obs-display-ypr-apply" style="background:#06b6d4; color:#083344; font-size:11px;">YPR 適用</button>
-    <button id="obs-display-ypr-preset-up" style="background:#94a3b8; color:#1e293b; font-size:10px;" title="真上を eye にする時">↑面</button>
-    <button id="obs-display-ypr-reset" style="background:#64748b; color:white; font-size:10px;">0,0,0</button>
-  </div>
   <div class="hint" style="font-size:10px; opacity:0.7;">
-    Off-Axis 画面姿勢 (度)。0/0/0 = avatar × 180°Y flip。<br>
-    <b>↑面</b> = Y0/P90/R0 (画面が真上向き、viewerEye が真上 (0,2,0) の時に成立)
+    Off-Axis の display 姿勢は上の Y/P/R (カメラ姿勢) × 180°Y flip で自動決定<br>
+    viewerEye が真上 (0,2,0) の時は Y=0, P=90, R=0 → 移動 で成立
   </div>
   <div class="row">
     <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.001" min="0.05" max="3.0">
