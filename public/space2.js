@@ -1209,6 +1209,63 @@
       if (btn) btn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
     });
 
+    // ========================================================
+    // オフアクシス投影 (/test/space から移植)
+    //   eye:           共通視点 (Vector3)
+    //   displayCenter: 画面中心の world 座標 (Vector3)
+    //   displayQuat:   画面向き。ローカル: 右=+X, 上=+Y, 法線 (視聴者側)=+Z
+    //   w, h:          物理サイズ (m)
+    //   near, far:     クリップ面
+    //   戻り値: true=適用成功、false=退化 (eye が画面上)
+    // ========================================================
+    const _ax = new THREE.Vector3(), _ay = new THREE.Vector3(), _az = new THREE.Vector3();
+    const _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vc = new THREE.Vector3();
+    const _camLookMat = new THREE.Matrix4();
+    const _oaSavePos   = new THREE.Vector3();
+    const _oaSaveQuat  = new THREE.Quaternion();
+    const _oaDispCenter = new THREE.Vector3();
+    const _oaDispQuat   = new THREE.Quaternion();
+    const _oaEye        = new THREE.Vector3();
+    const _oaTmp        = new THREE.Vector3();
+    const CAM_WINDOW_DIST = 0.20;   // スマホ: 画面が視線 20cm 前にあると仮定
+    const _oaFlipQ = new THREE.Quaternion(0, 1, 0, 0); // Y 軸 180° (Observer の avatar 反転用)
+    let _oaLastState = null;
+
+    function applyOffAxisProjection(cam, eye, displayCenter, displayQuat, w, h, near, far) {
+      _ax.set(1, 0, 0).applyQuaternion(displayQuat); // right
+      _ay.set(0, 1, 0).applyQuaternion(displayQuat); // up
+      _az.set(0, 0, 1).applyQuaternion(displayQuat); // normal (viewer side)
+      const hw = w * 0.5, hh = h * 0.5;
+      _va.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, -hh).sub(eye);
+      _vb.copy(displayCenter).addScaledVector(_ax, +hw).addScaledVector(_ay, -hh).sub(eye);
+      _vc.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, +hh).sub(eye);
+      let d = -_va.dot(_az);
+      // eye が画面裏側なら Y 軸 180° 回転で自動補正
+      if (d <= 0.001) {
+        _az.negate(); _ax.negate();
+        _va.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, -hh).sub(eye);
+        _vb.copy(displayCenter).addScaledVector(_ax, +hw).addScaledVector(_ay, -hh).sub(eye);
+        _vc.copy(displayCenter).addScaledVector(_ax, -hw).addScaledVector(_ay, +hh).sub(eye);
+        d = -_va.dot(_az);
+        if (d <= 0.001) return false;
+      }
+      const k = near / d;
+      const l = _va.dot(_ax) * k;
+      const r = _vb.dot(_ax) * k;
+      const b = _va.dot(_ay) * k;
+      const t = _vc.dot(_ay) * k;
+      cam.projectionMatrix.makePerspective(l, r, t, b, near, far);
+      if (cam.projectionMatrixInverse) {
+        cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+      }
+      // カメラ位置 = eye、向き = 画面法線と正対
+      cam.position.copy(eye);
+      _camLookMat.lookAt(eye, _va.copy(eye).sub(_az), _ay);
+      cam.quaternion.setFromRotationMatrix(_camLookMat);
+      cam.matrixWorldNeedsUpdate = true;
+      return true;
+    }
+
     // ========== メインループ ==========
     const clock = new THREE.Clock();
     function tick() {
@@ -1226,7 +1283,59 @@
         camera.position.x.toFixed(1) + ',' +
         camera.position.y.toFixed(1) + ',' +
         camera.position.z.toFixed(1);
-      renderer.render(scene, camera);
+
+      // ========== render: myDisplay.offaxis で分岐 ==========
+      if (myDisplay.offaxis) {
+        // ユーザー由来の姿勢を退避
+        _oaSavePos.copy(camera.position);
+        _oaSaveQuat.copy(camera.quaternion);
+        if (ROLE === 'camera') {
+          // スマホ: eye = 自分の位置、画面 = 視線 20cm 前方、画面姿勢 = camera 姿勢
+          _oaEye.copy(_oaSavePos);
+          _oaTmp.set(0, 0, -1).applyQuaternion(_oaSaveQuat);
+          _oaDispCenter.copy(_oaSavePos).addScaledVector(_oaTmp, CAM_WINDOW_DIST);
+          _oaDispQuat.copy(_oaSaveQuat);
+        } else {
+          // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置、姿勢 = avatar × 180°flip
+          _oaDispCenter.copy(_oaSavePos);
+          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
+        }
+        const ok = applyOffAxisProjection(
+          camera, _oaEye, _oaDispCenter, _oaDispQuat,
+          myDisplay.width, myDisplay.height,
+          0.05, 500
+        );
+        // 状態遷移時のみ 1 回ログ (毎フレーム log を吐くのを回避)
+        const st = ok ? 'ok' : 'fail';
+        if (_oaLastState !== st) {
+          _oaLastState = st;
+          try {
+            const dE = _oaEye.distanceTo(_oaDispCenter);
+            log('off-axis ' + (ok ? 'OK' : 'FAIL') +
+                ' role=' + ROLE +
+                ' eye=(' + _oaEye.x.toFixed(2) + ',' + _oaEye.y.toFixed(2) + ',' + _oaEye.z.toFixed(2) + ')' +
+                ' disp=(' + _oaDispCenter.x.toFixed(2) + ',' + _oaDispCenter.y.toFixed(2) + ',' + _oaDispCenter.z.toFixed(2) + ')' +
+                ' dist=' + dE.toFixed(2) + 'm' +
+                ' W×H=' + myDisplay.width.toFixed(3) + '×' + myDisplay.height.toFixed(3),
+              ok ? 'ok' : 'err');
+          } catch (_) {}
+        }
+        if (!ok) camera.updateProjectionMatrix();
+        renderer.render(scene, camera);
+        // 復元: ユーザー由来の姿勢を戻す (次フレームの操作が正しく効く)
+        camera.position.copy(_oaSavePos);
+        camera.quaternion.copy(_oaSaveQuat);
+      } else {
+        // 通常の対称 perspective に復帰
+        if (_oaLastState !== null) {
+          _oaLastState = null;
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          log('off-axis OFF (通常 perspective 復帰)', 'ok');
+        }
+        renderer.render(scene, camera);
+      }
     }
     tick();
 
