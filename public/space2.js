@@ -313,6 +313,152 @@
       myColor: '#ffffff',
     };
     const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
+    // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
+    let _displaySizeManuallyEdited = false;
+
+    // ============================================================
+    // 物理ディスプレイサイズ推定
+    //   ブラウザは物理 DPI を直接返さないので、以下を組み合わせて推測:
+    //     1. UA + native 解像度 (screen.width × devicePixelRatio) で機種を特定
+    //     2. 機種毎の代表 PPI テーブル参照
+    //     3. width_m = nativePx / PPI × 0.0254 で メートル換算
+    //   fallback: PPI=96 (CSS 標準) or DPR×160 (Android)
+    //   詳細な情報 (機種名, PPI) は log に出るので、調整時の参考にできる
+    // ============================================================
+    function detectPhysicalDisplaySize() {
+      const cssW = screen.width || window.innerWidth;
+      const cssH = screen.height || window.innerHeight;
+      const dpr = window.devicePixelRatio || 1;
+      const nW = Math.round(cssW * dpr);
+      const nH = Math.round(cssH * dpr);
+      const nMin = Math.min(nW, nH);
+      const nMax = Math.max(nW, nH);
+      const ua = navigator.userAgent || '';
+      const isIOS = /iPhone|iPad|iPod/i.test(ua)
+        || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1); // iPadOS 13+
+      let ppi = null;
+      let deviceName = 'unknown';
+
+      if (/iPhone/i.test(ua) || (isIOS && !/iPad/i.test(ua) && nMax < 2500)) {
+        // iPhone 系: nativeMax 長辺 で機種推定 → 代表 PPI
+        //   代表機種: 一部世代でわずかにズレるが、off-axis 用途では十分な近似値
+        if (nMax >= 2796) { ppi = 460; deviceName = 'iPhone 14/15/16 Pro Max'; }
+        else if (nMax >= 2778) { ppi = 458; deviceName = 'iPhone 11-13 Pro Max / Plus'; }
+        else if (nMax >= 2688) { ppi = 458; deviceName = 'iPhone XS Max / 11 Pro Max'; }
+        else if (nMax >= 2556) { ppi = 460; deviceName = 'iPhone 14/15/16 / 14 Pro'; }
+        else if (nMax >= 2532) { ppi = 460; deviceName = 'iPhone 12/13/14'; }
+        else if (nMax >= 2436) { ppi = 458; deviceName = 'iPhone X/XS/11 Pro'; }
+        else if (nMax >= 2340) { ppi = 476; deviceName = 'iPhone 12/13 mini'; }
+        else if (nMax >= 1920) { ppi = 401; deviceName = 'iPhone 6/7/8 Plus'; }
+        else if (nMax >= 1792) { ppi = 326; deviceName = 'iPhone XR / 11'; }
+        else if (nMax >= 1334) { ppi = 326; deviceName = 'iPhone SE 2/3 / 6/7/8'; }
+        else { ppi = 326; deviceName = 'iPhone (older)'; }
+      } else if (/iPad/i.test(ua) || isIOS) {
+        if (nMax >= 2732) { ppi = 264; deviceName = 'iPad Pro 12.9"'; }
+        else if (nMax >= 2388) { ppi = 264; deviceName = 'iPad Pro 11" / Air'; }
+        else if (nMax >= 2266) { ppi = 326; deviceName = 'iPad mini 6'; }
+        else if (nMax >= 2224) { ppi = 264; deviceName = 'iPad Pro 10.5"'; }
+        else if (nMax >= 2160) { ppi = 264; deviceName = 'iPad 10.2"'; }
+        else if (nMax >= 2048) { ppi = 264; deviceName = 'iPad 9.7"'; }
+        else { ppi = 264; deviceName = 'iPad (older)'; }
+      } else if (/Android/i.test(ua)) {
+        // Android は端末依存が大きい。DPR × 160 が Android 標準 baseline (mdpi=160)
+        ppi = Math.max(96, dpr * 160);
+        deviceName = 'Android (DPR estimate)';
+      } else if (/Macintosh|Mac OS X/i.test(ua)) {
+        // Mac 系: Retina Mac は screen.width × dpr が機種代表 native px と一致するため識別可
+        //   ・native 解像度が完全一致するものは機種名 + 実測 PPI
+        //   ・不明な Retina 系は 220 PPI (安全側)
+        //   ・非 Retina は 27" iMac 系 = 109 PPI 相当を採用
+        //   ※ ユーザー側で対角インチを入力すればこれを上書き可能
+        const nSet = nMax + ':' + nMin;
+        const M = {
+          '3456:2234': { ppi: 254, name: 'MacBook Pro 16" (Liquid Retina XDR)' },
+          '3024:1964': { ppi: 254, name: 'MacBook Pro 14" (Liquid Retina XDR)' },
+          '2880:1864': { ppi: 224, name: 'MacBook Pro 13" M2' },
+          '2560:1664': { ppi: 224, name: 'MacBook Air 13" M2/M3' },
+          '2880:1800': { ppi: 220, name: 'MacBook Pro 15/16" (Retina)' },
+          '2560:1600': { ppi: 227, name: 'MacBook Pro/Air 13" (Retina)' },
+          '2304:1440': { ppi: 226, name: 'MacBook 12" (Retina)' },
+          '5120:2880': { ppi: 218, name: 'Studio Display 27" / iMac 27" 5K' },
+          '4480:2520': { ppi: 218, name: 'iMac 24" M1/M3' },
+          '6016:3384': { ppi: 218, name: 'Pro Display XDR 32"' },
+          '2560:1440': { ppi: 109, name: '27" 1440p non-Retina' },
+          '1920:1080': { ppi:  92, name: '21.5" 1080p (Full HD)' },
+        };
+        const hit = M[nSet];
+        if (hit) { ppi = hit.ppi; deviceName = hit.name; }
+        else if (dpr >= 2) { ppi = 220; deviceName = 'Mac Retina (unknown model)'; }
+        else { ppi = 109; deviceName = 'Mac non-Retina (推定)'; }
+      } else if (/Windows|Linux|X11|CrOS/i.test(ua)) {
+        // Windows/Linux: DPR がスケーリング率をそのまま反映するので、
+        //   CSS 標準の 96 dpi × dpr を採用。
+        //   100% → 96 PPI, 125% → 120, 150% → 144, 200% → 192 相当
+        //   (実機の物理 PPI とはズレるが CSS 世界での "1 CSS inch = 96 CSS px" が保たれるので
+        //    off-axis 投影の視差計算では概ね正しい)
+        ppi = 96 * dpr;
+        deviceName = 'Windows/Linux (' + Math.round(dpr * 100) + '% scale, ' + ppi.toFixed(0) + ' PPI 相当)';
+      } else {
+        ppi = 96 * dpr;
+        deviceName = 'Desktop 汎用 (96 × DPR)';
+      }
+
+      // 対角インチ override: ユーザーがモニターの実対角を入力していれば、
+      //   PPI = sqrt(nW² + nH²) / diagInch で厳密に補正。UA テーブルよりも優先。
+      //   localStorage キー 'space2.diagonalInch' に float で保存されている。
+      let usedOverride = false;
+      try {
+        const raw = localStorage.getItem('space2.diagonalInch');
+        const dInch = raw ? parseFloat(raw) : NaN;
+        if (isFinite(dInch) && dInch > 3 && dInch < 100) {
+          const diagPx = Math.hypot(nW, nH);
+          ppi = diagPx / dInch;
+          deviceName = 'Manual diagonal ' + dInch.toFixed(1) + '"';
+          usedOverride = true;
+        }
+      } catch (_) {}
+
+      const inch = 0.0254;
+      const width_m  = (nW / ppi) * inch;
+      const height_m = (nH / ppi) * inch;
+      return {
+        width: width_m,
+        height: height_m,
+        ppi, deviceName,
+        nativeW: nW, nativeH: nH,
+        cssW, cssH, dpr,
+        usedOverride,
+      };
+    }
+
+    // ディスプレイサイズを再検出 → myDisplay 更新 → server 通知 → UI 入力欄同期
+    //   force=true: 手動編集フラグを無視して強制上書き
+    function refreshMyDisplaySize(force) {
+      try {
+        const est = detectPhysicalDisplaySize();
+        log('display: ' + est.deviceName +
+            ' native=' + est.nativeW + '×' + est.nativeH +
+            ' DPR=' + est.dpr.toFixed(2) +
+            ' PPI=' + est.ppi.toFixed(0) +
+            (est.usedOverride ? ' [対角 override]' : '') +
+            ' → ' + est.width.toFixed(3) + '×' + est.height.toFixed(3) + 'm',
+            'ok');
+        if (!_displaySizeManuallyEdited || force) {
+          myDisplay.width  = est.width;
+          myDisplay.height = est.height;
+          // 入力欄同期 (フォーカス中は上書きしない)
+          const winp = document.getElementById('obs-display-w');
+          const hinp = document.getElementById('obs-display-h');
+          if (winp && document.activeElement !== winp) winp.value = est.width.toFixed(3);
+          if (hinp && document.activeElement !== hinp) hinp.value = est.height.toFixed(3);
+          if (socket && socket.connected) {
+            socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
+          }
+        }
+      } catch (e) {
+        log('display detect err: ' + e.message, 'err');
+      }
+    }
     let viewerEye = { x: 0, y: 2.0, z: 0 };
     let selectedClientId = ''; // master のみ使用
 
@@ -350,8 +496,8 @@
         }
         rebuildClientSelect();
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
-        // ディスプレイサイズを報告
-        socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
+        // ディスプレイサイズを自動推定 → 報告 (以降 URL 更新 / 向き変更でも再取得)
+        refreshMyDisplaySize(true);
       });
 
       socket.on('join', (u) => {
@@ -845,15 +991,52 @@
         }
         log('observer offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
       });
-      // 表示サイズ入力
+      // 表示サイズ入力: ユーザーが手入力したら自動再取得を停止 (手動優先)
       function pushDisplaySize() {
         const w = parseFloat((_by('obs-display-w') || {}).value) || 0.3;
         const h = parseFloat((_by('obs-display-h') || {}).value) || 0.2;
         myDisplay.width = w; myDisplay.height = h;
+        _displaySizeManuallyEdited = true;
         if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
+        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (以降 自動値で上書きしない)', 'ok');
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
+      // 「自動再取得」ボタン: 手動フラグを解除して即再検出
+      _bind('obs-display-auto', 'click', () => {
+        _displaySizeManuallyEdited = false;
+        refreshMyDisplaySize(true);
+      });
+
+      // 対角インチ入力: localStorage に保存 → 次回リロード時も override 継承
+      //   保存された値は detectPhysicalDisplaySize が優先採用
+      try {
+        const savedDiag = localStorage.getItem('space2.diagonalInch');
+        const diagInp = _by('obs-display-diag');
+        if (savedDiag && diagInp) diagInp.value = parseFloat(savedDiag).toFixed(1);
+      } catch (_) {}
+
+      _bind('obs-display-diag-apply', 'click', () => {
+        const el = _by('obs-display-diag');
+        if (!el) return;
+        const v = parseFloat(el.value);
+        if (!isFinite(v) || v < 3 || v > 100) {
+          log('対角インチが不正 (3-100 の範囲)', 'err');
+          return;
+        }
+        try { localStorage.setItem('space2.diagonalInch', String(v)); } catch (_) {}
+        _displaySizeManuallyEdited = false;  // override が最新値になるので手動フラグ解除
+        refreshMyDisplaySize(true);
+        log('対角 override: ' + v.toFixed(1) + '" を適用 & 永続化', 'ok');
+      });
+      _bind('obs-display-diag-clear', 'click', () => {
+        try { localStorage.removeItem('space2.diagonalInch'); } catch (_) {}
+        const el = _by('obs-display-diag');
+        if (el) el.value = '';
+        _displaySizeManuallyEdited = false;
+        refreshMyDisplaySize(true);
+        log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
+      });
 
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
@@ -1046,6 +1229,17 @@
       renderer.render(scene, camera);
     }
     tick();
+
+    // ========== ディスプレイサイズ再取得トリガー ==========
+    //   ・load       : URL 更新 (通常リロード / /space2 → /space2/master などのナビゲーション) の直後
+    //   ・pageshow   : ブラウザバック / 進む復元 (Safari/iOS の bfcache 対策)
+    //   ・orientationchange : 画面回転 (縦横の入替え)
+    //   ・resize     : ウィンドウサイズ変更 / DPR 変化 (外部ディスプレイ差替え等)
+    //   これらの発火時、手動編集フラグが立っていなければ最新値で上書き
+    window.addEventListener('load',              () => refreshMyDisplaySize(false));
+    window.addEventListener('pageshow',          () => refreshMyDisplaySize(false));
+    window.addEventListener('orientationchange', () => setTimeout(() => refreshMyDisplaySize(false), 200));
+    window.addEventListener('resize',            () => refreshMyDisplaySize(false));
 
     log('space2 ready (role=' + ROLE + ')', 'ok');
   }
