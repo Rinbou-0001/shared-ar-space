@@ -313,15 +313,19 @@
     <label>Off-Axis</label>
     <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
   </div>
-  <div class="row" style="margin-top:4px;">
-    <label>Yaw</label><input type="number" id="obs-display-yaw"   value="0" step="5" style="width:60px;">
-    <label>Pit</label><input type="number" id="obs-display-pitch" value="0" step="5" style="width:60px;">
-    <label>Rol</label><input type="number" id="obs-display-roll"  value="0" step="5" style="width:60px;">
-    <button id="obs-display-ypr-apply" style="background:#06b6d4; color:#083344; font-size:11px;">適用</button>
+  <div class="row" style="margin-top:4px; flex-wrap: wrap;">
+    <label style="width:auto; margin-right:2px;">Y</label><input type="number" id="obs-display-yaw"   value="0" step="5" style="width:48px;">
+    <label style="width:auto; margin-right:2px;">P</label><input type="number" id="obs-display-pitch" value="0" step="5" style="width:48px;">
+    <label style="width:auto; margin-right:2px;">R</label><input type="number" id="obs-display-roll"  value="0" step="5" style="width:48px;">
+  </div>
+  <div class="row" style="margin-top:2px;">
+    <button id="obs-display-ypr-apply" style="background:#06b6d4; color:#083344; font-size:11px;">YPR 適用</button>
+    <button id="obs-display-ypr-preset-up" style="background:#94a3b8; color:#1e293b; font-size:10px;" title="真上を eye にする時">↑面</button>
+    <button id="obs-display-ypr-reset" style="background:#64748b; color:white; font-size:10px;">0,0,0</button>
   </div>
   <div class="hint" style="font-size:10px; opacity:0.7;">
-    Off-Axis の画面姿勢 (度)。0/0/0 なら avatar 向き × 180°Y flip を使用。<br>
-    YPR ≠ 0 なら Euler(pitch, yaw, roll, YXZ) から直接 display 姿勢を構築 (world 座標)
+    Off-Axis 画面姿勢 (度)。0/0/0 = avatar × 180°Y flip。<br>
+    <b>↑面</b> = Y0/P90/R0 (画面が真上向き、viewerEye が真上 (0,2,0) の時に成立)
   </div>
   <div class="row">
     <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.001" min="0.05" max="3.0">

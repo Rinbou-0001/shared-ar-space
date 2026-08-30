@@ -1069,6 +1069,20 @@
           if (e.key === 'Enter') { const b = _by('obs-display-ypr-apply'); if (b) b.click(); }
         });
       });
+      // プリセット: 「↑面」= Y0/P90/R0 (viewerEye が真上のとき成立するプリセット)
+      _bind('obs-display-ypr-preset-up', 'click', () => {
+        myDisplay.yaw = 0; myDisplay.pitch = 90; myDisplay.roll = 0;
+        _syncYprInputs();
+        if (socket && socket.connected) socket.emit('displayConfig', { yaw: 0, pitch: 90, roll: 0 });
+        log('display YPR preset: ↑面 (Y0/P90/R0)', 'ok');
+      });
+      // リセット: 0,0,0 (avatar × flipY モードに戻す)
+      _bind('obs-display-ypr-reset', 'click', () => {
+        myDisplay.yaw = 0; myDisplay.pitch = 0; myDisplay.roll = 0;
+        _syncYprInputs();
+        if (socket && socket.connected) socket.emit('displayConfig', { yaw: 0, pitch: 0, roll: 0 });
+        log('display YPR reset: (0,0,0) — avatar × 180°Y flip モード', 'ok');
+      });
 
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
