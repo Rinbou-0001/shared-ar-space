@@ -565,7 +565,8 @@
         if (!data || typeof data.sensitivity !== 'number') return;
         moveSensitivity = Math.max(5, Math.min(500, data.sensitivity));
         const inp = document.getElementById('m-move-sens');
-        if (inp && document.activeElement !== inp) inp.value = moveSensitivity;
+        const dirty = window.__mIsDirty || (() => false);
+        if (inp && document.activeElement !== inp && !dirty('m-move-sens')) inp.value = moveSensitivity;
         const cur = document.getElementById('m-move-sens-current');
         if (cur) cur.textContent = moveSensitivity;
         log('move sensitivity → ' + moveSensitivity + ' px/m', 'ok');
@@ -575,9 +576,10 @@
         if (!data || !scene.fog) return;
         if (typeof data.density === 'number' && isFinite(data.density)) {
           scene.fog.density = Math.max(0, Math.min(1, data.density));
-          // master パネルの入力欄と現在値表示を同期
+          // master パネルの入力欄と現在値表示を同期 (dirty 中は上書きしない)
           const inp = document.getElementById('m-fog-density');
-          if (inp && document.activeElement !== inp) inp.value = scene.fog.density.toFixed(3);
+          const dirty = window.__mIsDirty || (() => false);
+          if (inp && document.activeElement !== inp && !dirty('m-fog-density')) inp.value = scene.fog.density.toFixed(3);
           const cur = document.getElementById('m-fog-current');
           if (cur) cur.textContent = scene.fog.density.toFixed(3);
           log('fog density → ' + scene.fog.density.toFixed(3), 'ok');
@@ -589,14 +591,15 @@
         if (typeof data.x === 'number') viewerEye.x = data.x;
         if (typeof data.y === 'number') viewerEye.y = data.y;
         if (typeof data.z === 'number') viewerEye.z = data.z;
-        // master の入力欄も同期
+        // master の入力欄も同期 (dirty 中は上書きしない)
         if (ROLE === 'master') {
           const vex = document.getElementById('ve-x');
           const vey = document.getElementById('ve-y');
           const vez = document.getElementById('ve-z');
-          if (vex && document.activeElement !== vex) vex.value = viewerEye.x.toFixed(2);
-          if (vey && document.activeElement !== vey) vey.value = viewerEye.y.toFixed(2);
-          if (vez && document.activeElement !== vez) vez.value = viewerEye.z.toFixed(2);
+          const dirty = window.__mIsDirty || (() => false);
+          if (vex && document.activeElement !== vex && !dirty('ve-x')) vex.value = viewerEye.x.toFixed(2);
+          if (vey && document.activeElement !== vey && !dirty('ve-y')) vey.value = viewerEye.y.toFixed(2);
+          if (vez && document.activeElement !== vez && !dirty('ve-z')) vez.value = viewerEye.z.toFixed(2);
         }
       });
 
@@ -1147,6 +1150,48 @@
     // MASTER セットアップ (クライアント選択 + 強制ポーズ + Off-Axis + viewerEye)
     // ============================================================
     function setupMaster() {
+      // ========== dirty フラグ ヘルパ (input echo 焼き潰し防止) ==========
+      //   ・全 master 入力欄で `input` イベント → dirty=true
+      //   ・socket echo (viewerEye / moveConfig / fogConfig / forcePose) 受信時、
+      //     dirty ならその field を上書きしない
+      //   ・apply 完了で該当 field をクリア
+      const _mDirty = {};
+      function _mMarkDirty(id) { _mDirty[id] = true; }
+      function _mIsDirty(id) { return !!_mDirty[id]; }
+      function _mClearDirty(...ids) {
+        if (ids.length === 0) { for (const k in _mDirty) _mDirty[k] = false; return; }
+        for (const id of ids) _mDirty[id] = false;
+      }
+      // window に露出して socket ハンドラから参照可能に
+      window.__mIsDirty = _mIsDirty;
+      // input イベント一括登録
+      ['m-x','m-y','m-z','m-yaw','m-pitch','m-roll',
+       've-x','ve-y','ve-z',
+       'm-move-sens','m-fog-density'
+      ].forEach((id) => _bind(id, 'input', () => _mMarkDirty(id)));
+
+      // ボタンを mousedown で即発火する共通バインダ
+      //   click は mouseup 相当で focus 抜けの後に走るため、mousedown で先手
+      function bindApplyMousedown(btnId, applyFn) {
+        const btn = _by(btnId);
+        if (!btn) return;
+        btn.addEventListener('mousedown',  (e) => { e.preventDefault(); applyFn(); });
+        btn.addEventListener('touchstart', (e) => { e.preventDefault(); applyFn(); }, { passive: false });
+      }
+
+      // Enter で直接 apply + blur を仕込む共通バインダ
+      function bindEnterApply(inputIds, applyFn) {
+        inputIds.forEach((id) => {
+          _bind(id, 'keydown', (e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              applyFn();
+              if (e.target && typeof e.target.blur === 'function') e.target.blur();
+            }
+          });
+        });
+      }
+
       // クライアント選択
       const selEl = _by('m-client-select');
       _bind('m-client-select', 'change', () => {
@@ -1173,9 +1218,13 @@
         }
         log('force pose → ' + selectedClientId.substring(0, 6), 'ok');
       }
-      _bind('m-apply', 'click', applyForcePose);
-      ['m-x','m-y','m-z','m-yaw','m-pitch','m-roll'].forEach((id) => {
-        _bind(id, 'keydown', (e) => { if (e.key === 'Enter') applyForcePose(); });
+      bindApplyMousedown('m-apply', () => {
+        applyForcePose();
+        _mClearDirty('m-x','m-y','m-z','m-yaw','m-pitch','m-roll');
+      });
+      bindEnterApply(['m-x','m-y','m-z','m-yaw','m-pitch','m-roll'], () => {
+        applyForcePose();
+        _mClearDirty('m-x','m-y','m-z','m-yaw','m-pitch','m-roll');
       });
 
       // 現在値読込
@@ -1193,7 +1242,10 @@
         set('m-pitch', THREE.MathUtils.radToDeg(e.x).toFixed(0));
         set('m-roll',  THREE.MathUtils.radToDeg(e.z).toFixed(0));
       }
-      _bind('m-readcurrent', 'click', readCurrentToInputs);
+      _bind('m-readcurrent', 'click', () => {
+        _mClearDirty('m-x','m-y','m-z','m-yaw','m-pitch','m-roll');
+        readCurrentToInputs();
+      });
 
       // Off-Axis (選択中クライアントの display.offaxis をトグル)
       const _masterDisplayCache = new Map(); // id → display
@@ -1226,13 +1278,16 @@
       });
 
       // viewerEye
-      _bind('ve-apply', 'click', () => {
+      function applyViewerEye() {
         const x = parseFloat((_by('ve-x') || {}).value) || 0;
         const y = parseFloat((_by('ve-y') || {}).value) || 2;
         const z = parseFloat((_by('ve-z') || {}).value) || 0;
         if (socket && socket.connected) socket.emit('viewerEye', { x, y, z });
+        _mClearDirty('ve-x','ve-y','ve-z');
         log('viewerEye → (' + x + ',' + y + ',' + z + ')', 'ok');
-      });
+      }
+      bindApplyMousedown('ve-apply', applyViewerEye);
+      bindEnterApply(['ve-x','ve-y','ve-z'], applyViewerEye);
 
       // 移動感度 (master が変更 → server 経由で全クライアントに配信)
       function applyMoveSens() {
@@ -1241,10 +1296,11 @@
         const v = parseFloat(el.value);
         if (isNaN(v)) return;
         if (socket && socket.connected) socket.emit('moveConfig', { sensitivity: v });
+        _mClearDirty('m-move-sens');
         log('move sens emit → ' + v + ' px/m', 'ok');
       }
-      _bind('m-move-sens-apply', 'click', applyMoveSens);
-      _bind('m-move-sens', 'keydown', (e) => { if (e.key === 'Enter') applyMoveSens(); });
+      bindApplyMousedown('m-move-sens-apply', applyMoveSens);
+      bindEnterApply(['m-move-sens'], applyMoveSens);
 
       // FogExp2 密度 (master が変更 → server 経由で全クライアントに配信)
       function applyFogDensity() {
@@ -1253,10 +1309,11 @@
         const d = parseFloat(el.value);
         if (isNaN(d)) return;
         if (socket && socket.connected) socket.emit('fogConfig', { density: d });
+        _mClearDirty('m-fog-density');
         log('fog density emit → ' + d.toFixed(3), 'ok');
       }
-      _bind('m-fog-apply', 'click', applyFogDensity);
-      _bind('m-fog-density', 'keydown', (e) => { if (e.key === 'Enter') applyFogDensity(); });
+      bindApplyMousedown('m-fog-apply', applyFogDensity);
+      bindEnterApply(['m-fog-density'], applyFogDensity);
     }
 
     // ========== クライアント選択ドロップダウン ==========
