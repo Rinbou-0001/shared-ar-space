@@ -966,7 +966,9 @@
           applyYawPitch();
         }
       }
-      _bind('obs-teleport', 'click', () => {
+      // 「移動」ボタン: mousedown 時点で値を読む (click では focus 抜けで sync が走る前の値を確保)
+      //   さらに dirty フラグを解除して以降は sync 復帰
+      function _applyObsTeleport() {
         const x = parseFloat((_by('obs-x') || {}).value) || 0;
         const y = parseFloat((_by('obs-y') || {}).value) || 1;
         const z = parseFloat((_by('obs-z') || {}).value) || 0;
@@ -977,15 +979,28 @@
           isFinite(yawD)   ? yawD   : undefined,
           isFinite(pitchD) ? pitchD : undefined,
           isFinite(rollD)  ? rollD  : undefined);
-        log('teleport (' + x + ',' + y + ',' + z + ') YPR=(' + yawD + ',' + pitchD + ',' + rollD + ')', 'ok');
-      });
-      _bind('obs-overview', 'click', () => teleport(0, 15, 20, 0, -40, 0));
-      _bind('obs-top',      'click', () => teleport(0, 20, 0, 0, -89, 0));
-      // Enter で apply (XYZ / YPR どのフィールドからも)
+        log('teleport (' + x.toFixed(2) + ',' + y.toFixed(2) + ',' + z.toFixed(2) +
+            ') YPR=(' + (isFinite(yawD)?yawD:'-') + ',' + (isFinite(pitchD)?pitchD:'-') + ',' + (isFinite(rollD)?rollD:'-') + ')', 'ok');
+        if (typeof window.__obsClearDirty === 'function') window.__obsClearDirty();
+      }
+      // mousedown で発火 → focus 抜けによる sync 上書きを回避
+      const tpBtn = _by('obs-teleport');
+      if (tpBtn) {
+        tpBtn.addEventListener('mousedown', (e) => { e.preventDefault(); _applyObsTeleport(); });
+        tpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); _applyObsTeleport(); }, { passive: false });
+      }
+      _bind('obs-overview', 'click', () => { teleport(0, 15, 20, 0, -40, 0); if (window.__obsClearDirty) window.__obsClearDirty(); });
+      _bind('obs-top',      'click', () => { teleport(0, 20, 0, 0, -89, 0);  if (window.__obsClearDirty) window.__obsClearDirty(); });
+      // Enter で apply (XYZ / YPR どのフィールドからも直接 _applyObsTeleport を呼ぶ)
+      //   ・keydown Enter 時点では入力欄が focus 中 = 値は最新 = dirty ガードで sync に触られていない
+      //   ・そのまま _applyObsTeleport() を呼べば入力値が確実に反映される
       ['obs-x','obs-y','obs-z','obs-yaw','obs-pitch','obs-roll'].forEach((id) => {
         _bind(id, 'keydown', (e) => {
           if (e.key === 'Enter') {
-            const t = _by('obs-teleport'); if (t) t.click();
+            e.preventDefault();
+            _applyObsTeleport();
+            // 入力欄から focus を外して sync 復帰を即発生させる
+            if (e.target && typeof e.target.blur === 'function') e.target.blur();
           }
         });
       });
@@ -1054,22 +1069,41 @@
         log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
       });
 
-      // ========== camera XYZ + YPR リアルタイム反映 ==========
-      //   毎フレーム camera.position/quaternion を入力欄に書き戻す (フォーカス中は除く)
-      //   これで WASD / ドラッグで動かした後も入力欄が実座標に追従、
-      //   さらに master からの forcePose で移動した時も自動反映される。
-      const _obsYprInputs = ['obs-x','obs-y','obs-z','obs-yaw','obs-pitch','obs-roll'].map(_by);
+      // ========== camera XYZ + YPR リアルタイム反映 (dirty ガード付き) ==========
+      //   毎フレーム camera.position/quaternion を入力欄に書き戻す。
+      //   ただし:
+      //     ・focus 中のフィールドは触らない
+      //     ・ユーザーが `input` イベントで編集した field は dirty=true → 上書き停止
+      //       (これにより「入力 → ボタンクリックで focus 抜け → 即上書き」レースを回避)
+      //     ・「移動」ボタン適用完了で dirty をクリア → 以降 sync 復帰
+      const _obsIds = ['obs-x','obs-y','obs-z','obs-yaw','obs-pitch','obs-roll'];
+      const _obsInputs = _obsIds.map(_by);
+      const _obsDirty  = { 'obs-x': false, 'obs-y': false, 'obs-z': false,
+                           'obs-yaw': false, 'obs-pitch': false, 'obs-roll': false };
+      _obsIds.forEach((id) => {
+        _bind(id, 'input', () => { _obsDirty[id] = true; });
+      });
+      function _obsClearDirty() {
+        for (const k in _obsDirty) _obsDirty[k] = false;
+      }
+      window.__obsClearDirty = _obsClearDirty;   // teleport から呼び戻す
       const _obsEulerRead = new THREE.Euler(0, 0, 0, 'YXZ');
       function _obsSyncInputsFromCamera() {
         const focused = document.activeElement;
-        const [ix, iy, iz, iyaw, ip, ir] = _obsYprInputs;
-        if (ix && focused !== ix) ix.value = camera.position.x.toFixed(2);
-        if (iy && focused !== iy) iy.value = camera.position.y.toFixed(2);
-        if (iz && focused !== iz) iz.value = camera.position.z.toFixed(2);
+        const [ix, iy, iz, iyaw, ip, ir] = _obsInputs;
+        const put = (el, id, val) => {
+          if (!el) return;
+          if (focused === el) return;
+          if (_obsDirty[id]) return;
+          el.value = val;
+        };
+        put(ix, 'obs-x', camera.position.x.toFixed(2));
+        put(iy, 'obs-y', camera.position.y.toFixed(2));
+        put(iz, 'obs-z', camera.position.z.toFixed(2));
         _obsEulerRead.setFromQuaternion(camera.quaternion, 'YXZ');
-        if (iyaw && focused !== iyaw) iyaw.value = THREE.MathUtils.radToDeg(_obsEulerRead.y).toFixed(0);
-        if (ip   && focused !== ip)   ip.value   = THREE.MathUtils.radToDeg(_obsEulerRead.x).toFixed(0);
-        if (ir   && focused !== ir)   ir.value   = THREE.MathUtils.radToDeg(_obsEulerRead.z).toFixed(0);
+        put(iyaw, 'obs-yaw',   THREE.MathUtils.radToDeg(_obsEulerRead.y).toFixed(0));
+        put(ip,   'obs-pitch', THREE.MathUtils.radToDeg(_obsEulerRead.x).toFixed(0));
+        put(ir,   'obs-roll',  THREE.MathUtils.radToDeg(_obsEulerRead.z).toFixed(0));
       }
       // updater として毎フレーム呼ぶ
       updaters.push(() => _obsSyncInputsFromCamera());
