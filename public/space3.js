@@ -242,8 +242,8 @@
           'm  格子=' + (CELL_M*100) + 'cm 主=' + (MAJOR_M*100) + 'cm', 'ok');
       } catch (_) {}
     }
-    // 初期構築 (myDisplay がまだデフォルト値 0.30×0.20 の状態でも箱が出る)
-    rebuildSpaceBox();
+    // 初期構築の呼び出しは myDisplay 宣言後 (後段) に置く
+    //   → TDZ (Temporal Dead Zone) を避ける
 
     // 中心マーカー (原点確認用) — 箱の中央に小さくグレー
     const centerMarker = new THREE.Mesh(
@@ -405,6 +405,10 @@
     const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
     // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
     let _displaySizeManuallyEdited = false;
+
+    // ★ space3: myDisplay が使える状態になったので初期の箱空間を構築
+    //   (以降は refreshMyDisplaySize / pushDisplaySize から再構築される)
+    if (typeof rebuildSpaceBox === 'function') rebuildSpaceBox();
 
     // ============================================================
     // 物理ディスプレイサイズ推定
