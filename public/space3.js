@@ -374,14 +374,20 @@
 
     // ========== 他クライアントのアバター管理 ==========
     // avatars: id → { grp, mesh, color, role }
+    //   space3: アバターは 1cm 立方体 (visible=false)。
+    //     ・空間が小さいので通常サイズの球を出すと窓を塞ぐため非表示
+    //     ・位置/姿勢のトラッキング (pose 同期) は grp.position / grp.quaternion で継続
+    //     ・raycast: visible=false の Mesh はデフォルトで raycast をスキップされる
+    //       (アバターを直接クリックする機能はこの space では未実装なので問題なし)
     const avatars = new Map();
     function makeAvatar(id, color, role) {
       const grp = new THREE.Group();
       grp.userData.__avatarId = id;
       const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.15, 24, 16),
-        new THREE.MeshStandardMaterial({ color: color || '#ffffff', roughness: 0.6 })
+        new THREE.BoxGeometry(0.01, 0.01, 0.01),   // 1cm 立方体
+        new THREE.MeshBasicMaterial({ color: color || '#ffffff' })
       );
+      mesh.visible = false;                          // 非表示
       grp.add(mesh);
       scene.add(grp);
       return { grp, mesh, color: color || '#ffffff', role: role || 'camera' };
