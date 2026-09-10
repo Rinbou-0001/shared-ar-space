@@ -139,6 +139,114 @@
 
     let _boxGroup = null;   // 全ての壁 + 格子 + 境界を保持 (再構築で dispose)
 
+    // ========== 壁カメラ (仮想 PerspectiveCamera → RTT → 壁テクスチャ) ==========
+    //   ・enableWallCamera(target): RTT 作成 → 仮想カメラ作成 → 対象壁に texture 貼付
+    //   ・disableWallCamera(): 破棄 + rebuildSpaceBox で白復帰
+    //   ・tick で renderWallCam() が毎フレーム scene を RTT へ描画
+    //   ・target: 'front' | 'back' | 'left' | 'right' | 'floor' | 'ceiling'
+    //   ・カメラ位置/注視点/FOV は observer panel から数値入力で調整
+    let _wallCameraEnabled = false;
+    let _wallCameraTarget  = 'front';
+    let _wallCam           = null;   // THREE.PerspectiveCamera (仮想カメラ)
+    let _wallCameraRTT     = null;   // THREE.WebGLRenderTarget
+    let _wallCameraMat     = null;   // 壁貼付用 MeshBasicMaterial
+    const _wallCamPos      = new THREE.Vector3(0, 1, 1.0);   // 箱前 1m から見る初期姿勢
+    const _wallCamLook     = new THREE.Vector3(0, 1, 0);     // 箱中心を注視
+    let _wallCamFov        = 60;
+
+    // 壁 mesh を name で検索 (_boxGroup 内)
+    function _getWallByName(name) {
+      if (!_boxGroup) return null;
+      let found = null;
+      _boxGroup.traverse((c) => {
+        if (c.isMesh && c.userData.wallName === name) found = c;
+      });
+      return found;
+    }
+
+    function enableWallCamera(target) {
+      if (_wallCameraEnabled) return;
+      if (target) _wallCameraTarget = target;
+      const wall = _getWallByName(_wallCameraTarget);
+      const wp = (wall && wall.geometry && wall.geometry.parameters) || {};
+      const wallW = wp.width  || myDisplay.width  || 0.3;
+      const wallH = wp.height || myDisplay.height || 0.2;
+      const aspect = wallW / wallH;
+      const rttW = 512;
+      const rttH = Math.max(64, Math.round(rttW / aspect));
+      _wallCameraRTT = new THREE.WebGLRenderTarget(rttW, rttH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        depthBuffer: true,
+      });
+      _wallCam = new THREE.PerspectiveCamera(_wallCamFov, aspect, 0.02, 500);
+      _wallCam.position.copy(_wallCamPos);
+      _wallCam.lookAt(_wallCamLook);
+      _wallCameraMat = new THREE.MeshBasicMaterial({
+        map: _wallCameraRTT.texture,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      _wallCameraEnabled = true;
+      rebuildSpaceBox();
+      log('wall cam ON: target=' + _wallCameraTarget +
+          ' aspect=' + aspect.toFixed(2) + ' RTT=' + rttW + '×' + rttH +
+          ' pos=(' + _wallCamPos.x.toFixed(2) + ',' + _wallCamPos.y.toFixed(2) + ',' + _wallCamPos.z.toFixed(2) + ')' +
+          ' look=(' + _wallCamLook.x.toFixed(2) + ',' + _wallCamLook.y.toFixed(2) + ',' + _wallCamLook.z.toFixed(2) + ')' +
+          ' fov=' + _wallCamFov, 'ok');
+    }
+    function disableWallCamera() {
+      if (!_wallCameraEnabled) return;
+      if (_wallCameraRTT) { _wallCameraRTT.dispose(); _wallCameraRTT = null; }
+      if (_wallCameraMat) { _wallCameraMat.dispose(); _wallCameraMat = null; }
+      _wallCam = null;
+      _wallCameraEnabled = false;
+      rebuildSpaceBox();
+      log('wall cam OFF', 'ok');
+    }
+    function toggleWallCamera(target) {
+      if (_wallCameraEnabled) disableWallCamera();
+      else enableWallCamera(target);
+    }
+    // 毎フレーム: scene を RTT へ描画。対象壁は一時 non-visible で自映り込み防止
+    function renderWallCam() {
+      if (!_wallCameraEnabled || !_wallCam || !_wallCameraRTT) return;
+      _wallCam.position.copy(_wallCamPos);
+      _wallCam.lookAt(_wallCamLook);
+      _wallCam.fov = _wallCamFov;
+      _wallCam.updateProjectionMatrix();
+      const target = _getWallByName(_wallCameraTarget);
+      let prevVis = null;
+      if (target) { prevVis = target.visible; target.visible = false; }
+      const prev = renderer.getRenderTarget();
+      renderer.setRenderTarget(_wallCameraRTT);
+      renderer.render(scene, _wallCam);
+      renderer.setRenderTarget(prev);
+      if (target && prevVis !== null) target.visible = prevVis;
+    }
+    // observer panel からの制御用
+    window.__toggleWallCamera = toggleWallCamera;
+    window.__isWallCameraOn   = () => _wallCameraEnabled;
+    window.__setWallCameraParams = function(target, pos, look, fov) {
+      if (typeof target === 'string') _wallCameraTarget = target;
+      if (pos)  _wallCamPos.set(pos.x, pos.y, pos.z);
+      if (look) _wallCamLook.set(look.x, look.y, look.z);
+      if (typeof fov === 'number' && isFinite(fov)) _wallCamFov = fov;
+      // aspect や target 壁変更は enable 状態なら再構築
+      if (_wallCameraEnabled) {
+        disableWallCamera();
+        enableWallCamera(_wallCameraTarget);
+      }
+    };
+    window.__getWallCameraState = () => ({
+      enabled: _wallCameraEnabled,
+      target: _wallCameraTarget,
+      pos: _wallCamPos.clone(),
+      look: _wallCamLook.clone(),
+      fov: _wallCamFov,
+    });
+
     // 矩形の格子 (XY 平面上、原点中心の LineSegments)
     //   ・cellMinor 間隔で薄グレー、cellMajor 倍数で濃グレー
     //   ・fog: true (デフォルト) で距離フェード対応
@@ -177,9 +285,15 @@
     //   pw, ph = 面のローカル幅×高さ (m)
     //   pos = 面の中心 world 位置 (Vector3)
     //   rot = 面の姿勢 (Euler)。ローカル +Z が面法線 (viewer 側 = 箱の内側)
+    //   name = 'floor' | 'ceiling' | 'back' | 'front' | 'left' | 'right'
     //   epsilon = 格子/境界を面よりわずかに内側に浮かせて z-fighting 回避
-    function addBoxFace(pw, ph, pos, rot) {
-      const wall = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), _boxWallMat);
+    function addBoxFace(pw, ph, pos, rot, name) {
+      // 壁カメラが有効な面はビデオマテリアル、それ以外は白
+      const mat = (_wallCameraEnabled && _wallCameraTarget === name && _wallCameraMat)
+        ? _wallCameraMat : _boxWallMat;
+      const wall = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), mat);
+      wall.name = 'space3-wall-' + name;
+      wall.userData.wallName = name;
       wall.position.copy(pos);
       wall.rotation.copy(rot);
       _boxGroup.add(wall);
@@ -228,12 +342,12 @@
       //   Front   : Z=+halfD,   法線 -Z   → rotation Y = π
       //   Left    : X=-halfW,   法線 +X   → rotation Y = +π/2
       //   Right   : X=+halfW,   法線 -X   → rotation Y = -π/2
-      addBoxFace(W, D, new THREE.Vector3(0, cy - halfH, 0), new THREE.Euler(-Math.PI/2, 0, 0));  // 床
-      addBoxFace(W, D, new THREE.Vector3(0, cy + halfH, 0), new THREE.Euler(+Math.PI/2, 0, 0));  // 天井
-      addBoxFace(W, H, new THREE.Vector3(0, cy, -halfD),    new THREE.Euler(0, 0, 0));           // 奥壁
-      addBoxFace(W, H, new THREE.Vector3(0, cy, +halfD),    new THREE.Euler(0, Math.PI, 0));     // 前壁
-      addBoxFace(D, H, new THREE.Vector3(-halfW, cy, 0),    new THREE.Euler(0, +Math.PI/2, 0));  // 左
-      addBoxFace(D, H, new THREE.Vector3(+halfW, cy, 0),    new THREE.Euler(0, -Math.PI/2, 0));  // 右
+      addBoxFace(W, D, new THREE.Vector3(0, cy - halfH, 0), new THREE.Euler(-Math.PI/2, 0, 0), 'floor');
+      addBoxFace(W, D, new THREE.Vector3(0, cy + halfH, 0), new THREE.Euler(+Math.PI/2, 0, 0), 'ceiling');
+      addBoxFace(W, H, new THREE.Vector3(0, cy, -halfD),    new THREE.Euler(0, 0, 0),          'back');
+      addBoxFace(W, H, new THREE.Vector3(0, cy, +halfD),    new THREE.Euler(0, Math.PI, 0),    'front');
+      addBoxFace(D, H, new THREE.Vector3(-halfW, cy, 0),    new THREE.Euler(0, +Math.PI/2, 0), 'left');
+      addBoxFace(D, H, new THREE.Vector3(+halfW, cy, 0),    new THREE.Euler(0, -Math.PI/2, 0), 'right');
 
       scene.add(_boxGroup);
       try {
@@ -1176,6 +1290,47 @@
         log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
       });
 
+      // ========== 壁カメラ (仮想カメラ RTT) 制御 ==========
+      function _readWallCamInputs() {
+        const parse = (id, dflt) => {
+          const el = _by(id); if (!el) return dflt;
+          const v = parseFloat(el.value); return isFinite(v) ? v : dflt;
+        };
+        return {
+          target: (_by('obs-wallcam-target') || {}).value || 'front',
+          pos:  { x: parse('obs-wallcam-px', 0), y: parse('obs-wallcam-py', 1), z: parse('obs-wallcam-pz', 1) },
+          look: { x: parse('obs-wallcam-lx', 0), y: parse('obs-wallcam-ly', 1), z: parse('obs-wallcam-lz', 0) },
+          fov:  parse('obs-wallcam-fov', 60),
+        };
+      }
+      function _syncWallCamButton() {
+        const btn = _by('obs-wallcam-toggle');
+        if (!btn) return;
+        const on = window.__isWallCameraOn && window.__isWallCameraOn();
+        btn.textContent = on ? 'ON' : 'OFF';
+        btn.style.background = on ? '#06b6d4' : '#475569';
+        btn.style.color      = on ? '#083344' : 'white';
+      }
+      _bind('obs-wallcam-toggle', 'click', () => {
+        const params = _readWallCamInputs();
+        // 有効化前にパラメータをセット (最初から目的の設定で起動)
+        if (window.__setWallCameraParams) {
+          window.__setWallCameraParams(params.target, params.pos, params.look, params.fov);
+        }
+        if (window.__toggleWallCamera) window.__toggleWallCamera(params.target);
+        _syncWallCamButton();
+      });
+      _bind('obs-wallcam-apply', 'click', () => {
+        const params = _readWallCamInputs();
+        if (window.__setWallCameraParams) {
+          window.__setWallCameraParams(params.target, params.pos, params.look, params.fov);
+        }
+        _syncWallCamButton();
+        log('wall cam params 適用: ' + params.target + ' fov=' + params.fov, 'ok');
+      });
+      // 起動時に一度ボタン状態同期
+      _syncWallCamButton();
+
       // ========== camera XYZ + YPR リアルタイム反映 (dirty ガード付き) ==========
       //   毎フレーム camera.position/quaternion を入力欄に書き戻す。
       //   ただし:
@@ -1516,6 +1671,9 @@
         camera.position.x.toFixed(1) + ',' +
         camera.position.y.toFixed(1) + ',' +
         camera.position.z.toFixed(1);
+
+      // ========== 壁カメラ RTT (メイン render の前に scene を仮想 camera から描画) ==========
+      renderWallCam();
 
       // ========== render: myDisplay.offaxis で分岐 ==========
       if (myDisplay.offaxis) {
