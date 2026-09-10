@@ -117,297 +117,56 @@
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    // ========== 空間: ディスプレイサイズ基準の直方体 ==========
-    //   ・W (幅)   = myDisplay.width   (物理ディスプレイ横幅、m)
-    //   ・H (高さ) = myDisplay.height  (物理ディスプレイ縦幅、m)
-    //   ・D (奥行) = W / 2
-    //   ・6 面 (床/天井/前後/左右) を白 MeshStandardMaterial
-    //   ・格子 = 5cm、主格子 = 25cm (5 × 5cm)
-    //   ・myDisplay が変わったら再構築 (rebuildSpaceBox)
-    //   ・箱は Y=1 (spawn 高さ) 中心に配置 (X/Z 中心 = 原点)
-    const FIELD_HALF = 10;   // observer 移動クランプ用 (旧 code 互換、値は保守的)
-    const CELL_M     = 0.05; // 5cm 格子
-    const MAJOR_M    = 0.25; // 25cm 主格子 (5 × CELL_M)
-    const BOX_CENTER_Y = 1;  // 箱の高さ中心 (spawn Y と揃える)
+    // ========== 床: 20m × 20m at origin (白) ==========
+    const FIELD_SIZE = 20;
+    const FIELD_HALF = FIELD_SIZE / 2;
 
-    // 壁用マテリアル (fog 対応、両面描画)
-    const _boxWallMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 1.0, metalness: 0.0,
-      side: THREE.DoubleSide,
-    });
-
-    let _boxGroup = null;   // 全ての壁 + 格子 + 境界を保持 (再構築で dispose)
-
-    // ========== 壁カメラ (仮想 PerspectiveCamera → RTT → 壁テクスチャ) ==========
-    //   ・enableWallCamera(target): RTT 作成 → 仮想カメラ作成 → 対象壁に texture 貼付
-    //   ・disableWallCamera(): 破棄 + rebuildSpaceBox で白復帰
-    //   ・tick で renderWallCam() が毎フレーム scene を RTT へ描画
-    //   ・target: 'front' | 'back' | 'left' | 'right' | 'floor' | 'ceiling'
-    //   ・カメラ位置/注視点/FOV は observer panel から数値入力で調整
-    let _wallCameraEnabled = false;
-    let _wallCameraTarget  = 'front';
-    let _wallCam           = null;   // THREE.PerspectiveCamera (仮想カメラ)
-    let _wallCameraRTT     = null;   // THREE.WebGLRenderTarget
-    let _wallCameraMat     = null;   // 壁貼付用 MeshBasicMaterial
-    const _wallCamPos      = new THREE.Vector3(0, 1, 1.0);   // 箱前 1m から見る初期姿勢
-    const _wallCamLook     = new THREE.Vector3(0, 1, 0);     // 箱中心を注視
-    let _wallCamFov        = 60;
-
-    // 壁 mesh を name で検索 (_boxGroup 内)
-    function _getWallByName(name) {
-      if (!_boxGroup) return null;
-      let found = null;
-      _boxGroup.traverse((c) => {
-        if (c.isMesh && c.userData.wallName === name) found = c;
-      });
-      return found;
-    }
-
-    function enableWallCamera(target) {
-      if (_wallCameraEnabled) return;
-      if (target) _wallCameraTarget = target;
-      const wall = _getWallByName(_wallCameraTarget);
-      const wp = (wall && wall.geometry && wall.geometry.parameters) || {};
-      const wallW = wp.width  || myDisplay.width  || 0.3;
-      const wallH = wp.height || myDisplay.height || 0.2;
-      const aspect = wallW / wallH;
-      const rttW = 512;
-      const rttH = Math.max(64, Math.round(rttW / aspect));
-      _wallCameraRTT = new THREE.WebGLRenderTarget(rttW, rttH, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat,
-        depthBuffer: true,
-      });
-      _wallCam = new THREE.PerspectiveCamera(_wallCamFov, aspect, 0.02, 500);
-      _wallCam.position.copy(_wallCamPos);
-      _wallCam.lookAt(_wallCamLook);
-      _wallCameraMat = new THREE.MeshBasicMaterial({
-        map: _wallCameraRTT.texture,
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,      // 純白
+        roughness: 1.0,
+        metalness: 0.0,
         side: THREE.DoubleSide,
-        fog: false,
-      });
-      _wallCameraEnabled = true;
-      rebuildSpaceBox();
-      log('wall cam ON: target=' + _wallCameraTarget +
-          ' aspect=' + aspect.toFixed(2) + ' RTT=' + rttW + '×' + rttH +
-          ' pos=(' + _wallCamPos.x.toFixed(2) + ',' + _wallCamPos.y.toFixed(2) + ',' + _wallCamPos.z.toFixed(2) + ')' +
-          ' look=(' + _wallCamLook.x.toFixed(2) + ',' + _wallCamLook.y.toFixed(2) + ',' + _wallCamLook.z.toFixed(2) + ')' +
-          ' fov=' + _wallCamFov, 'ok');
-    }
-    function disableWallCamera() {
-      if (!_wallCameraEnabled) return;
-      if (_wallCameraRTT) { _wallCameraRTT.dispose(); _wallCameraRTT = null; }
-      if (_wallCameraMat) { _wallCameraMat.dispose(); _wallCameraMat = null; }
-      _wallCam = null;
-      _wallCameraEnabled = false;
-      rebuildSpaceBox();
-      log('wall cam OFF', 'ok');
-    }
-    function toggleWallCamera(target) {
-      if (_wallCameraEnabled) disableWallCamera();
-      else enableWallCamera(target);
-    }
-    // 毎フレーム: scene を RTT へ描画。対象壁は一時 non-visible で自映り込み防止
-    function renderWallCam() {
-      if (!_wallCameraEnabled || !_wallCam || !_wallCameraRTT) return;
-      _wallCam.position.copy(_wallCamPos);
-      _wallCam.lookAt(_wallCamLook);
-      _wallCam.fov = _wallCamFov;
-      _wallCam.updateProjectionMatrix();
-      const target = _getWallByName(_wallCameraTarget);
-      let prevVis = null;
-      if (target) { prevVis = target.visible; target.visible = false; }
-      const prev = renderer.getRenderTarget();
-      renderer.setRenderTarget(_wallCameraRTT);
-      renderer.render(scene, _wallCam);
-      renderer.setRenderTarget(prev);
-      if (target && prevVis !== null) target.visible = prevVis;
-    }
-    // observer panel からの制御用
-    window.__toggleWallCamera = toggleWallCamera;
-    window.__isWallCameraOn   = () => _wallCameraEnabled;
-    window.__setWallCameraParams = function(target, pos, look, fov) {
-      if (typeof target === 'string') _wallCameraTarget = target;
-      if (pos)  _wallCamPos.set(pos.x, pos.y, pos.z);
-      if (look) _wallCamLook.set(look.x, look.y, look.z);
-      if (typeof fov === 'number' && isFinite(fov)) _wallCamFov = fov;
-      // aspect や target 壁変更は enable 状態なら再構築
-      if (_wallCameraEnabled) {
-        disableWallCamera();
-        enableWallCamera(_wallCameraTarget);
-      }
-    };
-    window.__getWallCameraState = () => ({
-      enabled: _wallCameraEnabled,
-      target: _wallCameraTarget,
-      pos: _wallCamPos.clone(),
-      look: _wallCamLook.clone(),
-      fov: _wallCamFov,
-    });
+        // fog: true はデフォルト有効 — 遠方は scene.fog の白に自動フェード
+      })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(0, 0, 0);
+    floor.name = 'floor';
+    scene.add(floor);
 
-    // 矩形の格子 (XY 平面上、原点中心の LineSegments)
-    //   ・cellMinor 間隔で薄グレー、cellMajor 倍数で濃グレー
-    //   ・fog: true (デフォルト) で距離フェード対応
-    function makeWallGrid(w, h, cellMinor, cellMajor) {
-      const cMinor = new THREE.Color(0x9ca3af);   // 薄グレー
-      const cMajor = new THREE.Color(0x374151);   // 濃グレー
-      const positions = [];
-      const colors = [];
-      const majorRatio = Math.max(1, Math.round(cellMajor / cellMinor));
-      // 垂直線 (X 一定、Y 走査)
-      const nx = Math.max(1, Math.round(w / cellMinor));
-      for (let i = 0; i <= nx; i++) {
-        const x = -w / 2 + i * cellMinor;
-        positions.push(x, -h / 2, 0,  x, +h / 2, 0);
-        const c = (i % majorRatio === 0) ? cMajor : cMinor;
-        colors.push(c.r, c.g, c.b,  c.r, c.g, c.b);
-      }
-      // 水平線 (Y 一定、X 走査)
-      const ny = Math.max(1, Math.round(h / cellMinor));
-      for (let j = 0; j <= ny; j++) {
-        const y = -h / 2 + j * cellMinor;
-        positions.push(-w / 2, y, 0,  +w / 2, y, 0);
-        const c = (j % majorRatio === 0) ? cMajor : cMinor;
-        colors.push(c.r, c.g, c.b,  c.r, c.g, c.b);
-      }
-      const geom = new THREE.BufferGeometry();
-      geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      geom.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
-      return new THREE.LineSegments(
-        geom,
-        new THREE.LineBasicMaterial({ vertexColors: true, fog: true })
-      );
-    }
+    // 1m グリッド (中グレー) — フォグでフェードして遠方が薄く消える
+    //   GridHelper は LineBasicMaterial (fog: true デフォルト) なので、
+    //   遠方の格子線が自動的に白フェードで薄くなる。
+    //   色を濃くすることで白 (背景) との差が大きくなり、フェードが視認しやすくなる。
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
+    grid.position.set(0, 0.01, 0);
+    scene.add(grid);
+    // 5m 主格子 (濃いグレー、はっきり見える)
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
+    majorGrid.position.set(0, 0.015, 0);
+    scene.add(majorGrid);
+    // 20m 境界 (ほぼ黒)
+    const boundary = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
+      new THREE.LineBasicMaterial({ color: 0x111827 })
+    );
+    boundary.position.set(0, 0.012, 0);
+    scene.add(boundary);
 
-    // 箱の 1 面 (壁/床/天井) を作る:
-    //   pw, ph = 面のローカル幅×高さ (m)
-    //   pos = 面の中心 world 位置 (Vector3)
-    //   rot = 面の姿勢 (Euler)。ローカル +Z が面法線 (viewer 側 = 箱の内側)
-    //   name = 'floor' | 'ceiling' | 'back' | 'front' | 'left' | 'right'
-    //   epsilon = 格子/境界を面よりわずかに内側に浮かせて z-fighting 回避
-    function addBoxFace(pw, ph, pos, rot, name) {
-      // 壁カメラが有効な面はビデオマテリアル、それ以外は白
-      const mat = (_wallCameraEnabled && _wallCameraTarget === name && _wallCameraMat)
-        ? _wallCameraMat : _boxWallMat;
-      const wall = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), mat);
-      wall.name = 'space3-wall-' + name;
-      wall.userData.wallName = name;
-      wall.position.copy(pos);
-      wall.rotation.copy(rot);
-      _boxGroup.add(wall);
-
-      const grid = makeWallGrid(pw, ph, CELL_M, MAJOR_M);
-      grid.position.copy(pos);
-      grid.rotation.copy(rot);
-      // 法線方向に微小オフセット (箱の内側へ)
-      const normal = new THREE.Vector3(0, 0, 1).applyEuler(rot);
-      const eps = 0.0005;   // 0.5mm
-      grid.position.addScaledVector(normal, eps);
-      _boxGroup.add(grid);
-
-      // 境界輪郭 (ほぼ黒)
-      const edge = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.PlaneGeometry(pw, ph)),
-        new THREE.LineBasicMaterial({ color: 0x111827, fog: true })
-      );
-      edge.position.copy(pos);
-      edge.rotation.copy(rot);
-      edge.position.addScaledVector(normal, eps * 2);
-      _boxGroup.add(edge);
-    }
-
-    function rebuildSpaceBox() {
-      // 古い箱を破棄
-      if (_boxGroup) {
-        _boxGroup.traverse((c) => {
-          if (c.geometry) c.geometry.dispose();
-        });
-        scene.remove(_boxGroup);
-      }
-      _boxGroup = new THREE.Group();
-      _boxGroup.name = 'space3-box';
-
-      const W = Math.max(0.05, myDisplay.width);   // 幅 (m)
-      const H = Math.max(0.05, myDisplay.height);  // 高さ (m)
-      const D = W / 2;                              // 奥行 (m)
-      const halfW = W / 2, halfH = H / 2, halfD = D / 2;
-      const cy = BOX_CENTER_Y;
-
-      // 面配置:
-      //   Floor   : Y=cy-halfH, 法線 +Y   → rotation X = -π/2 (PlaneGeometry の -Z がら上向きになる)
-      //   Ceiling : Y=cy+halfH, 法線 -Y   → rotation X = +π/2
-      //   Back    : Z=-halfD,   法線 +Z   → rotation = 0
-      //   Front   : Z=+halfD,   法線 -Z   → rotation Y = π
-      //   Left    : X=-halfW,   法線 +X   → rotation Y = +π/2
-      //   Right   : X=+halfW,   法線 -X   → rotation Y = -π/2
-      addBoxFace(W, D, new THREE.Vector3(0, cy - halfH, 0), new THREE.Euler(-Math.PI/2, 0, 0), 'floor');
-      addBoxFace(W, D, new THREE.Vector3(0, cy + halfH, 0), new THREE.Euler(+Math.PI/2, 0, 0), 'ceiling');
-      addBoxFace(W, H, new THREE.Vector3(0, cy, -halfD),    new THREE.Euler(0, 0, 0),          'back');
-      addBoxFace(W, H, new THREE.Vector3(0, cy, +halfD),    new THREE.Euler(0, Math.PI, 0),    'front');
-      addBoxFace(D, H, new THREE.Vector3(-halfW, cy, 0),    new THREE.Euler(0, +Math.PI/2, 0), 'left');
-      addBoxFace(D, H, new THREE.Vector3(+halfW, cy, 0),    new THREE.Euler(0, -Math.PI/2, 0), 'right');
-
-      scene.add(_boxGroup);
-      try {
-        log('space3 box: ' +
-          W.toFixed(3) + '×' + H.toFixed(3) + '×' + D.toFixed(3) +
-          'm  格子=' + (CELL_M*100) + 'cm 主=' + (MAJOR_M*100) + 'cm', 'ok');
-      } catch (_) {}
-    }
-    // 初期構築の呼び出しは myDisplay 宣言後 (後段) に置く
-    //   → TDZ (Temporal Dead Zone) を避ける
-
-    // 中心マーカー (原点確認用) — 箱の中央に小さくグレー
+    // 中心マーカー (原点確認用)
     const centerMarker = new THREE.Mesh(
-      new THREE.BoxGeometry(0.03, 0.03, 0.03),
+      new THREE.BoxGeometry(0.15, 0.07, 0.15),
       new THREE.MeshBasicMaterial({ color: 0xc0c0c6 })
     );
-    centerMarker.position.set(0, BOX_CENTER_Y, 0);
+    centerMarker.position.set(0, 0.035, 0);
     scene.add(centerMarker);
 
-    // cube1: 1m 立方体
-    //   ・XZ 中心 = (1.5, -0.5)、Y = 0.5 (床に接地する高さ)
-    //   ・MeshStandardMaterial は fog:true (default) なので遠ざかれば白に溶ける
-    //   ・クリックで選択 → 矢印/PageUp/PageDown で 1m グリッド移動 (床貫通不可)
-    const cube1 = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({
-        color: 0x6b7280,
-        roughness: 0.8,
-        metalness: 0.0,
-      })
-    );
-    cube1.position.set(1.5, 0.5, -0.5);
-    cube1.name = 'cube1';
-    scene.add(cube1);
-
-    // 選択ハイライト用: cube1 に黄色エッジを子オーバーレイ (parented → cube 移動に追従)
-    const cube1Edges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(cube1.geometry),
-      new THREE.LineBasicMaterial({
-        color: 0xfbbf24,
-        transparent: true, opacity: 1.0,
-        depthTest: false,   // 手前に確実に描画
-        fog: false,         // ハイライトは遠くても消えないように
-      })
-    );
-    cube1Edges.renderOrder = 999;
-    cube1Edges.visible = false;
-    cube1.add(cube1Edges);
-
-    // ========== 選択/移動 (グリッド 1m 単位) ==========
-    //   ・selectables: raycast 対象のリスト (将来オブジェクト追加可能)
-    //   ・selectedObject: 現在選択中の Mesh (null なら未選択)
-    //   ・移動は 1m スナップ、cube 中心 Y >= CUBE_HALF (= 0.5) で床貫通防止
-    //   ・キー割り当て:
-    //       ← / →   : X ± 1  (左右)
-    //       ↑ / ↓   : Z ∓ 1  (奥 / 手前)
-    //       PageUp   : Y + 1 (上)
-    //       PageDown : Y - 1 (下、床で止まる)
-    //       Esc      : 選択解除
-    const selectables = [cube1];
+    // space3: cube1 (選択で移動する立方体) は削除。selectables は空にする。
+    //   → 選択/ドラッグ/矢印キー移動ロジック自体は残るが、対象が無いので発火しない (dormant)。
+    //     もし後で選択可能なオブジェクトを追加したい時は selectables.push(mesh) するだけで有効化。
+    const selectables = [];
     let selectedObject = null;
     const CUBE_STEP = 1.0;
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
@@ -488,20 +247,53 @@
 
     // ========== 他クライアントのアバター管理 ==========
     // avatars: id → { grp, mesh, color, role }
-    //   space3: アバターは 1cm 立方体 (visible=false)。
-    //     ・空間が小さいので通常サイズの球を出すと窓を塞ぐため非表示
-    //     ・位置/姿勢のトラッキング (pose 同期) は grp.position / grp.quaternion で継続
-    //     ・raycast: visible=false の Mesh はデフォルトで raycast をスキップされる
-    //       (アバターを直接クリックする機能はこの space では未実装なので問題なし)
+    //   space3: observer ロールのアバターは "視錐台" ワイヤ (apex→base 4 隅 + base 矩形)
+    //     ・入室時 (avatar 生成時) の myDisplay.width/height を「描画領域」として参照
+    //     ・apex = 頭 (avatar 位置)、base = 視線 forward 方向に FRUSTUM_DEPTH m 先、W×H の矩形
+    //     ・他ロール (camera / master) は従来の色付き球体 (直径 15cm)
+    //     ・視錐台は color で塗り、fog: false で遠くでも見える
+    const FRUSTUM_DEPTH = 0.5;   // apex → base までの奥行 (m) — 描画領域を仮想スクリーンと見立てた距離
+    function makeAvatarFrustum(color, W, H) {
+      const c = new THREE.Color(color || '#fbbf24');
+      const hw = W * 0.5, hh = H * 0.5;
+      const d  = FRUSTUM_DEPTH;
+      // ローカル座標系: apex=(0,0,0)、camera forward = -Z、base 4 隅 at Z=-d
+      const bl = [-hw, -hh, -d];
+      const br = [+hw, -hh, -d];
+      const tl = [-hw, +hh, -d];
+      const tr = [+hw, +hh, -d];
+      const p = [];
+      // apex → 各 base 隅 (4 稜線)
+      p.push(0,0,0, ...bl);   p.push(0,0,0, ...br);
+      p.push(0,0,0, ...tl);   p.push(0,0,0, ...tr);
+      // base 矩形の 4 辺
+      p.push(...bl, ...br);   p.push(...br, ...tr);
+      p.push(...tr, ...tl);   p.push(...tl, ...bl);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+      const mat = new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.9, fog: false });
+      const lines = new THREE.LineSegments(geom, mat);
+      lines.frustumCulled = false;
+      lines.userData.__frustumParams = { W, H, D: d };
+      return lines;
+    }
     const avatars = new Map();
     function makeAvatar(id, color, role) {
       const grp = new THREE.Group();
       grp.userData.__avatarId = id;
-      const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(0.01, 0.01, 0.01),   // 1cm 立方体
-        new THREE.MeshBasicMaterial({ color: color || '#ffffff' })
-      );
-      mesh.visible = false;                          // 非表示
+      let mesh;
+      if (role === 'observer') {
+        // 描画領域 (myDisplay) を参照して視錐台を形成
+        //   入室時点の値で 1 度だけ生成 (以降 myDisplay 変わっても avatar 形状は据え置き)
+        //   → 動的追従したい場合は refreshMyDisplaySize から作り直しの hook を追加できる
+        mesh = makeAvatarFrustum(color, myDisplay.width || 0.3, myDisplay.height || 0.2);
+      } else {
+        // camera / master: 従来の色付き球体
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.15, 24, 16),
+          new THREE.MeshStandardMaterial({ color: color || '#ffffff', roughness: 0.6 })
+        );
+      }
       grp.add(mesh);
       scene.add(grp);
       return { grp, mesh, color: color || '#ffffff', role: role || 'camera' };
@@ -525,10 +317,6 @@
     const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
     // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
     let _displaySizeManuallyEdited = false;
-
-    // ★ space3: myDisplay が使える状態になったので初期の箱空間を構築
-    //   (以降は refreshMyDisplaySize / pushDisplaySize から再構築される)
-    if (typeof rebuildSpaceBox === 'function') rebuildSpaceBox();
 
     // ============================================================
     // 物理ディスプレイサイズ推定
@@ -668,8 +456,6 @@
           if (socket && socket.connected) {
             socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
           }
-          // ★ space3: myDisplay 更新に合わせて箱空間を再構築
-          if (typeof rebuildSpaceBox === 'function') rebuildSpaceBox();
         }
       } catch (e) {
         log('display detect err: ' + e.message, 'err');
@@ -757,24 +543,16 @@
         }
       });
 
-      // 他クライアントからの objectPose (cube1 等の位置更新)
-      //   自分自身が emit した内容は broadcast 経由で戻らないが、名前一致すればどのオブジェクトも同期
+      // 他クライアントからの objectPose (将来オブジェクト追加時用、現在 space3 は対象なし)
+      //   selectables に登録された name 一致する Mesh の position を反映
       socket.on('objectPose', (data) => {
         if (!data || typeof data.name !== 'string') return;
-        try {
-          log('recv objectPose: ' + data.name + ' → (' +
-              (typeof data.x === 'number' ? data.x.toFixed(2) : '?') + ',' +
-              (typeof data.y === 'number' ? data.y.toFixed(2) : '?') + ',' +
-              (typeof data.z === 'number' ? data.z.toFixed(2) : '?') + ')', 'ok');
-        } catch (_) {}
-        // 現在サポートするのは cube1 のみ (将来 selectables に追加すれば拡張可)
-        if (data.name === 'cube1') {
-          // 自分が動かしている最中は上書きしない (ドラッグ中の一時ズレを防ぐ)
-          if (selectedObject === cube1 && window.__cubeDragActive) return;
-          if (typeof data.x === 'number') cube1.position.x = data.x;
-          if (typeof data.y === 'number') cube1.position.y = data.y;
-          if (typeof data.z === 'number') cube1.position.z = data.z;
-        }
+        const target = selectables.find((m) => m && m.name === data.name);
+        if (!target) return;
+        if (selectedObject === target && window.__cubeDragActive) return;
+        if (typeof data.x === 'number') target.position.x = data.x;
+        if (typeof data.y === 'number') target.position.y = data.y;
+        if (typeof data.z === 'number') target.position.z = data.z;
       });
 
       socket.on('moveConfig', (data) => {
@@ -1249,8 +1027,6 @@
         _displaySizeManuallyEdited = true;
         if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
         log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (以降 自動値で上書きしない)', 'ok');
-        // ★ space3: 手動サイズ変更でも箱空間を再構築
-        if (typeof rebuildSpaceBox === 'function') rebuildSpaceBox();
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
@@ -1289,47 +1065,6 @@
         refreshMyDisplaySize(true);
         log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
       });
-
-      // ========== 壁カメラ (仮想カメラ RTT) 制御 ==========
-      function _readWallCamInputs() {
-        const parse = (id, dflt) => {
-          const el = _by(id); if (!el) return dflt;
-          const v = parseFloat(el.value); return isFinite(v) ? v : dflt;
-        };
-        return {
-          target: (_by('obs-wallcam-target') || {}).value || 'front',
-          pos:  { x: parse('obs-wallcam-px', 0), y: parse('obs-wallcam-py', 1), z: parse('obs-wallcam-pz', 1) },
-          look: { x: parse('obs-wallcam-lx', 0), y: parse('obs-wallcam-ly', 1), z: parse('obs-wallcam-lz', 0) },
-          fov:  parse('obs-wallcam-fov', 60),
-        };
-      }
-      function _syncWallCamButton() {
-        const btn = _by('obs-wallcam-toggle');
-        if (!btn) return;
-        const on = window.__isWallCameraOn && window.__isWallCameraOn();
-        btn.textContent = on ? 'ON' : 'OFF';
-        btn.style.background = on ? '#06b6d4' : '#475569';
-        btn.style.color      = on ? '#083344' : 'white';
-      }
-      _bind('obs-wallcam-toggle', 'click', () => {
-        const params = _readWallCamInputs();
-        // 有効化前にパラメータをセット (最初から目的の設定で起動)
-        if (window.__setWallCameraParams) {
-          window.__setWallCameraParams(params.target, params.pos, params.look, params.fov);
-        }
-        if (window.__toggleWallCamera) window.__toggleWallCamera(params.target);
-        _syncWallCamButton();
-      });
-      _bind('obs-wallcam-apply', 'click', () => {
-        const params = _readWallCamInputs();
-        if (window.__setWallCameraParams) {
-          window.__setWallCameraParams(params.target, params.pos, params.look, params.fov);
-        }
-        _syncWallCamButton();
-        log('wall cam params 適用: ' + params.target + ' fov=' + params.fov, 'ok');
-      });
-      // 起動時に一度ボタン状態同期
-      _syncWallCamButton();
 
       // ========== camera XYZ + YPR リアルタイム反映 (dirty ガード付き) ==========
       //   毎フレーム camera.position/quaternion を入力欄に書き戻す。
@@ -1671,9 +1406,6 @@
         camera.position.x.toFixed(1) + ',' +
         camera.position.y.toFixed(1) + ',' +
         camera.position.z.toFixed(1);
-
-      // ========== 壁カメラ RTT (メイン render の前に scene を仮想 camera から描画) ==========
-      renderWallCam();
 
       // ========== render: myDisplay.offaxis で分岐 ==========
       if (myDisplay.offaxis) {

@@ -35,8 +35,10 @@
     #role-badge.master   { background: #06b6d4; color: #083344; }
 
     #log {
+      /* 幅は space2 と同じ。max-height だけ拡大 (bottom 8 + 高さ 30vh)、
+         内部で 500 行までスクロール可 (uiLog の slice(-500)) */
       position: fixed; bottom: 8px; left: 8px; right: 56px;
-      max-height: 14vh; overflow-y: auto;
+      max-height: 30vh; overflow-y: auto;
       background: rgba(0,0,0,0.62); color: #ddd;
       padding: 6px 10px; border-radius: 6px;
       font-family: monospace; font-size: 11px;
@@ -44,6 +46,10 @@
       white-space: pre-wrap; word-break: break-all;
       pointer-events: auto;
       -webkit-overflow-scrolling: touch;
+    }
+    @media (max-width: 640px) {
+      /* スマホは 20vh に (画面が小さいので少し控えめ) */
+      #log { max-height: 20vh; font-size: 10px; line-height: 1.3; padding: 4px 8px; }
     }
     #log .err { color: #ff8080; }
     #log .ok  { color: #80ff80; }
@@ -168,7 +174,7 @@
       window.__logs.push({ msg: String(msg), cls: cls || '' });
       const el = document.getElementById('log');
       if (el) {
-        el.innerHTML = window.__logs.slice(-14).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
+        el.innerHTML = window.__logs.slice(-500).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
         el.scrollTop = el.scrollHeight;
       }
     };
@@ -317,39 +323,6 @@
   <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
     <label>Off-Axis</label>
     <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
-  </div>
-  <div class="row" style="margin-top:6px; border-top: 1px solid #475569; padding-top: 6px;">
-    <label style="width:auto;">壁カメラ</label>
-    <select id="obs-wallcam-target" style="padding:3px; font-size:11px;">
-      <option value="front">前</option>
-      <option value="back">奥</option>
-      <option value="left">左</option>
-      <option value="right">右</option>
-      <option value="floor">床</option>
-      <option value="ceiling">天井</option>
-    </select>
-    <button id="obs-wallcam-toggle" style="background: #475569; color: white; min-width:60px;">OFF</button>
-  </div>
-  <div class="row" style="margin-top:4px; flex-wrap: wrap;">
-    <label style="width:auto;">位置</label>
-    <input type="number" id="obs-wallcam-px" value="0"   step="0.05" style="width:52px;" title="camera X">
-    <input type="number" id="obs-wallcam-py" value="1"   step="0.05" style="width:52px;" title="camera Y">
-    <input type="number" id="obs-wallcam-pz" value="1"   step="0.05" style="width:52px;" title="camera Z">
-  </div>
-  <div class="row" style="margin-top:2px; flex-wrap: wrap;">
-    <label style="width:auto;">注視</label>
-    <input type="number" id="obs-wallcam-lx" value="0"   step="0.05" style="width:52px;" title="look X">
-    <input type="number" id="obs-wallcam-ly" value="1"   step="0.05" style="width:52px;" title="look Y">
-    <input type="number" id="obs-wallcam-lz" value="0"   step="0.05" style="width:52px;" title="look Z">
-  </div>
-  <div class="row" style="margin-top:2px;">
-    <label style="width:auto;">FOV</label>
-    <input type="number" id="obs-wallcam-fov" value="60"  step="5" min="10" max="150" style="width:52px;">
-    <button id="obs-wallcam-apply" style="background:#06b6d4; color:#083344; font-size:11px;">適用</button>
-  </div>
-  <div class="hint" style="font-size:10px; opacity:0.7;">
-    仮想 PerspectiveCamera が scene を描画 → 選択した壁に投影 (監視モニター風)。<br>
-    位置/注視/FOV/対象壁を変更したら「適用」で反映
   </div>
   <div class="hint" style="font-size:10px; opacity:0.7;">
     Off-Axis の display 姿勢は上の Y/P/R (カメラ姿勢) × 180°Y flip で自動決定<br>
