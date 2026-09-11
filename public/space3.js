@@ -1030,40 +1030,59 @@
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
-      // 「自動再取得」ボタン: 手動フラグを解除して即再検出
-      _bind('obs-display-auto', 'click', () => {
-        _displaySizeManuallyEdited = false;
-        refreshMyDisplaySize(true);
-      });
 
-      // 対角インチ入力: localStorage に保存 → 次回リロード時も override 継承
-      //   保存された値は detectPhysicalDisplaySize が優先採用
-      try {
-        const savedDiag = localStorage.getItem('space2.diagonalInch');
-        const diagInp = _by('obs-display-diag');
-        if (savedDiag && diagInp) diagInp.value = parseFloat(savedDiag).toFixed(1);
-      } catch (_) {}
-
-      _bind('obs-display-diag-apply', 'click', () => {
-        const el = _by('obs-display-diag');
-        if (!el) return;
-        const v = parseFloat(el.value);
-        if (!isFinite(v) || v < 3 || v > 100) {
-          log('対角インチが不正 (3-100 の範囲)', 'err');
-          return;
+      // ========== 対角インチ + ネイティブ解像度 → PPI 再計算 ==========
+      //   入室時の自動推定 (screen.width × dpr) をそのまま解像度入力欄に埋めておき、
+      //   ユーザーは対角インチを追記/修正 + Enter or「再計算」ボタンで W×H を厳密算出。
+      //   ※ localStorage 継承しない (毎起動で入力し直し、明示的操作を尊重)
+      //   ※ screen.width × dpr は Mac Retina では native 解像度と一致するが、Windows 100%
+      //      スケーリングでは 96 dpi 基準となり実 native と異なることがあるので、
+      //      ユーザーが実測値に置き換える運用を推奨。
+      const _initSW = Math.round((screen.width  || 0) * (window.devicePixelRatio || 1));
+      const _initSH = Math.round((screen.height || 0) * (window.devicePixelRatio || 1));
+      {
+        const rwInp = _by('obs-display-res-w');
+        const rhInp = _by('obs-display-res-h');
+        if (rwInp && _initSW > 0) rwInp.value = _initSW;
+        if (rhInp && _initSH > 0) rhInp.value = _initSH;
+      }
+      function applyDiagResCalc() {
+        const inch = parseFloat((_by('obs-display-diag')   || {}).value);
+        const rw   = parseFloat((_by('obs-display-res-w') || {}).value);
+        const rh   = parseFloat((_by('obs-display-res-h') || {}).value);
+        if (!isFinite(inch) || inch < 3 || inch > 100) {
+          log('対角インチが不正 (3-100)', 'err'); return;
         }
-        try { localStorage.setItem('space2.diagonalInch', String(v)); } catch (_) {}
-        _displaySizeManuallyEdited = false;  // override が最新値になるので手動フラグ解除
-        refreshMyDisplaySize(true);
-        log('対角 override: ' + v.toFixed(1) + '" を適用 & 永続化', 'ok');
-      });
-      _bind('obs-display-diag-clear', 'click', () => {
-        try { localStorage.removeItem('space2.diagonalInch'); } catch (_) {}
-        const el = _by('obs-display-diag');
-        if (el) el.value = '';
-        _displaySizeManuallyEdited = false;
-        refreshMyDisplaySize(true);
-        log('対角 override: 解除 (UA テーブル推定に戻る)', 'ok');
+        if (!isFinite(rw) || !isFinite(rh) || rw < 200 || rh < 200) {
+          log('解像度が不正 (>= 200)', 'err'); return;
+        }
+        const diagPx = Math.hypot(rw, rh);
+        const ppi = diagPx / inch;
+        const wm  = (rw / ppi) * 0.0254;
+        const hm  = (rh / ppi) * 0.0254;
+        myDisplay.width  = wm;
+        myDisplay.height = hm;
+        _displaySizeManuallyEdited = true;
+        const winp = _by('obs-display-w');
+        const hinp = _by('obs-display-h');
+        if (winp) winp.value = wm.toFixed(4);
+        if (hinp) hinp.value = hm.toFixed(4);
+        if (socket && socket.connected) {
+          socket.emit('displaySize', { width: wm, height: hm });
+        }
+        log('display 再計算: diag=' + inch.toFixed(1) + '" res=' + rw + '×' + rh +
+            ' → PPI=' + ppi.toFixed(1) + ' → ' + wm.toFixed(4) + '×' + hm.toFixed(4) + 'm', 'ok');
+      }
+      _bind('obs-display-calc', 'click', applyDiagResCalc);
+      // Enter で発火 (どのフィールドからも)
+      ['obs-display-diag','obs-display-res-w','obs-display-res-h'].forEach((id) => {
+        _bind(id, 'keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            applyDiagResCalc();
+            if (e.target && e.target.blur) e.target.blur();
+          }
+        });
       });
 
       // ========== camera XYZ + YPR リアルタイム反映 (dirty ガード付き) ==========
@@ -1474,16 +1493,9 @@
     }
     tick();
 
-    // ========== ディスプレイサイズ再取得トリガー ==========
-    //   ・load       : URL 更新 (通常リロード / /space2 → /space2/master などのナビゲーション) の直後
-    //   ・pageshow   : ブラウザバック / 進む復元 (Safari/iOS の bfcache 対策)
-    //   ・orientationchange : 画面回転 (縦横の入替え)
-    //   ・resize     : ウィンドウサイズ変更 / DPR 変化 (外部ディスプレイ差替え等)
-    //   これらの発火時、手動編集フラグが立っていなければ最新値で上書き
-    window.addEventListener('load',              () => refreshMyDisplaySize(false));
-    window.addEventListener('pageshow',          () => refreshMyDisplaySize(false));
-    window.addEventListener('orientationchange', () => setTimeout(() => refreshMyDisplaySize(false), 200));
-    window.addEventListener('resize',            () => refreshMyDisplaySize(false));
+    // space3: 自動 refresh は入室時 (socket 'init' 内で 1 回) のみ。
+    //   以降は observer panel の「対角インチ + 解像度」入力 → Enter で正確値を明示指定する運用。
+    //   window の load/pageshow/orientationchange/resize リスナは撤去。
 
     log('space2 ready (role=' + ROLE + ')', 'ok');
   }
