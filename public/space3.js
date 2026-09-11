@@ -278,17 +278,20 @@
       return lines;
     }
     const avatars = new Map();
-    function makeAvatar(id, color, role) {
+    // display: {width, height} — サーバー join/init/displayConfig で運ばれてくる
+    //   remote client の物理ディスプレイサイズ。observer frustum の base 寸法として使う。
+    //   未指定なら local myDisplay をフォールバック (旧挙動)
+    function makeAvatar(id, color, role, display) {
       const grp = new THREE.Group();
       grp.userData.__avatarId = id;
       let mesh;
       if (role === 'observer') {
-        // 描画領域 (myDisplay) を参照して視錐台を形成
-        //   入室時点の値で 1 度だけ生成 (以降 myDisplay 変わっても avatar 形状は据え置き)
-        //   → 動的追従したい場合は refreshMyDisplaySize から作り直しの hook を追加できる
-        mesh = makeAvatarFrustum(color, myDisplay.width || 0.3, myDisplay.height || 0.2);
+        const dW = (display && typeof display.width  === 'number' && display.width  > 0)
+          ? display.width  : (myDisplay.width  || 0.3);
+        const dH = (display && typeof display.height === 'number' && display.height > 0)
+          ? display.height : (myDisplay.height || 0.2);
+        mesh = makeAvatarFrustum(color, dW, dH);
       } else {
-        // camera / master: 従来の色付き球体
         mesh = new THREE.Mesh(
           new THREE.SphereGeometry(0.15, 24, 16),
           new THREE.MeshStandardMaterial({ color: color || '#ffffff', roughness: 0.6 })
@@ -298,10 +301,25 @@
       scene.add(grp);
       return { grp, mesh, color: color || '#ffffff', role: role || 'camera' };
     }
-    function ensureAvatar(id, color, role) {
+    // 既存 avatar の frustum を作り直し (observer の displayConfig 更新時に呼ぶ)
+    function rebuildAvatarFrustum(id, display) {
+      const a = avatars.get(id);
+      if (!a || a.role !== 'observer' || !display) return;
+      const dW = (typeof display.width  === 'number' && display.width  > 0) ? display.width  : 0.3;
+      const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
+      // 旧 mesh を dispose して差し替え (grp/position/quaternion は維持 → pose 追従に影響なし)
+      if (a.mesh) {
+        a.grp.remove(a.mesh);
+        if (a.mesh.geometry) a.mesh.geometry.dispose();
+        if (a.mesh.material) a.mesh.material.dispose();
+      }
+      a.mesh = makeAvatarFrustum(a.color, dW, dH);
+      a.grp.add(a.mesh);
+    }
+    function ensureAvatar(id, color, role, display) {
       let a = avatars.get(id);
       if (!a) {
-        a = makeAvatar(id, color, role);
+        a = makeAvatar(id, color, role, display);
         avatars.set(id, a);
       }
       return a;
@@ -492,22 +510,24 @@
         // 既存ユーザー
         for (const id in data.users) {
           const u = data.users[id];
-          const a = ensureAvatar(id, u.color, u.role);
+          const a = ensureAvatar(id, u.color, u.role, u.display);
           a.grp.position.set(u.x, u.y, u.z);
           a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         }
         rebuildClientSelect();
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
-        // ディスプレイサイズを自動推定 → 報告 (以降 URL 更新 / 向き変更でも再取得)
+        // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
       });
 
       socket.on('join', (u) => {
-        const a = ensureAvatar(u.id, u.color, u.role);
+        const a = ensureAvatar(u.id, u.color, u.role, u.display);
         a.grp.position.set(u.x, u.y, u.z);
         a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         rebuildClientSelect();
-        log('join: ' + u.id.substring(0, 6), 'ok');
+        log('join: ' + u.id.substring(0, 6) +
+            (u.display ? ' display=' + u.display.width.toFixed(3) + '×' + u.display.height.toFixed(3) + 'm' : ''),
+            'ok');
       });
 
       socket.on('pose', (u) => {
@@ -536,6 +556,10 @@
           if (typeof data.display.pitch === 'number') myDisplay.pitch = data.display.pitch;
           if (typeof data.display.roll === 'number') myDisplay.roll = data.display.roll;
           syncObsOaBtn();
+        }
+        // 他クライアントの observer avatar なら、frustum を新しい display サイズで再構築
+        if (data.id !== myId && data.display) {
+          rebuildAvatarFrustum(data.id, data.display);
         }
         // master パネル: 選択中クライアントの表示更新
         if (ROLE === 'master' && data.id === selectedClientId) {
