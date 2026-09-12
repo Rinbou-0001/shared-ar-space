@@ -194,6 +194,8 @@
       if (!el) return;
       el.textContent = selectedObject ? selectedObject.name : '--';
     }
+    // space3: 移動機能撤去 (選択のみ)。以下 snapAndClamp/moveSelected/emitObjectPose は
+    //   関数定義は残すが呼び出しは削除済み。参照は起きないので事実上デッドコード。
     function snapAndClamp(p) {
       p.x = Math.round(p.x - CUBE_HALF) + CUBE_HALF;
       p.z = Math.round(p.z - CUBE_HALF) + CUBE_HALF;
@@ -224,25 +226,13 @@
       log('move ' + selectedObject.name + ' → (' + p.x + ',' + p.y + ',' + p.z + ')', 'ok');
       emitObjectPose(selectedObject, true);
     }
-    // グローバルキー: 選択中のみ反応。他ハンドラより先に preventDefault
+    // space3: 移動機能は撤去。Escape で選択解除のみ。
     window.addEventListener('keydown', (e) => {
-      if (!selectedObject) {
-        if (e.code === 'Escape') selectObject(null);
-        return;
-      }
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
-      let handled = true;
-      switch (e.code) {
-        case 'ArrowLeft':  moveSelected(-1, 0, 0); break;
-        case 'ArrowRight': moveSelected(+1, 0, 0); break;
-        case 'ArrowUp':    moveSelected(0, 0, -1); break;   // 奥
-        case 'ArrowDown':  moveSelected(0, 0, +1); break;   // 手前
-        case 'PageUp':     moveSelected(0, +1, 0); break;   // 上
-        case 'PageDown':   moveSelected(0, -1, 0); break;   // 下 (床で止まる)
-        case 'Escape':     selectObject(null); break;
-        default: handled = false;
+      if (e.code === 'Escape') {
+        selectObject(null);
+        e.preventDefault();
       }
-      if (handled) e.preventDefault();
     });
 
     // ========== 他クライアントのアバター管理 ==========
@@ -277,35 +267,120 @@
       lines.userData.__frustumParams = { W, H, D: d };
       return lines;
     }
+    const APEX_CUBE_SIZE = 0.01;   // 1cm 立方体 = apex 選択判定域
+
+    // observer avatar の全構成要素を作る: frustum ワイヤ + apex/base hit mesh + 各 highlight edges
+    //   ・apex hit: 1cm 立方体、透明 (raycast 用)、子に橙 edges を持ち選択時のみ visible
+    //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
+    //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
+    function makeObserverFrustumMeshes(color, W, H, id) {
+      const frustumLines = makeAvatarFrustum(color, W, H);
+
+      // apex hit (raycast 用透明立方体)
+      const apexHit = new THREE.Mesh(
+        new THREE.BoxGeometry(APEX_CUBE_SIZE, APEX_CUBE_SIZE, APEX_CUBE_SIZE),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+      );
+      apexHit.position.set(0, 0, 0);
+      apexHit.name = 'avatar-apex-hit';
+      apexHit.userData.selectType = 'apex';
+      apexHit.userData.avatarId = id;
+      // 橙 border (selectObject が isLineSegments 子を可視化する)
+      const apexEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(APEX_CUBE_SIZE, APEX_CUBE_SIZE, APEX_CUBE_SIZE)),
+        new THREE.LineBasicMaterial({ color: 0xff8c00, transparent: true, opacity: 1.0, depthTest: false, fog: false, linewidth: 2 })
+      );
+      apexEdges.renderOrder = 999;
+      apexEdges.visible = false;
+      apexHit.add(apexEdges);
+
+      // base hit (raycast 用透明平面、frustum base と同じ位置 = -Z 方向 FRUSTUM_DEPTH 先)
+      const baseHit = new THREE.Mesh(
+        new THREE.PlaneGeometry(W, H),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide })
+      );
+      baseHit.position.set(0, 0, -FRUSTUM_DEPTH);
+      baseHit.name = 'avatar-base-hit';
+      baseHit.userData.selectType = 'base';
+      baseHit.userData.avatarId = id;
+      // 黄 border (base 選択時可視化)
+      const baseEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)),
+        new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 1.0, depthTest: false, fog: false, linewidth: 2 })
+      );
+      baseEdges.renderOrder = 999;
+      baseEdges.visible = false;
+      baseHit.add(baseEdges);
+
+      return { frustumLines, apexHit, apexEdges, baseHit, baseEdges };
+    }
+
     const avatars = new Map();
     // display: {width, height} — サーバー join/init/displayConfig で運ばれてくる
     //   remote client の物理ディスプレイサイズ。observer frustum の base 寸法として使う。
-    //   未指定なら local myDisplay をフォールバック (旧挙動)
+    //   未指定なら local myDisplay をフォールバック
     function makeAvatar(id, color, role, display) {
       const grp = new THREE.Group();
       grp.userData.__avatarId = id;
-      let mesh;
+      const av = { grp, color: color || '#ffffff', role: role || 'camera' };
       if (role === 'observer') {
         const dW = (display && typeof display.width  === 'number' && display.width  > 0)
           ? display.width  : (myDisplay.width  || 0.3);
         const dH = (display && typeof display.height === 'number' && display.height > 0)
           ? display.height : (myDisplay.height || 0.2);
-        mesh = makeAvatarFrustum(color, dW, dH);
+        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id);
+        av.frustumLines = parts.frustumLines;
+        av.apexHit  = parts.apexHit;  av.apexEdges = parts.apexEdges;
+        av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
+        av.mesh     = parts.frustumLines;   // 後方互換 (mesh フィールド)
+        grp.add(parts.frustumLines);
+        grp.add(parts.apexHit);
+        grp.add(parts.baseHit);
+        // selectables 登録 (raycast 対象)
+        selectables.push(parts.apexHit);
+        selectables.push(parts.baseHit);
         try {
           log('frustum init: ' + id.substring(0,6) + ' ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm ' +
-              (display ? '(remote)' : '(fallback: 自分の myDisplay)'), 'ok');
+              (display ? '(remote)' : '(fallback)') + ' [apex+base selectable]', 'ok');
         } catch (_) {}
       } else {
-        mesh = new THREE.Mesh(
+        av.mesh = new THREE.Mesh(
           new THREE.SphereGeometry(0.15, 24, 16),
           new THREE.MeshStandardMaterial({ color: color || '#ffffff', roughness: 0.6 })
         );
+        grp.add(av.mesh);
       }
-      grp.add(mesh);
       scene.add(grp);
-      return { grp, mesh, color: color || '#ffffff', role: role || 'camera' };
+      return av;
     }
-    // 既存 avatar の frustum を作り直し (observer の displayConfig 更新時に呼ぶ)
+
+    // observer 用アバターの hit mesh を selectables から取り除く (leave/rebuild 時)
+    function _removeAvatarSelectables(a) {
+      if (!a) return;
+      [a.apexHit, a.baseHit].forEach((m) => {
+        if (!m) return;
+        const idx = selectables.indexOf(m);
+        if (idx >= 0) selectables.splice(idx, 1);
+        // 選択中なら解除
+        if (selectedObject === m) selectObject(null);
+      });
+    }
+    // observer avatar のサブメッシュ全 dispose
+    function _disposeAvatarSubMeshes(a) {
+      ['frustumLines','apexHit','apexEdges','baseHit','baseEdges'].forEach((k) => {
+        const n = a[k];
+        if (!n) return;
+        if (n.parent) n.parent.remove(n);
+        if (n.geometry) n.geometry.dispose();
+        if (n.material) {
+          if (Array.isArray(n.material)) n.material.forEach((mm) => mm.dispose());
+          else n.material.dispose();
+        }
+        a[k] = null;
+      });
+    }
+
+    // 既存 avatar の frustum + hit mesh を作り直し (displayConfig で size 変化時)
     function rebuildAvatarFrustum(id, display) {
       const a = avatars.get(id);
       if (!a) { log('rebuild frustum: avatar ' + id.substring(0,6) + ' 未生成、スキップ', 'err'); return; }
@@ -313,13 +388,18 @@
       if (!display) return;
       const dW = (typeof display.width  === 'number' && display.width  > 0) ? display.width  : 0.3;
       const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
-      if (a.mesh) {
-        a.grp.remove(a.mesh);
-        if (a.mesh.geometry) a.mesh.geometry.dispose();
-        if (a.mesh.material) a.mesh.material.dispose();
-      }
-      a.mesh = makeAvatarFrustum(a.color, dW, dH);
-      a.grp.add(a.mesh);
+      _removeAvatarSelectables(a);
+      _disposeAvatarSubMeshes(a);
+      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id);
+      a.frustumLines = parts.frustumLines;
+      a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
+      a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
+      a.mesh    = parts.frustumLines;
+      a.grp.add(parts.frustumLines);
+      a.grp.add(parts.apexHit);
+      a.grp.add(parts.baseHit);
+      selectables.push(parts.apexHit);
+      selectables.push(parts.baseHit);
       log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm', 'ok');
     }
     function ensureAvatar(id, color, role, display) {
@@ -546,7 +626,12 @@
 
       socket.on('leave', (u) => {
         const a = avatars.get(u.id);
-        if (a) { scene.remove(a.grp); avatars.delete(u.id); }
+        if (a) {
+          _removeAvatarSelectables(a);
+          _disposeAvatarSubMeshes(a);
+          scene.remove(a.grp);
+          avatars.delete(u.id);
+        }
         rebuildClientSelect();
         log('leave: ' + u.id.substring(0, 6));
       });
@@ -756,16 +841,10 @@
     }
 
     // ============================================================
-    // 共有 canvas インタラクション: tap = 選択、drag = 選択中オブジェクトを 1m 単位移動
-    //   ・observer/master マウス左クリック、camera スマホタップの両方に対応
-    //   ・選択中に drag/swipe → cube1 を XZ 平面 (床) 上でスナップ移動
-    //     - カメラの right/forward を XZ 平面に投影し、画面 dx/dy → 世界 offset に写像
-    //     - Math.round で 1m グリッドスナップ
-    //     - moveSensitivity (px/m) で感度調整 (master → server → 全クライアント配信)
-    //   ・選択中でも "移動 < slop" の press+release は tap 扱いで選択/選択解除
-    //   ・observer カメラ回転ドラッグは "未選択時のみ" 発火 (setupObserver 側で判定)
-    // 外部から参照される:
-    //   window.__cubeDragActive : 選択中のドラッグ移動中かどうか (observer が回転抑制に使う)
+    // 共有 canvas インタラクション: tap のみ (選択/選択解除)
+    //   ・space3: 移動機能撤去、drag は選択とは無関係 (observer カメラ回転が発火)
+    //   ・観測者カメラ回転側で「移動 < slop」を検知した場合のみ選択 → 干渉なし
+    // 外部互換: window.__cubeDragActive は false 固定 (setupObserver の抑制条件で参照される)
     // ============================================================
     window.__cubeDragActive = false;
     {
@@ -774,88 +853,18 @@
       const _ndcTap = new THREE.Vector2();
       let _pressAt = null;
       let _tapMoved = false;
-      let _dragState = null;   // 選択中の drag 移動状態
       const TAP_SLOP_MOUSE = 6;
       const TAP_SLOP_TOUCH = 10;
 
-      function _computeCamBasis() {
-        const camR = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-        camR.y = 0;
-        if (camR.lengthSq() < 1e-6) camR.set(1, 0, 0); else camR.normalize();
-        const camF = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-        camF.y = 0;
-        if (camF.lengthSq() < 1e-6) camF.set(0, 0, -1); else camF.normalize();
-        return { camR, camF };
-      }
-
-      function _pressBegin(x, y) {
-        _pressAt = { x, y };
-        _tapMoved = false;
-        // 選択中ならドラッグ移動用の初期状態を用意 (実際の移動は _pressCheck 内で発生)
-        if (selectedObject) {
-          const basis = _computeCamBasis();
-          _dragState = {
-            startCube: selectedObject.position.clone(),
-            startX: x,
-            startY: y,
-            camR: basis.camR,
-            camF: basis.camF,
-            moved: false,
-          };
-          window.__cubeDragActive = true;
-          try {
-            log('drag begin: ' + selectedObject.name +
-                ' start=(' + _dragState.startCube.x.toFixed(2) + ',' + _dragState.startCube.z.toFixed(2) + ')' +
-                ' camR=(' + basis.camR.x.toFixed(2) + ',' + basis.camR.z.toFixed(2) + ')' +
-                ' camF=(' + basis.camF.x.toFixed(2) + ',' + basis.camF.z.toFixed(2) + ')' +
-                ' sens=' + moveSensitivity, 'ok');
-          } catch (_) {}
-        } else {
-          _dragState = null;
-          window.__cubeDragActive = false;
-        }
-      }
+      function _pressBegin(x, y) { _pressAt = { x, y }; _tapMoved = false; }
       function _pressCheck(x, y, slop) {
         if (!_pressAt) return;
-        const dx = x - _pressAt.x, dy = y - _pressAt.y;
-        if (Math.hypot(dx, dy) > slop) _tapMoved = true;
-        if (_dragState) {
-          const wr = (x - _dragState.startX) / moveSensitivity;
-          const wf = -(y - _dragState.startY) / moveSensitivity;
-          const off = _dragState.camR.clone().multiplyScalar(wr)
-                        .add(_dragState.camF.clone().multiplyScalar(wf));
-          const ix = Math.round(off.x);
-          const iz = Math.round(off.z);
-          if (ix !== 0 || iz !== 0) _dragState.moved = true;
-          const p = selectedObject.position;
-          const newX = _dragState.startCube.x + ix;
-          const newZ = _dragState.startCube.z + iz;
-          if (newX !== p.x || newZ !== p.z) {
-            p.x = newX;
-            p.z = newZ;
-            snapAndClamp(p);
-            try { log('drag step: ' + selectedObject.name + ' → (' + p.x.toFixed(2) + ',' + p.z.toFixed(2) + ') px=(' + dx + ',' + dy + ')', 'ok'); } catch (_) {}
-            // ドラッグ中はスロットル付きで sync (最大 25 Hz)
-            emitObjectPose(selectedObject, false);
-          }
-        }
+        if (Math.hypot(x - _pressAt.x, y - _pressAt.y) > slop) _tapMoved = true;
       }
       function _pressEnd(x, y) {
-        const hadDragMove = _dragState && _dragState.moved;
-        _dragState = null;
-        window.__cubeDragActive = false;
-        const wasTap = _pressAt && !_tapMoved && !hadDragMove;
+        const wasTap = _pressAt && !_tapMoved;
         _pressAt = null;
-        if (hadDragMove) {
-          log('move ' + selectedObject.name + ' → (' +
-              selectedObject.position.x + ',' + selectedObject.position.y + ',' +
-              selectedObject.position.z + ')', 'ok');
-          // ドラッグ終了時に強制送信 (スロットルで最終位置が抜け落ちるのを防ぐ)
-          emitObjectPose(selectedObject, true);
-          return;
-        }
         if (!wasTap) return;
-        // tap: raycast → 選択 / 選択解除
         const rect = _canvas.getBoundingClientRect();
         _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
         _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
@@ -871,28 +880,25 @@
         _pressBegin(e.clientX, e.clientY);
       });
       window.addEventListener('mousemove', (e) => _pressCheck(e.clientX, e.clientY, TAP_SLOP_MOUSE));
-      window.addEventListener('mouseup', (e) => {
+      window.addEventListener('mouseup',   (e) => {
         if (e.button !== 0) return;
         _pressEnd(e.clientX, e.clientY);
       });
 
       // Touch (mobile)
       _canvas.addEventListener('touchstart', (e) => {
-        if (e.touches.length !== 1) { _pressAt = null; _dragState = null; window.__cubeDragActive = false; return; }
-        const t = e.touches[0];
-        _pressBegin(t.clientX, t.clientY);
+        if (e.touches.length !== 1) { _pressAt = null; return; }
+        const t = e.touches[0]; _pressBegin(t.clientX, t.clientY);
       }, { passive: true });
       _canvas.addEventListener('touchmove', (e) => {
         const t = e.touches[0]; if (!t) return;
         _pressCheck(t.clientX, t.clientY, TAP_SLOP_TOUCH);
       }, { passive: true });
       _canvas.addEventListener('touchend', (e) => {
-        const t = e.changedTouches[0]; if (!t) { _pressAt = null; _dragState = null; window.__cubeDragActive = false; return; }
+        const t = e.changedTouches[0]; if (!t) { _pressAt = null; return; }
         _pressEnd(t.clientX, t.clientY);
       }, { passive: true });
-      _canvas.addEventListener('touchcancel', () => {
-        _pressAt = null; _dragState = null; window.__cubeDragActive = false;
-      });
+      _canvas.addEventListener('touchcancel', () => { _pressAt = null; });
     }
 
     // ============================================================
