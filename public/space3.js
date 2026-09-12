@@ -291,6 +291,10 @@
         const dH = (display && typeof display.height === 'number' && display.height > 0)
           ? display.height : (myDisplay.height || 0.2);
         mesh = makeAvatarFrustum(color, dW, dH);
+        try {
+          log('frustum init: ' + id.substring(0,6) + ' ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm ' +
+              (display ? '(remote)' : '(fallback: 自分の myDisplay)'), 'ok');
+        } catch (_) {}
       } else {
         mesh = new THREE.Mesh(
           new THREE.SphereGeometry(0.15, 24, 16),
@@ -304,10 +308,11 @@
     // 既存 avatar の frustum を作り直し (observer の displayConfig 更新時に呼ぶ)
     function rebuildAvatarFrustum(id, display) {
       const a = avatars.get(id);
-      if (!a || a.role !== 'observer' || !display) return;
+      if (!a) { log('rebuild frustum: avatar ' + id.substring(0,6) + ' 未生成、スキップ', 'err'); return; }
+      if (a.role !== 'observer') return;
+      if (!display) return;
       const dW = (typeof display.width  === 'number' && display.width  > 0) ? display.width  : 0.3;
       const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
-      // 旧 mesh を dispose して差し替え (grp/position/quaternion は維持 → pose 追従に影響なし)
       if (a.mesh) {
         a.grp.remove(a.mesh);
         if (a.mesh.geometry) a.mesh.geometry.dispose();
@@ -315,6 +320,7 @@
       }
       a.mesh = makeAvatarFrustum(a.color, dW, dH);
       a.grp.add(a.mesh);
+      log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm', 'ok');
     }
     function ensureAvatar(id, color, role, display) {
       let a = avatars.get(id);
