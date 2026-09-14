@@ -666,6 +666,8 @@
           if (socket && socket.connected) {
             socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
           }
+          // self avatar frustum も更新 (自視点表示テスト用)
+          if (myId) rebuildAvatarFrustum(myId, myDisplay);
         }
       } catch (e) {
         log('display detect err: ' + e.message, 'err');
@@ -706,6 +708,12 @@
           a.grp.position.set(u.x, u.y, u.z);
           a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         }
+        // ★ テスト: 自分自身のプレビュー avatar も生成 (option A)
+        //   myDisplay がまだ default 値だが、直後の refreshMyDisplaySize → rebuildAvatarFrustum で
+        //   正確値に置き換わる。tick 内で毎フレーム grp = camera pose に追従。
+        ensureAvatar(myId, state.myColor, ROLE, myDisplay);
+        log('self preview avatar: ' + myId.substring(0,6) + ' (テスト: 自視点で自身表示)', 'ok');
+
         rebuildClientSelect();
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
@@ -754,8 +762,8 @@
           if (typeof data.display.roll === 'number') myDisplay.roll = data.display.roll;
           syncObsOaBtn();
         }
-        // 他クライアントの observer avatar なら、frustum を新しい display サイズで再構築
-        if (data.id !== myId && data.display) {
+        // observer avatar の frustum を新しい display サイズで再構築 (self / 他 いずれも)
+        if (data.display) {
           rebuildAvatarFrustum(data.id, data.display);
         }
         // master パネル: 選択中クライアントの表示更新
@@ -1270,6 +1278,8 @@
         myDisplay.width = w; myDisplay.height = h;
         _displaySizeManuallyEdited = true;
         if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
+        // self avatar 再構築 (option A 自視点表示テスト)
+        if (myId) rebuildAvatarFrustum(myId, myDisplay);
         log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (以降 自動値で上書きしない)', 'ok');
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
@@ -1314,6 +1324,8 @@
         if (socket && socket.connected) {
           socket.emit('displaySize', { width: wm, height: hm });
         }
+        // self avatar 再構築 (option A 自視点表示テスト)
+        if (myId) rebuildAvatarFrustum(myId, myDisplay);
         log('display 再計算: diag=' + inch.toFixed(1) + '" res=' + rw + '×' + rh +
             ' → PPI=' + ppi.toFixed(1) + ' → ' + wm.toFixed(4) + '×' + hm.toFixed(4) + 'm', 'ok');
       }
@@ -1661,6 +1673,14 @@
       if (_cameraTickFn) _cameraTickFn();
       for (const fn of updaters) fn(dt);
       sendPoseThrottled();
+      // ★ 自 avatar プレビューを camera pose に追従 (option A テスト)
+      if (myId) {
+        const selfAv = avatars.get(myId);
+        if (selfAv) {
+          selfAv.grp.position.copy(camera.position);
+          selfAv.grp.quaternion.copy(camera.quaternion);
+        }
+      }
       // ステータス表示
       const cnt = document.getElementById('count');
       const mp = document.getElementById('my-pos');
