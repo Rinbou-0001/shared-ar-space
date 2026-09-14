@@ -210,22 +210,72 @@
       sphere.userData.sceneObjectId = id;
       sphere.userData.tags = tags.slice();
       grp.add(sphere);
-      // オレンジ選択枠 (isLineSegments 子として付ければ selectObject が toggle 表示する)
+      // オレンジ選択枠: isLineSegments 子として付けると selectObject が可視/不可視を toggle する。
+      //   ・sphere 本体 (2cm) は小さいので、球ラップと大円リング (直径 6cm) の両方を用意し
+      //     近距離/遠距離のどちらでも明確に見えるようにする。
+      //   ・depthTest:false + renderOrder:999 で他オブジェクトの手前に常に描画。
+      const orangeMat = new THREE.LineBasicMaterial({
+        color: 0xff8c00, transparent: true, opacity: 1.0,
+        depthTest: false, fog: false, linewidth: 2,
+      });
+      // 内側の wireframe ラップ (球体本体を包む)
       const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.SphereGeometry(0.012, 16, 10)),
-        new THREE.LineBasicMaterial({
-          color: 0xff8c00, transparent: true, opacity: 1.0,
-          depthTest: false, fog: false, linewidth: 2,
-        })
+        new THREE.WireframeGeometry(new THREE.SphereGeometry(0.013, 12, 8)),
+        orangeMat
       );
       edges.renderOrder = 999;
       edges.visible = false;
       sphere.add(edges);
-      // AmbientLight (light タグ付きの時のみ、position を持たず全体を照らす)
+      // 大きめの選択オーラ (3 本の大円: XY / XZ / YZ)、半径 3cm
+      const RING_R = 0.03;
+      const RING_SEG = 64;
+      function makeRing(planeNormal) {
+        const pts = [];
+        for (let i = 0; i < RING_SEG; i++) {
+          const a0 = (i     / RING_SEG) * Math.PI * 2;
+          const a1 = ((i+1) / RING_SEG) * Math.PI * 2;
+          let p0, p1;
+          if (planeNormal === 'z') {           // XY 平面
+            p0 = [Math.cos(a0)*RING_R, Math.sin(a0)*RING_R, 0];
+            p1 = [Math.cos(a1)*RING_R, Math.sin(a1)*RING_R, 0];
+          } else if (planeNormal === 'y') {    // XZ 平面
+            p0 = [Math.cos(a0)*RING_R, 0, Math.sin(a0)*RING_R];
+            p1 = [Math.cos(a1)*RING_R, 0, Math.sin(a1)*RING_R];
+          } else {                              // YZ 平面
+            p0 = [0, Math.cos(a0)*RING_R, Math.sin(a0)*RING_R];
+            p1 = [0, Math.cos(a1)*RING_R, Math.sin(a1)*RING_R];
+          }
+          pts.push(...p0, ...p1);
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+        return new THREE.LineSegments(g, orangeMat);
+      }
+      const ringXY = makeRing('z');
+      const ringXZ = makeRing('y');
+      const ringYZ = makeRing('x');
+      [ringXY, ringXZ, ringYZ].forEach((r) => {
+        r.renderOrder = 999;
+        r.visible = false;
+        sphere.add(r);
+      });
+      // PointLight (light タグ付きの時のみ、オブジェクト位置から放射する光源)
+      //   ・grp の子として付けるので grp.position の移動に追従
+      //   ・distance=20m (床全体をカバー)、decay=1 (線形減衰、扱いやすい)
       let light = null;
       if (tags.indexOf('light') >= 0) {
-        light = new THREE.AmbientLight(0xffffff, cfg.intensity);
-        scene.add(light);
+        light = new THREE.PointLight(0xffffff, cfg.intensity, 20, 1);
+        light.position.set(0, 0, 0); // grp のローカル原点 = sphere と同位置
+        grp.add(light);
+      }
+      // master は常時 border を表示 (light オブジェクトの位置を常に把握できるように)
+      //   ・edges + 3 リングを visible=true にし、__alwaysVisible フラグ付けで
+      //     selectObject の deselect 時にも非表示にならないようマーク。
+      if (ROLE === 'master' && tags.indexOf('light') >= 0) {
+        [edges, ringXY, ringXZ, ringYZ].forEach((ls) => {
+          ls.visible = true;
+          ls.userData.__alwaysVisible = true;
+        });
       }
       scene.add(grp);
       selectables.push(sphere);
@@ -257,16 +307,23 @@
     let moveSensitivity = 60;
     function selectObject(obj) {
       if (selectedObject === obj) return;
-      // 前の選択解除表示
-      if (selectedObject) {
-        const prevEdges = selectedObject.getObjectByProperty('isLineSegments', true);
-        if (prevEdges) prevEdges.visible = false;
+      // 選択枠は子孫の LineSegments (isLineSegments===true) 全てを対象。
+      //   ・apex/base hit は 1 個の LineSegments、light sphere は 4 個
+      //   ・traverse で全 descendant を toggle
+      function _toggleEdges(target, on) {
+        if (!target) return;
+        target.traverse((n) => {
+          if (!n.isLineSegments) return;
+          // __alwaysVisible フラグ (master の light border 等) は選択解除で消さない
+          if (n.userData && n.userData.__alwaysVisible) { n.visible = true; return; }
+          n.visible = on;
+        });
       }
+      _toggleEdges(selectedObject, false);
       selectedObject = obj;
       if (obj) {
-        const edges = obj.getObjectByProperty('isLineSegments', true);
-        if (edges) edges.visible = true;
-        log('select: ' + obj.name, 'ok');
+        _toggleEdges(obj, true);
+        log('select: ' + (obj.name || '(unnamed)'), 'ok');
       } else {
         log('deselect', 'ok');
       }
@@ -1035,12 +1092,8 @@
         if (typeof data.y === 'number') rec.grp.position.y = data.y;
         if (typeof data.z === 'number') rec.grp.position.z = data.z;
       });
-      // space3 グローバル環境光 (master スライダー変更 → 全クライアント反映)
-      socket.on('sceneAmbient', (data) => {
-        if (!data || typeof data.intensity !== 'number') return;
-        if (sceneAmbient) sceneAmbient.intensity = Math.max(0, Math.min(1, data.intensity));
-        if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(data.intensity);
-      });
+      // space3 グローバル環境光: master スライダーは削除 (light タグは PointLight 化)。
+      //   受信ハンドラは残さない (server も送信しない)。
 
       socket.on('leave', (u) => {
         const a = avatars.get(u.id);
@@ -2202,36 +2255,7 @@
       });
       if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
 
-      // ==================================================
-      // space3 環境光 スライダー (全クライアント配信)
-      // ==================================================
-      const _ambInp = _by('m-scene-ambient');
-      const _ambVal = _by('m-scene-ambient-val');
-      window.__syncMasterAmbientSlider = function(intensity) {
-        if (!_ambInp || !_ambVal) return;
-        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0.85;
-        _ambInp.value = String(intensity);
-        _ambVal.textContent = intensity.toFixed(2);
-      };
-      let _ambThrottle = 0;
-      if (_ambInp) {
-        _ambInp.addEventListener('input', () => {
-          const v = parseFloat(_ambInp.value);
-          if (!isFinite(v)) return;
-          if (sceneAmbient) sceneAmbient.intensity = v;
-          if (_ambVal) _ambVal.textContent = v.toFixed(2);
-          const now = performance.now();
-          if (now - _ambThrottle < 50) return;
-          _ambThrottle = now;
-          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
-        });
-        _ambInp.addEventListener('change', () => {
-          const v = parseFloat(_ambInp.value);
-          if (!isFinite(v)) return;
-          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
-        });
-      }
-      if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider();
+      // 環境光スライダーは削除 (light タグは PointLight として個別に intensity 設定)
     }
 
     // ========== クライアント選択ドロップダウン ==========
