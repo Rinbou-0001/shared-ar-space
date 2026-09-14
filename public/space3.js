@@ -269,65 +269,91 @@
     }
     const APEX_CUBE_SIZE = 0.01;   // 1cm 立方体 = apex 選択判定域
 
-    // observer avatar の box 生成 (視錐台底面を「手前壁」として、そこから -Z 方向に W/2 の奥行き)
-    //   ・dimensions: W (幅) × H (高さ) × D (奥行) = W × H × (W/2)
-    //   ・前壁 (z = -FRUSTUM_DEPTH、apex 側)  = 視錐台底面と重複 → 描画スキップ (透過)
-    //   ・後壁 (z = -FRUSTUM_DEPTH - D)、上下左右壁 = 半透明 plane + wireframe edges
-    //   ・観測者アバターと同じ color で塗る (fog: false で常時可視)
+    // observer avatar の box 生成
+    //   ・寸法: W × H × D  (D = W/2)
+    //   ・前壁 (z = -FRUSTUM_DEPTH、apex 側)  = 視錐台底面と重複 → 生成しない (透過)
+    //   ・後壁 + 上下左右壁 = 実体オブジェクト (白 MeshBasicMaterial、DoubleSide、不透明)
+    //   ・全内面に 3cm × 3cm の格子 LineSegments を貼付 (壁より僅かに内側にオフセット)
+    //   ・12 稜線 (別壁との接辺) に border LineSegments (黒)
     function makeAvatarBox(color, W, H) {
       const grp = new THREE.Group();
       grp.name = 'avatar-box';
       const D = W / 2;
-      const c = new THREE.Color(color || '#fbbf24');
-      const visMat = new THREE.MeshBasicMaterial({
-        color: c,
-        transparent: true, opacity: 0.15,
+      const CELL = 0.03;   // 3cm 格子
+
+      // 壁: 白の不透明面 (両面描画 = 内外どちらから見ても白い実体)
+      const wallMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
         side: THREE.DoubleSide,
         fog: false,
-        depthWrite: false,
       });
-      const zFront = -FRUSTUM_DEPTH;         // 前壁 = 視錐台底面 (skip)
-      const zBack  = -FRUSTUM_DEPTH - D;     // 後壁
-      const zMid   = -FRUSTUM_DEPTH - D * 0.5;
-      // 後壁 (面法線 +Z、apex 側に向く)
-      const back = new THREE.Mesh(new THREE.PlaneGeometry(W, H), visMat);
-      back.position.set(0, 0, zBack);
-      grp.add(back);
-      // 上壁 (y = +H/2、面法線 -Y)
-      const top = new THREE.Mesh(new THREE.PlaneGeometry(W, D), visMat);
-      top.position.set(0, +H * 0.5, zMid);
-      top.rotation.x = Math.PI * 0.5;
-      grp.add(top);
-      // 下壁 (y = -H/2、面法線 +Y)
-      const bot = new THREE.Mesh(new THREE.PlaneGeometry(W, D), visMat);
-      bot.position.set(0, -H * 0.5, zMid);
-      bot.rotation.x = -Math.PI * 0.5;
-      grp.add(bot);
-      // 左壁 (x = -W/2、面法線 +X)
-      const left = new THREE.Mesh(new THREE.PlaneGeometry(D, H), visMat);
-      left.position.set(-W * 0.5, 0, zMid);
-      left.rotation.y = Math.PI * 0.5;
-      grp.add(left);
-      // 右壁 (x = +W/2、面法線 -X)
-      const right = new THREE.Mesh(new THREE.PlaneGeometry(D, H), visMat);
-      right.position.set(+W * 0.5, 0, zMid);
-      right.rotation.y = -Math.PI * 0.5;
-      grp.add(right);
-      // 前壁 (zFront) は視錐台底面と重複するため描画しない (透過)
-      //   ※ raycast も走らないので選択に干渉なし
+      // 内面格子: 中グレー
+      const GRID_COLOR   = 0x6b7280;
+      const BORDER_COLOR = 0x111827;
 
-      // 12 稜線 (box 外形) を wireframe で追加 — box の輪郭を見えやすく
-      //   前壁の 4 稜線は視錐台 base 矩形 (frustumLines 内) と重複するので、
-      //   別 material でうっすら重ね描き (完全消しにするには line ごとに個別生成が必要)
-      const edgeGeom = new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, D));
-      const edgeMat  = new THREE.LineBasicMaterial({
-        color: c, transparent: true, opacity: 0.55, fog: false,
-      });
-      const edges = new THREE.LineSegments(edgeGeom, edgeMat);
-      edges.position.set(0, 0, zMid);
-      grp.add(edges);
+      // 2D 格子生成 (原点中心 XY 平面、局所座標)
+      function makeGridLines(w, h, cell, colorHex) {
+        const positions = [];
+        const nx = Math.max(1, Math.round(w / cell));
+        for (let i = 0; i <= nx; i++) {
+          const x = -w/2 + i * cell;
+          positions.push(x, -h/2, 0,  x, +h/2, 0);
+        }
+        const ny = Math.max(1, Math.round(h / cell));
+        for (let j = 0; j <= ny; j++) {
+          const y = -h/2 + j * cell;
+          positions.push(-w/2, y, 0,  +w/2, y, 0);
+        }
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        return new THREE.LineSegments(
+          geom,
+          new THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: 0.75, fog: false })
+        );
+      }
 
-      grp.userData.__boxDims = { W, H, D };
+      // 1 面 (壁 + 内面格子) を作って grp に加える
+      //   pw × ph: 面のローカル寸法
+      //   pos:     面中心の box-local 位置
+      //   rot:     面の姿勢 (ローカル +Z が box の内側を向くように設定)
+      function addWall(pw, ph, pos, rot) {
+        const g = new THREE.Group();
+        // 壁 mesh
+        const wall = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), wallMat);
+        g.add(wall);
+        // 内面格子 (壁の +Z 方向 = 内側へ 0.5mm オフセット → z-fighting 回避)
+        const grid = makeGridLines(pw, ph, CELL, GRID_COLOR);
+        grid.position.z = 0.0005;
+        g.add(grid);
+        g.position.copy(pos);
+        g.rotation.copy(rot);
+        grp.add(g);
+      }
+
+      const zBack = -FRUSTUM_DEPTH - D;
+      const zMid  = -FRUSTUM_DEPTH - D * 0.5;
+
+      // 5 面 (前壁を除く)。すべて「ローカル +Z が box 内側」になるよう rotation を選択:
+      //   ・後壁: rot=(0,0,0)      → +Z 内側 = +Z 世界 (=apex 側)
+      //   ・上壁: rot.x=+π/2       → +Z 内側 = -Y 世界 (=下へ)
+      //   ・下壁: rot.x=-π/2       → +Z 内側 = +Y 世界 (=上へ)
+      //   ・左壁: rot.y=+π/2       → +Z 内側 = +X 世界 (=右へ)
+      //   ・右壁: rot.y=-π/2       → +Z 内側 = -X 世界 (=左へ)
+      addWall(W, H, new THREE.Vector3(0,      0,     zBack), new THREE.Euler( 0,             0, 0));     // 後壁
+      addWall(W, D, new THREE.Vector3(0,   +H/2,     zMid),  new THREE.Euler( +Math.PI/2,    0, 0));     // 上壁
+      addWall(W, D, new THREE.Vector3(0,   -H/2,     zMid),  new THREE.Euler( -Math.PI/2,    0, 0));     // 下壁
+      addWall(D, H, new THREE.Vector3(-W/2,   0,     zMid),  new THREE.Euler( 0,   +Math.PI/2, 0));      // 左壁
+      addWall(D, H, new THREE.Vector3(+W/2,   0,     zMid),  new THREE.Euler( 0,   -Math.PI/2, 0));      // 右壁
+      // 前壁 (zFront) は視錐台底面と重複するため生成しない (透過)
+
+      // 12 稜線 border (別壁との接辺、box 全体の輪郭)
+      const borderGeom = new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, D));
+      const borderMat  = new THREE.LineBasicMaterial({ color: BORDER_COLOR, fog: false });
+      const borders    = new THREE.LineSegments(borderGeom, borderMat);
+      borders.position.set(0, 0, zMid);
+      grp.add(borders);
+
+      grp.userData.__boxDims = { W, H, D, CELL };
       return grp;
     }
 
