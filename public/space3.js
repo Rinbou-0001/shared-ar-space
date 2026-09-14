@@ -1092,8 +1092,13 @@
         if (typeof data.y === 'number') rec.grp.position.y = data.y;
         if (typeof data.z === 'number') rec.grp.position.z = data.z;
       });
-      // space3 グローバル環境光: master スライダーは削除 (light タグは PointLight 化)。
-      //   受信ハンドラは残さない (server も送信しない)。
+      // space3 グローバル環境光 (light タグ PointLight とは別系統): master スライダー変更 → 全クライアント配信
+      socket.on('sceneAmbient', (data) => {
+        if (!data || typeof data.intensity !== 'number') return;
+        const v = Math.max(0, Math.min(1, data.intensity));
+        if (sceneAmbient) sceneAmbient.intensity = v;
+        if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
+      });
 
       socket.on('leave', (u) => {
         const a = avatars.get(u.id);
@@ -2255,7 +2260,37 @@
       });
       if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
 
-      // 環境光スライダーは削除 (light タグは PointLight として個別に intensity 設定)
+      // ==================================================
+      // space3 環境光 スライダー (AmbientLight 強度、全クライアント配信)
+      //   light タグ PointLight とは別系統。全体ベース照度を制御。
+      // ==================================================
+      const _ambInp = _by('m-scene-ambient');
+      const _ambVal = _by('m-scene-ambient-val');
+      window.__syncMasterAmbientSlider = function(intensity) {
+        if (!_ambInp || !_ambVal) return;
+        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0.85;
+        _ambInp.value = String(intensity);
+        _ambVal.textContent = intensity.toFixed(2);
+      };
+      let _ambThrottle = 0;
+      if (_ambInp) {
+        _ambInp.addEventListener('input', () => {
+          const v = parseFloat(_ambInp.value);
+          if (!isFinite(v)) return;
+          if (sceneAmbient) sceneAmbient.intensity = v;
+          if (_ambVal) _ambVal.textContent = v.toFixed(2);
+          const now = performance.now();
+          if (now - _ambThrottle < 50) return;
+          _ambThrottle = now;
+          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
+        });
+        _ambInp.addEventListener('change', () => {
+          const v = parseFloat(_ambInp.value);
+          if (!isFinite(v)) return;
+          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
+        });
+      }
+      if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider();
     }
 
     // ========== クライアント選択ドロップダウン ==========

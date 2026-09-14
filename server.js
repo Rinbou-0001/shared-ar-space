@@ -63,7 +63,9 @@ const ALLOWED_CUSTOM_TAGS = new Set(['hole_test']);
 //   type 'light' → tags に 'light' が入る + config.intensity (0-1)
 const sceneObjects = new Map();
 let sceneObjectCounter = 0;
-// (廃止) グローバル環境光: light タグは PointLight 化により不要
+// space3 のグローバル環境光 (AmbientLight 強度、master スライダーから制御)。
+//   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
+let sceneAmbientConfig = { intensity: 0.85 };
 
 // 壁を這う球体 (全クライアント共有)
 // s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
@@ -167,6 +169,8 @@ io.on('connection', (socket) => {
   for (const obj of sceneObjects.values()) {
     socket.emit('sceneObjectCreated', obj);
   }
+  // space3 グローバル環境光の現在値
+  socket.emit('sceneAmbient', sceneAmbientConfig);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -456,6 +460,16 @@ io.on('connection', (socket) => {
     if (typeof data.y === 'number' && isFinite(data.y)) obj.y = data.y;
     if (typeof data.z === 'number' && isFinite(data.z)) obj.z = data.z;
     io.emit('sceneObjectPose', { id: obj.id, x: obj.x, y: obj.y, z: obj.z });
+  });
+
+  // Master がグローバル環境光の強度を設定 (0-1)
+  //   light タグ PointLight とは別系統。全クライアントに配信。
+  socket.on('sceneAmbient', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.intensity !== 'number' || !isFinite(data.intensity)) return;
+    sceneAmbientConfig.intensity = Math.max(0, Math.min(1, data.intensity));
+    io.emit('sceneAmbient', sceneAmbientConfig);
   });
 
   socket.on('disconnect', () => {
