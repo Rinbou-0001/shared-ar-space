@@ -841,10 +841,14 @@
     }
 
     // ============================================================
-    // 共有 canvas インタラクション: tap のみ (選択/選択解除)
-    //   ・space3: 移動機能撤去、drag は選択とは無関係 (observer カメラ回転が発火)
-    //   ・観測者カメラ回転側で「移動 < slop」を検知した場合のみ選択 → 干渉なし
-    // 外部互換: window.__cubeDragActive は false 固定 (setupObserver の抑制条件で参照される)
+    // 共有 canvas インタラクション: master 限定の視錐台選択 + base drag で回転
+    //   ・ROLE !== 'master' → 選択も drag も無視 (通常のカメラ回転などが競合なく走る)
+    //   ・master:
+    //     - tap on apex/base → 選択 (highlight)
+    //     - drag on base   → 対象 avatar の Yaw/Pitch 更新 (apex を軸に回転) + controlPose emit
+    //     - drag on apex   → 選択のみ (移動なし、要件外)
+    //   ・回転感度: deg/px = 15 / moveSensitivity  (sens=60 → 0.25 deg/px)
+    // 外部互換: window.__cubeDragActive は false 固定
     // ============================================================
     window.__cubeDragActive = false;
     {
@@ -853,24 +857,114 @@
       const _ndcTap = new THREE.Vector2();
       let _pressAt = null;
       let _tapMoved = false;
+      let _dragState = null;    // { type:'base', avatarId, startX, startY, startPos, startQuat, lastSend }
       const TAP_SLOP_MOUSE = 6;
       const TAP_SLOP_TOUCH = 10;
+      const _tmpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+      const _tmpQuat  = new THREE.Quaternion();
 
-      function _pressBegin(x, y) { _pressAt = { x, y }; _tapMoved = false; }
-      function _pressCheck(x, y, slop) {
-        if (!_pressAt) return;
-        if (Math.hypot(x - _pressAt.x, y - _pressAt.y) > slop) _tapMoved = true;
-      }
-      function _pressEnd(x, y) {
-        const wasTap = _pressAt && !_tapMoved;
-        _pressAt = null;
-        if (!wasTap) return;
+      // 現在の press 座標で raycast → 最初のヒット (mesh) を返す (なければ null)
+      function _raycastAt(x, y) {
         const rect = _canvas.getBoundingClientRect();
         _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
         _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
         _rayTap.setFromCamera(_ndcTap, camera);
         const hits = _rayTap.intersectObjects(selectables, false);
-        if (hits.length > 0) selectObject(hits[0].object);
+        return hits.length > 0 ? hits[0] : null;
+      }
+
+      function _pressBegin(x, y) {
+        _pressAt = { x, y };
+        _tapMoved = false;
+        _dragState = null;
+        if (ROLE !== 'master') return;   // ★ master 以外は選択操作しない
+        const hit = _raycastAt(x, y);
+        if (!hit) return;
+        const obj = hit.object;
+        const type = obj.userData && obj.userData.selectType;
+        const avId = obj.userData && obj.userData.avatarId;
+        if (!type || !avId) return;
+        const av = avatars.get(avId);
+        if (!av) return;
+        // hit の瞬間に選択 → highlight 表示 (drag 中も見える)
+        selectObject(obj);
+        // base の場合のみ drag 準備 (apex は drag 無効)
+        if (type === 'base') {
+          _dragState = {
+            type: 'base',
+            avatarId: avId,
+            startX: x, startY: y,
+            startPos:  av.grp.position.clone(),
+            startQuat: av.grp.quaternion.clone(),
+            lastSend: 0,
+          };
+        }
+      }
+
+      function _pressCheck(x, y, slop) {
+        if (!_pressAt) return;
+        const dx = x - _pressAt.x, dy = y - _pressAt.y;
+        if (Math.hypot(dx, dy) > slop) _tapMoved = true;
+        if (!_dragState || _dragState.type !== 'base' || !_tapMoved) return;
+        // base drag → apex 軸で Yaw/Pitch 回転
+        const degPerPx = 15 / Math.max(5, moveSensitivity);
+        const dYaw   = -dx * degPerPx * (Math.PI / 180);   // 右ドラッグ = -yaw
+        const dPitch = -dy * degPerPx * (Math.PI / 180);   // 下ドラッグ = -pitch (下を見る)
+        _tmpEuler.setFromQuaternion(_dragState.startQuat, 'YXZ');
+        const PL = Math.PI/2 - 0.02;
+        const newPitch = Math.max(-PL, Math.min(PL, _tmpEuler.x + dPitch));
+        const newYaw   = _tmpEuler.y + dYaw;
+        const newRoll  = _tmpEuler.z;   // roll は据え置き
+        _tmpEuler.set(newPitch, newYaw, newRoll, 'YXZ');
+        _tmpQuat.setFromEuler(_tmpEuler);
+        // ローカルで即時反映 (見た目の遅延を回避)
+        const av = avatars.get(_dragState.avatarId);
+        if (av) av.grp.quaternion.copy(_tmpQuat);
+        // 25 Hz スロットルで controlPose emit (server 経由で対象 client と全体に反映)
+        const now = performance.now();
+        if (now - _dragState.lastSend > 40 && socket && socket.connected) {
+          _dragState.lastSend = now;
+          const p = _dragState.startPos;
+          socket.emit('controlPose', {
+            targetId: _dragState.avatarId,
+            x: p.x, y: p.y, z: p.z,
+            qx: _tmpQuat.x, qy: _tmpQuat.y, qz: _tmpQuat.z, qw: _tmpQuat.w,
+          });
+        }
+      }
+
+      function _pressEnd(x, y) {
+        const hadDrag = _dragState && _tapMoved;
+        const savedDrag = _dragState;
+        _dragState = null;
+        if (hadDrag) {
+          // 最終位置を確実に送信 (スロットルで最後の更新が漏れないよう)
+          const av = avatars.get(savedDrag.avatarId);
+          if (av && socket && socket.connected) {
+            const q = av.grp.quaternion;
+            const p = savedDrag.startPos;
+            socket.emit('controlPose', {
+              targetId: savedDrag.avatarId,
+              x: p.x, y: p.y, z: p.z,
+              qx: q.x, qy: q.y, qz: q.z, qw: q.w,
+            });
+            try {
+              const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+              log('base drag end: ' + savedDrag.avatarId.substring(0,6) +
+                  ' Yaw=' + THREE.MathUtils.radToDeg(e.y).toFixed(0) +
+                  '° Pit=' + THREE.MathUtils.radToDeg(e.x).toFixed(0) + '°', 'ok');
+            } catch (_) {}
+          }
+          _pressAt = null;
+          return;
+        }
+        const wasTap = _pressAt && !_tapMoved;
+        _pressAt = null;
+        if (!wasTap) return;
+        // master 以外は tap で選択解除だけ (raycast も無し)
+        if (ROLE !== 'master') { selectObject(null); return; }
+        const hit = _raycastAt(x, y);
+        if (hit) selectObject(hit.object);
         else selectObject(null);
       }
 
@@ -885,9 +979,9 @@
         _pressEnd(e.clientX, e.clientY);
       });
 
-      // Touch (mobile)
+      // Touch (mobile) — space3 の視錐台操作は master 限定なので通常発火しないが実装は同等
       _canvas.addEventListener('touchstart', (e) => {
-        if (e.touches.length !== 1) { _pressAt = null; return; }
+        if (e.touches.length !== 1) { _pressAt = null; _dragState = null; return; }
         const t = e.touches[0]; _pressBegin(t.clientX, t.clientY);
       }, { passive: true });
       _canvas.addEventListener('touchmove', (e) => {
@@ -895,10 +989,10 @@
         _pressCheck(t.clientX, t.clientY, TAP_SLOP_TOUCH);
       }, { passive: true });
       _canvas.addEventListener('touchend', (e) => {
-        const t = e.changedTouches[0]; if (!t) { _pressAt = null; return; }
+        const t = e.changedTouches[0]; if (!t) { _pressAt = null; _dragState = null; return; }
         _pressEnd(t.clientX, t.clientY);
       }, { passive: true });
-      _canvas.addEventListener('touchcancel', () => { _pressAt = null; });
+      _canvas.addEventListener('touchcancel', () => { _pressAt = null; _dragState = null; });
     }
 
     // ============================================================
@@ -924,19 +1018,27 @@
       const dom = renderer.domElement;
       dom.style.cursor = 'grab';
 
-      // 左ドラッグ = look (yaw/pitch)。ただし選択中は cube 移動を優先し、カメラ回転は抑制。
+      // 左ドラッグ = look (yaw/pitch)。ただし master が selectable にヒットして
+      //   いる場合は共有 handler の drag/select を優先し、カメラ回転はスキップ。
+      const _obsRay = new THREE.Raycaster();
+      const _obsNDC = new THREE.Vector2();
+      function _mousedownHitsSelectable(clientX, clientY) {
+        if (ROLE !== 'master' || selectables.length === 0) return false;
+        const rect = renderer.domElement.getBoundingClientRect();
+        _obsNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        _obsNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        _obsRay.setFromCamera(_obsNDC, camera);
+        return _obsRay.intersectObjects(selectables, false).length > 0;
+      }
       let dragging = false, lastX = 0, lastY = 0;
       dom.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
-        // 選択中は共有ハンドラが drag-move を担当 → カメラ回転を開始しない
-        if (selectedObject) return;
+        if (_mousedownHitsSelectable(e.clientX, e.clientY)) return;   // master 選択/drag 優先
         dragging = true; lastX = e.clientX; lastY = e.clientY;
         dom.style.cursor = 'grabbing';
       });
       window.addEventListener('mousemove', (e) => {
         if (!dragging) return;
-        // 途中で選択された場合も抑制 (drag-move 側が動く)
-        if (window.__cubeDragActive) return;
         const dx = e.clientX - lastX, dy = e.clientY - lastY;
         lastX = e.clientX; lastY = e.clientY;
         const SENS = 0.0035;
