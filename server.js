@@ -58,6 +58,14 @@ let observerCounter = 0;
 // 付与可能なカスタムタグの一覧 (master が付け外し可能)
 const ALLOWED_CUSTOM_TAGS = new Set(['hole_test']);
 
+// space3 のシーンオブジェクト (master が空間に生成する光源等)
+//   sceneObjects: id → { id, type, tags, x, y, z, config }
+//   type 'light' → tags に 'light' が入る + config.intensity (0-1)
+const sceneObjects = new Map();
+let sceneObjectCounter = 0;
+// space3 のグローバル環境光 (master スライダーで制御、全クライアントに配信)
+let sceneAmbientConfig = { intensity: 0.85 };
+
 // 壁を這う球体 (全クライアント共有)
 // s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
 // y: 高さ (m)
@@ -156,6 +164,12 @@ io.on('connection', (socket) => {
   for (const [name, pose] of objectPoses.entries()) {
     socket.emit('objectPose', { name, x: pose.x, y: pose.y, z: pose.z });
   }
+  // space3 のシーンオブジェクト (光源等) を配信
+  for (const obj of sceneObjects.values()) {
+    socket.emit('sceneObjectCreated', obj);
+  }
+  // space3 グローバル環境光
+  socket.emit('sceneAmbient', sceneAmbientConfig);
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -391,6 +405,56 @@ io.on('connection', (socket) => {
       id: data.targetId, tag: data.tag, on,
       tags: target.customTags.slice(),
     });
+  });
+
+  // Master がシーンにオブジェクト生成 (現状 type='light' のみ)
+  //   data: { type: 'light', x, y, z, tags? }
+  //   結果: sceneObjectCreated を全クライアントに配信
+  socket.on('sceneObjectCreate', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data !== 'object') return;
+    const type = (typeof data.type === 'string') ? data.type : null;
+    if (type !== 'light') return; // 現状 light のみ許可
+    sceneObjectCounter++;
+    const id = 'obj-' + sceneObjectCounter;
+    const obj = {
+      id,
+      type,
+      tags: ['light'],
+      x: (typeof data.x === 'number') ? data.x : 0,
+      y: (typeof data.y === 'number') ? data.y : 2,
+      z: (typeof data.z === 'number') ? data.z : 0,
+      config: { intensity: 0.5 },
+    };
+    sceneObjects.set(id, obj);
+    io.emit('sceneObjectCreated', obj);
+  });
+
+  // Master がシーンオブジェクトの config (光強度等) を更新
+  //   data: { id, config: { intensity } }
+  socket.on('sceneObjectConfig', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.id !== 'string') return;
+    const obj = sceneObjects.get(data.id);
+    if (!obj) return;
+    if (data.config && typeof data.config === 'object') {
+      if (typeof data.config.intensity === 'number' && isFinite(data.config.intensity)) {
+        obj.config.intensity = Math.max(0, Math.min(1, data.config.intensity));
+      }
+    }
+    io.emit('sceneObjectUpdated', { id: obj.id, config: obj.config });
+  });
+
+  // Master がシーン全体の環境光強度を設定
+  //   data: { intensity: 0-1 }
+  socket.on('sceneAmbient', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.intensity !== 'number' || !isFinite(data.intensity)) return;
+    sceneAmbientConfig.intensity = Math.max(0, Math.min(1, data.intensity));
+    io.emit('sceneAmbient', sceneAmbientConfig);
   });
 
   socket.on('disconnect', () => {

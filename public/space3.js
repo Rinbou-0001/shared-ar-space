@@ -122,7 +122,10 @@
     });
 
     // ライト (床は白でフラットに見せるため、環境光を強めに)
-    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    // space3 環境光: master スライダーで動的に intensity を変更可能。
+    //   個別 light タグオブジェクトからの寄与とは別途、全体を底上げする AmbientLight。
+    const sceneAmbient = new THREE.AmbientLight(0xffffff, 0.85);
+    scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
@@ -178,6 +181,76 @@
     //     もし後で選択可能なオブジェクトを追加したい時は selectables.push(mesh) するだけで有効化。
     const selectables = [];
     let selectedObject = null;
+
+    // ============================================================
+    // シーンオブジェクト (master が右クリックメニューで生成する光源等)
+    //   sceneLightObjects: id → { obj, sphere, light, config, tags, edgesLine }
+    //   ・sphere : 選択可能な 2cm 透明球体 (marker)、selectables に登録
+    //   ・light  : タグに 'light' があれば AmbientLight を scene に配置 (position は無関係)
+    //   ・edges  : 選択時のオレンジ枠 (isLineSegments 子として sphere に付ける)
+    // ============================================================
+    const sceneLightObjects = new Map();
+    function makeSceneObject(o) {
+      // o: { id, type, tags, x, y, z, config: { intensity } }
+      const id = o.id;
+      const tags = (o.tags || []).slice();
+      const cfg = Object.assign({ intensity: 0.5 }, o.config || {});
+      const grp = new THREE.Group();
+      grp.name = 'scene-' + id;
+      grp.position.set(o.x || 0, o.y || 0, o.z || 0);
+      // 直径 2cm = 半径 0.01m、透明 (opacity 0.15 で微かに視認可能)
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.01, 20, 12),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff, transparent: true, opacity: 0.15,
+          depthWrite: false, fog: false,
+        })
+      );
+      sphere.name = 'light-' + id;
+      sphere.userData.sceneObjectId = id;
+      sphere.userData.tags = tags.slice();
+      grp.add(sphere);
+      // オレンジ選択枠 (isLineSegments 子として付ければ selectObject が toggle 表示する)
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.SphereGeometry(0.012, 16, 10)),
+        new THREE.LineBasicMaterial({
+          color: 0xff8c00, transparent: true, opacity: 1.0,
+          depthTest: false, fog: false, linewidth: 2,
+        })
+      );
+      edges.renderOrder = 999;
+      edges.visible = false;
+      sphere.add(edges);
+      // AmbientLight (light タグ付きの時のみ、position を持たず全体を照らす)
+      let light = null;
+      if (tags.indexOf('light') >= 0) {
+        light = new THREE.AmbientLight(0xffffff, cfg.intensity);
+        scene.add(light);
+      }
+      scene.add(grp);
+      selectables.push(sphere);
+      const rec = { id, tags, config: cfg, grp, sphere, light };
+      sceneLightObjects.set(id, rec);
+      return rec;
+    }
+    function updateSceneObjectConfig(id, config) {
+      const rec = sceneLightObjects.get(id);
+      if (!rec) return;
+      if (config && typeof config.intensity === 'number') {
+        rec.config.intensity = Math.max(0, Math.min(1, config.intensity));
+        if (rec.light) rec.light.intensity = rec.config.intensity;
+      }
+    }
+    function removeSceneObject(id) {
+      const rec = sceneLightObjects.get(id);
+      if (!rec) return;
+      const idx = selectables.indexOf(rec.sphere);
+      if (idx >= 0) selectables.splice(idx, 1);
+      if (selectedObject === rec.sphere) selectObject(null);
+      if (rec.light) scene.remove(rec.light);
+      scene.remove(rec.grp);
+      sceneLightObjects.delete(id);
+    }
     const CUBE_STEP = 1.0;
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
     // ドラッグ移動感度 (px / 1m)。master が変更 → server 経由で全クライアントへ配信される
@@ -287,11 +360,13 @@
     //   ・後壁 + 上下左右壁 = 実体オブジェクト (白 MeshBasicMaterial、DoubleSide、不透明)
     //   ・全内面に 3cm × 3cm の格子 LineSegments を貼付 (壁より僅かに内側にオフセット)
     //   ・12 稜線 (別壁との接辺) に border LineSegments (黒)
-    function makeAvatarBox(color, W, H, depthOverride) {
+    function makeAvatarBox(color, W, H, depthOverride, hasHole) {
       const grp = new THREE.Group();
       grp.name = 'avatar-box';
       const D = W / 2;
       const frontDist = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
+      // hole_test タグが付いた時、奥壁中心に半径 = H/4 (=直径 H/2) の円形穴を開ける
+      const HOLE_RADIUS = hasHole ? (H * 0.25) : 0;
       const CELL = 0.03;   // 3cm 格子
 
       // 壁: 白の不透明面 (両面描画 = 内外どちらから見ても白い実体)
@@ -325,19 +400,56 @@
         );
       }
 
+      // ShapeGeometry で長方形壁 (オプション: 中心に円形穴)。
+      //   ・hole=0 なら通常の矩形 (PlaneGeometry と同等)
+      //   ・hole>0 なら中心に穴 → 穴の向こう側は透過して背景が見える
+      function makeWallGeom(pw, ph, holeRadius) {
+        const shape = new THREE.Shape();
+        shape.moveTo(-pw / 2, -ph / 2);
+        shape.lineTo(+pw / 2, -ph / 2);
+        shape.lineTo(+pw / 2, +ph / 2);
+        shape.lineTo(-pw / 2, +ph / 2);
+        shape.lineTo(-pw / 2, -ph / 2);
+        if (holeRadius > 0 && holeRadius < Math.min(pw, ph) * 0.5) {
+          const hole = new THREE.Path();
+          hole.absarc(0, 0, holeRadius, 0, Math.PI * 2, false);
+          shape.holes.push(hole);
+        }
+        return new THREE.ShapeGeometry(shape, 64);
+      }
+
       // 1 面 (壁 + 内面格子) を作って grp に加える
       //   pw × ph: 面のローカル寸法
       //   pos:     面中心の box-local 位置
       //   rot:     面の姿勢 (ローカル +Z が box の内側を向くように設定)
-      function addWall(pw, ph, pos, rot) {
+      //   opt.holeRadius: 面中心の円形穴半径 (0 = 穴なし)
+      //   opt.isBack:     稜線 border に穴の輪郭を追加するか
+      function addWall(pw, ph, pos, rot, opt) {
+        const holeR = (opt && opt.holeRadius) || 0;
         const g = new THREE.Group();
-        // 壁 mesh
-        const wall = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), wallMat);
+        // 壁 mesh (ShapeGeometry で穴対応)
+        const wall = new THREE.Mesh(makeWallGeom(pw, ph, holeR), wallMat);
         g.add(wall);
         // 内面格子 (壁の +Z 方向 = 内側へ 0.5mm オフセット → z-fighting 回避)
         const grid = makeGridLines(pw, ph, CELL, GRID_COLOR);
         grid.position.z = 0.0005;
         g.add(grid);
+        // 穴の輪郭 (border color) を面の内側にも描いておく (視覚的な明示)
+        if (holeR > 0) {
+          const seg = 64;
+          const pts = [];
+          for (let i = 0; i < seg; i++) {
+            const a0 = (i     / seg) * Math.PI * 2;
+            const a1 = ((i+1) / seg) * Math.PI * 2;
+            pts.push(Math.cos(a0)*holeR, Math.sin(a0)*holeR, 0.0005);
+            pts.push(Math.cos(a1)*holeR, Math.sin(a1)*holeR, 0.0005);
+          }
+          const ring = new THREE.LineSegments(
+            new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)),
+            new THREE.LineBasicMaterial({ color: BORDER_COLOR, fog: false })
+          );
+          g.add(ring);
+        }
         g.position.copy(pos);
         g.rotation.copy(rot);
         grp.add(g);
@@ -352,7 +464,8 @@
       //   ・下壁: rot.x=-π/2       → +Z 内側 = +Y 世界 (=上へ)
       //   ・左壁: rot.y=+π/2       → +Z 内側 = +X 世界 (=右へ)
       //   ・右壁: rot.y=-π/2       → +Z 内側 = -X 世界 (=左へ)
-      addWall(W, H, new THREE.Vector3(0,      0,     zBack), new THREE.Euler( 0,             0, 0));     // 後壁
+      // 後壁は hasHole 時のみ穴付き ShapeGeometry。
+      addWall(W, H, new THREE.Vector3(0,      0,     zBack), new THREE.Euler( 0,             0, 0), { holeRadius: HOLE_RADIUS, isBack: true }); // 後壁
       addWall(W, D, new THREE.Vector3(0,   +H/2,     zMid),  new THREE.Euler( +Math.PI/2,    0, 0));     // 上壁
       addWall(W, D, new THREE.Vector3(0,   -H/2,     zMid),  new THREE.Euler( -Math.PI/2,    0, 0));     // 下壁
       addWall(D, H, new THREE.Vector3(-W/2,   0,     zMid),  new THREE.Euler( 0,   +Math.PI/2, 0));      // 左壁
@@ -365,6 +478,23 @@
       const borders    = new THREE.LineSegments(borderGeom, borderMat);
       borders.position.set(0, 0, zMid);
       grp.add(borders);
+      // 奥壁の穴の輪郭 (box 外側から見た時の縁取り)
+      if (HOLE_RADIUS > 0) {
+        const seg = 64;
+        const pts = [];
+        for (let i = 0; i < seg; i++) {
+          const a0 = (i     / seg) * Math.PI * 2;
+          const a1 = ((i+1) / seg) * Math.PI * 2;
+          pts.push(Math.cos(a0)*HOLE_RADIUS, Math.sin(a0)*HOLE_RADIUS, 0);
+          pts.push(Math.cos(a1)*HOLE_RADIUS, Math.sin(a1)*HOLE_RADIUS, 0);
+        }
+        const ring = new THREE.LineSegments(
+          new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)),
+          new THREE.LineBasicMaterial({ color: BORDER_COLOR, fog: false })
+        );
+        ring.position.set(0, 0, zBack);
+        grp.add(ring);
+      }
 
       grp.userData.__boxDims = { W, H, D, CELL };
       return grp;
@@ -375,7 +505,7 @@
     //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
-    function makeObserverFrustumMeshes(color, W, H, id, depthOverride) {
+    function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole) {
       const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
       const frustumLines = makeAvatarFrustum(color, W, H, d);
 
@@ -415,7 +545,7 @@
       baseEdges.visible = false;
       baseHit.add(baseEdges);
 
-      const box = makeAvatarBox(color, W, H, d);
+      const box = makeAvatarBox(color, W, H, d, !!hasHole);
       return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
     }
 
@@ -433,7 +563,9 @@
           ? display.width  : (myDisplay.width  || 0.3);
         const dH = (display && typeof display.height === 'number' && display.height > 0)
           ? display.height : (myDisplay.height || 0.2);
-        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id);
+        // 初期生成時点で hole 情報は未確定 (customTags は後から入る場合が多い) — false で作り、
+        //   tag 受信 or displayConfig 受信で rebuildAvatarFrustum が正しい hasHole で作り直す。
+        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id, null, false);
         av.frustumLines = parts.frustumLines;
         av.apexHit  = parts.apexHit;  av.apexEdges = parts.apexEdges;
         av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
@@ -499,8 +631,9 @@
       }
     }
 
-    // 既存 avatar の frustum + hit mesh を作り直し (displayConfig で size 変化時)
+    // 既存 avatar の frustum + hit mesh を作り直し (displayConfig / tag 変化時)
     //   depthOverride: self avatar (canvas 同期 ON) の base 距離を上書きするために渡す
+    //   hasHole は avatar.customTags から derive
     function rebuildAvatarFrustum(id, display, depthOverride) {
       const a = avatars.get(id);
       if (!a) { log('rebuild frustum: avatar ' + id.substring(0,6) + ' 未生成、スキップ', 'err'); return; }
@@ -508,9 +641,10 @@
       if (!display) return;
       const dW = (typeof display.width  === 'number' && display.width  > 0) ? display.width  : 0.3;
       const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
+      const hasHole = !!(a.customTags && a.customTags.indexOf('hole_test') >= 0);
       _removeAvatarSelectables(a);
       _disposeAvatarSubMeshes(a);
-      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride);
+      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride, hasHole);
       a.frustumLines = parts.frustumLines;
       a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
@@ -523,7 +657,8 @@
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
       const dTag = (typeof depthOverride === 'number' && depthOverride > 0) ? (' D=' + depthOverride.toFixed(3) + 'm') : '';
-      log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm' + dTag, 'ok');
+      const hTag = hasHole ? ' [hole]' : '';
+      log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm' + dTag + hTag, 'ok');
     }
     function ensureAvatar(id, color, role, display) {
       let a = avatars.get(id);
@@ -828,7 +963,41 @@
         if (ROLE === 'master' && data.id === selectedClientId && window.__syncMasterTagButtons) {
           window.__syncMasterTagButtons();
         }
+        // hole_test トグルは box 形状に影響 → 対象 observer avatar を rebuild
+        if (a && a.role === 'observer' && data.tag === 'hole_test') {
+          // self なら effectiveDisplaySize + SELF_FRUSTUM_DEPTH、他は保持中の display で再構築
+          if (data.id === myId) {
+            rebuildAvatarFrustum(myId, effectiveDisplaySize, SELF_FRUSTUM_DEPTH);
+          } else {
+            // 他 observer は最後に受信した display サイズを持たない場合があるため、
+            // avatar 側の frustum サイズ (userData.__frustumParams) から復元
+            const params = a.frustumLines && a.frustumLines.userData && a.frustumLines.userData.__frustumParams;
+            const disp = params ? { width: params.W, height: params.H } : { width: 0.3, height: 0.2 };
+            rebuildAvatarFrustum(data.id, disp);
+          }
+        }
         log('avatarTag: ' + data.id.substring(0,6) + ' ' + data.tag + ' = ' + (data.on ? 'ON' : 'OFF'), 'ok');
+      });
+
+      // シーンオブジェクト (光源等) の生成 / 更新 を受信
+      socket.on('sceneObjectCreated', (o) => {
+        if (!o || !o.id) return;
+        if (sceneLightObjects.has(o.id)) return; // 冪等
+        makeSceneObject(o);
+        log('sceneObject created: ' + o.id + ' tags=[' + (o.tags||[]).join(',') + ']', 'ok');
+        // master: 選択済なら intensity スライダーを反映
+        if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+      });
+      socket.on('sceneObjectUpdated', (data) => {
+        if (!data || !data.id) return;
+        updateSceneObjectConfig(data.id, data.config);
+        if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+      });
+      // space3 グローバル環境光 (master スライダー変更 → 全クライアント反映)
+      socket.on('sceneAmbient', (data) => {
+        if (!data || typeof data.intensity !== 'number') return;
+        if (sceneAmbient) sceneAmbient.intensity = Math.max(0, Math.min(1, data.intensity));
+        if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(data.intensity);
       });
 
       socket.on('leave', (u) => {
@@ -1826,6 +1995,149 @@
       }
       bindApplyMousedown('m-fog-apply', applyFogDensity);
       bindEnterApply(['m-fog-density'], applyFogDensity);
+
+      // ==================================================
+      // 右クリック コンテキストメニュー (master のみ)
+      // ==================================================
+      const cmenu = document.getElementById('context-menu');
+      function hideContextMenu() { if (cmenu) cmenu.style.display = 'none'; }
+      if (renderer && renderer.domElement) {
+        renderer.domElement.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          if (!cmenu) return;
+          // 画面端で切れないよう左上位置を軽くクランプ
+          const menuW = 160, menuH = 60;
+          const x = Math.min(e.clientX, window.innerWidth  - menuW - 6);
+          const y = Math.min(e.clientY, window.innerHeight - menuH - 6);
+          cmenu.style.left = x + 'px';
+          cmenu.style.top  = y + 'px';
+          cmenu.style.display = 'block';
+        });
+      }
+      // 外側クリック / Esc で閉じる
+      document.addEventListener('click', (e) => {
+        if (!cmenu) return;
+        if (!cmenu.contains(e.target)) hideContextMenu();
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideContextMenu();
+      });
+      // メニュー項目クリック
+      if (cmenu) {
+        cmenu.querySelectorAll('button[data-action]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const action = btn.getAttribute('data-action');
+            if (action === 'light') {
+              if (socket && socket.connected) {
+                socket.emit('sceneObjectCreate', { type: 'light', x: 0, y: 2, z: 0 });
+              }
+              log('sceneObjectCreate → light (0,2,0)', 'ok');
+            }
+            hideContextMenu();
+          });
+        });
+      }
+
+      // ==================================================
+      // 選択中シーンオブジェクトの光強度スライダー
+      // ==================================================
+      const _lightRow = _by('m-light-intensity-row');
+      const _lightInp = _by('m-light-intensity');
+      const _lightVal = _by('m-light-intensity-val');
+      // 選択中の scene light object id を返す (selectedObject 経由)
+      function _currentSelectedLightId() {
+        if (!selectedObject) return null;
+        const id = selectedObject.userData && selectedObject.userData.sceneObjectId;
+        if (!id) return null;
+        const rec = sceneLightObjects.get(id);
+        if (!rec) return null;
+        return (rec.tags.indexOf('light') >= 0) ? id : null;
+      }
+      // スライダー UI 状態を選択中オブジェクトの config.intensity に同期
+      window.__syncMasterLightSlider = function() {
+        if (!_lightRow) return;
+        const id = _currentSelectedLightId();
+        if (!id) { _lightRow.style.display = 'none'; return; }
+        const rec = sceneLightObjects.get(id);
+        _lightRow.style.display = 'flex';
+        if (_lightInp) _lightInp.value = String(rec.config.intensity);
+        if (_lightVal) _lightVal.textContent = rec.config.intensity.toFixed(2);
+      };
+      // スライダー変更で intensity を server にリアルタイム送信 (スロットル 50ms)
+      let _lightThrottle = 0;
+      if (_lightInp) {
+        _lightInp.addEventListener('input', () => {
+          const id = _currentSelectedLightId();
+          if (!id) return;
+          const v = parseFloat(_lightInp.value);
+          if (!isFinite(v)) return;
+          const rec = sceneLightObjects.get(id);
+          rec.config.intensity = v;
+          if (rec.light) rec.light.intensity = v;
+          if (_lightVal) _lightVal.textContent = v.toFixed(2);
+          const now = performance.now();
+          if (now - _lightThrottle < 50) return;
+          _lightThrottle = now;
+          if (socket && socket.connected) {
+            socket.emit('sceneObjectConfig', { id, config: { intensity: v } });
+          }
+        });
+        _lightInp.addEventListener('change', () => {
+          const id = _currentSelectedLightId();
+          if (!id) return;
+          const v = parseFloat(_lightInp.value);
+          if (!isFinite(v)) return;
+          if (socket && socket.connected) {
+            socket.emit('sceneObjectConfig', { id, config: { intensity: v } });
+          }
+        });
+      }
+      // 選択変化に反応 (selectObject をラップ)
+      const _origSelectObject = selectObject;
+      // 上書き不可なので、代替として updateSelectionHint 拡張
+      const _origUpdateSelectionHint = window.__origUpdateSelectionHint || null;
+      // 毎フレーム selectedObject を軽く監視 (簡素化) — 選択切替時のみ動く
+      let _lastSelHint = null;
+      updaters.push(() => {
+        const cur = selectedObject;
+        if (cur !== _lastSelHint) {
+          _lastSelHint = cur;
+          if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+        }
+      });
+      if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+
+      // ==================================================
+      // space3 環境光 スライダー (全クライアント配信)
+      // ==================================================
+      const _ambInp = _by('m-scene-ambient');
+      const _ambVal = _by('m-scene-ambient-val');
+      window.__syncMasterAmbientSlider = function(intensity) {
+        if (!_ambInp || !_ambVal) return;
+        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0.85;
+        _ambInp.value = String(intensity);
+        _ambVal.textContent = intensity.toFixed(2);
+      };
+      let _ambThrottle = 0;
+      if (_ambInp) {
+        _ambInp.addEventListener('input', () => {
+          const v = parseFloat(_ambInp.value);
+          if (!isFinite(v)) return;
+          if (sceneAmbient) sceneAmbient.intensity = v;
+          if (_ambVal) _ambVal.textContent = v.toFixed(2);
+          const now = performance.now();
+          if (now - _ambThrottle < 50) return;
+          _ambThrottle = now;
+          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
+        });
+        _ambInp.addEventListener('change', () => {
+          const v = parseFloat(_ambInp.value);
+          if (!isFinite(v)) return;
+          if (socket && socket.connected) socket.emit('sceneAmbient', { intensity: v });
+        });
+      }
+      if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider();
     }
 
     // ========== クライアント選択ドロップダウン ==========
