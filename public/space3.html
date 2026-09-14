@@ -173,6 +173,27 @@
     #master-panel label { display: inline-block; width: 28px; text-align: center; font-weight: bold; font-family: monospace; }
     #master-panel .m-section { border-top: 1px solid #334; margin: 8px 0; padding-top: 6px; }
     #master-panel .m-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+    /* アコーディオン */
+    #master-panel details { margin: 0; }
+    #master-panel details > summary {
+      cursor: pointer; user-select: none;
+      padding: 4px 6px; border-radius: 4px;
+      background: rgba(6,182,212,0.15); color: #67e8f9;
+      font-weight: bold; font-size: 11px;
+      list-style: none;
+    }
+    #master-panel details > summary::-webkit-details-marker { display: none; }
+    #master-panel details > summary::before {
+      content: '▸'; display: inline-block; width: 12px; transition: transform 0.15s;
+    }
+    #master-panel details[open] > summary::before { transform: rotate(90deg); }
+    #master-panel details > summary:hover { background: rgba(6,182,212,0.28); }
+    #master-panel details > .m-body { padding: 6px 4px 2px; }
+    #master-panel .m-tag-toggle {
+      background: #475569; color: white;
+      padding: 4px 10px; font-size: 11px; margin-right: 4px; margin-top: 2px;
+    }
+    #master-panel .m-tag-toggle.on { background: #22c55e; color: #052e16; }
   </style>
 
   <script>
@@ -230,68 +251,101 @@
 <!-- Master 制御パネル (master のみ、observer-panel と並置) -->
 <div id="master-panel">
   <h3>MASTER 制御</h3>
+
   <div class="m-section">
-    <div class="hint">クライアント一覧から選択 → 座標/角度を入力して適用</div>
-    <div class="row">
-      <select id="m-client-select" style="flex:1; padding: 4px;">
-        <option value="">-- 未選択 --</option>
-      </select>
-    </div>
-    <div class="row">
-      <label>X</label><input type="number" id="m-x" value="0" step="0.1">
-      <label>Y</label><input type="number" id="m-y" value="1.7" step="0.1">
-      <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
-    </div>
-    <div class="row">
-      <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
-      <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
-      <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
-    </div>
-    <div class="row">
-      <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
-      <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint">オフアクシス投影 (選択中クライアント)</div>
-    <div class="row">
-      <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
-      <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint">共通視点 (viewerEye)</div>
-    <div class="row">
-      <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
-      <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
-      <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
-    </div>
-    <div class="row">
-      <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint" style="color:#67e8f9;">オブジェクト移動感度 (px / 1m) — 小=敏感、大=鈍感</div>
-    <div class="row">
-      <label>S</label>
-      <input type="number" id="m-move-sens" value="60" step="5" min="5" max="500" style="width:80px;">
-      <button id="m-move-sens-apply" style="background: #06b6d4; color: #083344">適用</button>
-    </div>
-    <div class="hint" style="font-size:10px; opacity:0.7;">
-      現在: <span id="m-move-sens-current">60</span> px/m — 全クライアントに配信
-    </div>
+    <details open>
+      <summary>クライアント選択・強制ポーズ</summary>
+      <div class="m-body">
+        <div class="hint">入室タグ (#N) を含めて一覧から選択 → 座標/角度を入力して適用</div>
+        <div class="row">
+          <select id="m-client-select" style="flex:1; padding: 4px;">
+            <option value="">-- 未選択 --</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>X</label><input type="number" id="m-x" value="0" step="0.1">
+          <label>Y</label><input type="number" id="m-y" value="1.7" step="0.1">
+          <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
+        </div>
+        <div class="row">
+          <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
+          <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
+          <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
+        </div>
+        <div class="row">
+          <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+          <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
+        </div>
+        <!-- カスタムタグ付与 (選択中クライアントが入室タグを持つ = observer の時のみ表示) -->
+        <div class="row" id="m-avatar-tags-row" style="display:none; flex-wrap:wrap; gap:6px; margin-top:6px; border-top:1px dashed #334; padding-top:6px;">
+          <span style="font-size:10px; opacity:0.7; align-self:center; margin-right:4px;">タグ付与:</span>
+          <button class="m-tag-toggle" data-tag="hole_test">hole_test</button>
+        </div>
+      </div>
+    </details>
   </div>
 
   <div class="m-section">
-    <div class="hint" style="color:#67e8f9;">FogExp2 密度 (0 = 無し / 0.06 = ゆるめ / 0.12 = 中 / 0.3 = 濃密)</div>
-    <div class="row">
-      <label>D</label>
-      <input type="number" id="m-fog-density" value="0.3" step="0.01" min="0" max="1" style="width:80px;">
-      <button id="m-fog-apply" style="background: #06b6d4; color: #083344">適用</button>
-    </div>
-    <div class="hint" style="font-size:10px; opacity:0.7;">
-      現在: <span id="m-fog-current">0.3</span> — 全クライアントに配信
-    </div>
+    <details>
+      <summary>オフアクシス投影</summary>
+      <div class="m-body">
+        <div class="hint">選択中クライアントの off-axis 切替</div>
+        <div class="row">
+          <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
+          <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>共通視点 (viewerEye)</summary>
+      <div class="m-body">
+        <div class="row">
+          <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
+          <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
+          <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
+        </div>
+        <div class="row">
+          <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>オブジェクト移動感度</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">px / 1m — 小=敏感、大=鈍感</div>
+        <div class="row">
+          <label>S</label>
+          <input type="number" id="m-move-sens" value="60" step="5" min="5" max="500" style="width:80px;">
+          <button id="m-move-sens-apply" style="background: #06b6d4; color: #083344">適用</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-move-sens-current">60</span> px/m — 全クライアントに配信
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>FogExp2 密度</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">0 = 無し / 0.06 = ゆるめ / 0.12 = 中 / 0.3 = 濃密</div>
+        <div class="row">
+          <label>D</label>
+          <input type="number" id="m-fog-density" value="0.3" step="0.01" min="0" max="1" style="width:80px;">
+          <button id="m-fog-apply" style="background: #06b6d4; color: #083344">適用</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-fog-current">0.3</span> — 全クライアントに配信
+        </div>
+      </div>
+    </details>
   </div>
 </div>
 
@@ -333,10 +387,20 @@
   <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
     <label>Off-Axis</label>
     <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+    <label style="margin-left:12px;">Canvas同期</label>
+    <button id="obs-canvasync-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+  </div>
+  <div class="row" style="margin-top: 6px;">
+    <label>FOV(°)</label>
+    <input type="number" id="obs-fov" value="60" step="1" min="10" max="170" style="width:70px;">
+    <span style="opacity:0.6; font-size:10px; align-self:center; margin-left:6px;">
+      Enter で適応 → apex 位置 (base 距離) 変更
+    </span>
   </div>
   <div class="hint" style="font-size:10px; opacity:0.7;">
     Off-Axis の display 姿勢は上の Y/P/R (カメラ姿勢) × 180°Y flip で自動決定<br>
-    viewerEye が真上 (0,2,0) の時は Y=0, P=90, R=0 → 移動 で成立
+    viewerEye が真上 (0,2,0) の時は Y=0, P=90, R=0 → 移動 で成立<br>
+    Canvas 同期 ON: window resize / DPR 変化のたびに base/box を canvas 物理サイズに追従
   </div>
   <!-- ディスプレイ実寸 (推定結果表示、直接編集も可) -->
   <div class="row obs-display-pc-only">

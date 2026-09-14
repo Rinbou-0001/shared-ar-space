@@ -105,10 +105,20 @@
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.getElementById('stage').appendChild(renderer.domElement);
 
-    window.addEventListener('resize', () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
+    // canvas レイアウト: canvas は常に window 全体を占有 (letterbox しない)。
+    //   同期 ON/OFF はカメラ視野内で「self の視錐台 base 面が canvas をちょうど埋める」
+    //   ように、self avatar 側の base 距離 (depth) を動的計算することで実現する。
+    //   → 視野やアスペクトは変えず、base=canvas viewport の見え方だけを変える。
+    function applyCanvasLayout() {
+      const winW = window.innerWidth;
+      const winH = window.innerHeight;
+      camera.aspect = winW / winH;
       camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setSize(winW, winH);
+    }
+
+    window.addEventListener('resize', () => {
+      applyCanvasLayout();
     });
 
     // ライト (床は白でフラットに見せるため、環境光を強めに)
@@ -243,10 +253,12 @@
     //     ・他ロール (camera / master) は従来の色付き球体 (直径 15cm)
     //     ・視錐台は color で塗り、fog: false で遠くでも見える
     const FRUSTUM_DEPTH = 0.5;   // apex → base までの奥行 (m) — 描画領域を仮想スクリーンと見立てた距離
-    function makeAvatarFrustum(color, W, H) {
+    // self 用 base 距離 override (canvas 同期 ON 時に動的更新): null = デフォルト 0.5m
+    let SELF_FRUSTUM_DEPTH = null;
+    function makeAvatarFrustum(color, W, H, depthOverride) {
       const c = new THREE.Color(color || '#fbbf24');
       const hw = W * 0.5, hh = H * 0.5;
-      const d  = FRUSTUM_DEPTH;
+      const d  = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
       // ローカル座標系: apex=(0,0,0)、camera forward = -Z、base 4 隅 at Z=-d
       const bl = [-hw, -hh, -d];
       const br = [+hw, -hh, -d];
@@ -275,10 +287,11 @@
     //   ・後壁 + 上下左右壁 = 実体オブジェクト (白 MeshBasicMaterial、DoubleSide、不透明)
     //   ・全内面に 3cm × 3cm の格子 LineSegments を貼付 (壁より僅かに内側にオフセット)
     //   ・12 稜線 (別壁との接辺) に border LineSegments (黒)
-    function makeAvatarBox(color, W, H) {
+    function makeAvatarBox(color, W, H, depthOverride) {
       const grp = new THREE.Group();
       grp.name = 'avatar-box';
       const D = W / 2;
+      const frontDist = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
       const CELL = 0.03;   // 3cm 格子
 
       // 壁: 白の不透明面 (両面描画 = 内外どちらから見ても白い実体)
@@ -330,8 +343,8 @@
         grp.add(g);
       }
 
-      const zBack = -FRUSTUM_DEPTH - D;
-      const zMid  = -FRUSTUM_DEPTH - D * 0.5;
+      const zBack = -frontDist - D;
+      const zMid  = -frontDist - D * 0.5;
 
       // 5 面 (前壁を除く)。すべて「ローカル +Z が box 内側」になるよう rotation を選択:
       //   ・後壁: rot=(0,0,0)      → +Z 内側 = +Z 世界 (=apex 側)
@@ -362,8 +375,9 @@
     //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
-    function makeObserverFrustumMeshes(color, W, H, id) {
-      const frustumLines = makeAvatarFrustum(color, W, H);
+    function makeObserverFrustumMeshes(color, W, H, id, depthOverride) {
+      const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
+      const frustumLines = makeAvatarFrustum(color, W, H, d);
 
       // apex hit (raycast 用透明立方体)
       const apexHit = new THREE.Mesh(
@@ -388,7 +402,7 @@
         new THREE.PlaneGeometry(W, H),
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide })
       );
-      baseHit.position.set(0, 0, -FRUSTUM_DEPTH);
+      baseHit.position.set(0, 0, -d);
       baseHit.name = 'avatar-base-hit';
       baseHit.userData.selectType = 'base';
       baseHit.userData.avatarId = id;
@@ -401,7 +415,7 @@
       baseEdges.visible = false;
       baseHit.add(baseEdges);
 
-      const box = makeAvatarBox(color, W, H);
+      const box = makeAvatarBox(color, W, H, d);
       return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
     }
 
@@ -412,7 +426,8 @@
     function makeAvatar(id, color, role, display) {
       const grp = new THREE.Group();
       grp.userData.__avatarId = id;
-      const av = { grp, color: color || '#ffffff', role: role || 'camera' };
+      // entryTag: 入室順 (#1,#2,...) — server が付与。customTags: master が付与。
+      const av = { grp, color: color || '#ffffff', role: role || 'camera', entryTag: null, customTags: [] };
       if (role === 'observer') {
         const dW = (display && typeof display.width  === 'number' && display.width  > 0)
           ? display.width  : (myDisplay.width  || 0.3);
@@ -485,7 +500,8 @@
     }
 
     // 既存 avatar の frustum + hit mesh を作り直し (displayConfig で size 変化時)
-    function rebuildAvatarFrustum(id, display) {
+    //   depthOverride: self avatar (canvas 同期 ON) の base 距離を上書きするために渡す
+    function rebuildAvatarFrustum(id, display, depthOverride) {
       const a = avatars.get(id);
       if (!a) { log('rebuild frustum: avatar ' + id.substring(0,6) + ' 未生成、スキップ', 'err'); return; }
       if (a.role !== 'observer') return;
@@ -494,7 +510,7 @@
       const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
       _removeAvatarSelectables(a);
       _disposeAvatarSubMeshes(a);
-      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id);
+      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride);
       a.frustumLines = parts.frustumLines;
       a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
@@ -506,7 +522,8 @@
       a.grp.add(parts.box);
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
-      log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm', 'ok');
+      const dTag = (typeof depthOverride === 'number' && depthOverride > 0) ? (' D=' + depthOverride.toFixed(3) + 'm') : '';
+      log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm' + dTag, 'ok');
     }
     function ensureAvatar(id, color, role, display) {
       let a = avatars.get(id);
@@ -527,6 +544,58 @@
     const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
     // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
     let _displaySizeManuallyEdited = false;
+
+    // 視錐台 base + box に使う "実効表示サイズ" (canvas 物理サイズ)。
+    //   ・入室時 と フルスクリーン切替 (fullscreenchange) 時にのみ再計算
+    //   ・他のイベント (対角+解像度入力、W/H 手入力) では変わらない
+    //   ・計算: canvas_css × (myDisplay / screen_css) = canvas 物理サイズ (m)
+    let effectiveDisplaySize = { width: 0.30, height: 0.20 };
+    // canvas 同期モード: ON なら resize/DPR 変化のたびに base/box を再計算 (フルスクリーン、
+    // ウィンドウリサイズ、モニタ移動を追跡)。OFF なら init + fullscreenchange の 2 タイミングのみ。
+    let canvasSyncEnabled = false;
+    function computeEffectiveDisplaySize() {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const sw = screen.width  || rect.width  || 1;
+      const sh = screen.height || rect.height || 1;
+      const w = (rect.width  / sw) * (myDisplay.width  || 0.3);
+      const h = (rect.height / sh) * (myDisplay.height || 0.2);
+      return { width: w, height: h };
+    }
+    // canvas 同期 ON 時の self base 距離:
+    //   base H が canvas viewport (vfov, aspect) をちょうど埋める距離 d を計算する。
+    //   計算: d = H / (2 tan(vfov/2))   (垂直 FOV から)
+    //   ※ 水平 FOV から d = W / (2 tan(hfov/2)) でも同じ (canvas aspect = base aspect の時)
+    //   ※ 実装は「小さい方の d」= min(H/2tan(vfov/2), W/2tan(hfov/2)) を採用し、
+    //      canvas と base のアスペクトにズレがあっても base 全体が確実に viewport 内に収まる。
+    function computeSelfSyncDepth() {
+      const vfov = (camera.fov || 60) * Math.PI / 180;
+      const asp  = camera.aspect || (window.innerWidth / window.innerHeight);
+      const hfov = 2 * Math.atan(Math.tan(vfov / 2) * asp);
+      const H = effectiveDisplaySize.height || 0.2;
+      const W = effectiveDisplaySize.width  || 0.3;
+      const dV = H / (2 * Math.tan(vfov / 2));
+      const dH = W / (2 * Math.tan(hfov / 2));
+      return Math.max(0.02, Math.min(dV, dH));
+    }
+    // 実効サイズを再計算 → 保存 → self avatar 再構築 → server に emit
+    //   canvas 同期 ON 時は base 距離を canvas viewport ぴったりに合わせる
+    function computeAndApplyEffectiveSize(tag) {
+      effectiveDisplaySize = computeEffectiveDisplaySize();
+      // 同期 ON なら base 距離を canvas 完全埋めに調整、OFF なら null (デフォルト 0.5m)
+      SELF_FRUSTUM_DEPTH = canvasSyncEnabled ? computeSelfSyncDepth() : null;
+      log('effective size ' + (tag || '') + ': canvas=' +
+          Math.round(renderer.domElement.getBoundingClientRect().width) + '×' +
+          Math.round(renderer.domElement.getBoundingClientRect().height) + 'px' +
+          ' → ' + effectiveDisplaySize.width.toFixed(3) + '×' + effectiveDisplaySize.height.toFixed(3) + 'm' +
+          (SELF_FRUSTUM_DEPTH ? ' D=' + SELF_FRUSTUM_DEPTH.toFixed(3) + 'm (sync)' : ' D=0.5m (default)'), 'ok');
+      if (myId) rebuildAvatarFrustum(myId, effectiveDisplaySize, SELF_FRUSTUM_DEPTH);
+      if (socket && socket.connected) {
+        socket.emit('displaySize', {
+          width: effectiveDisplaySize.width,
+          height: effectiveDisplaySize.height,
+        });
+      }
+    }
 
     // ============================================================
     // 物理ディスプレイサイズ推定
@@ -663,11 +732,7 @@
           const hinp = document.getElementById('obs-display-h');
           if (winp && document.activeElement !== winp) winp.value = est.width.toFixed(3);
           if (hinp && document.activeElement !== hinp) hinp.value = est.height.toFixed(3);
-          if (socket && socket.connected) {
-            socket.emit('displaySize', { width: myDisplay.width, height: myDisplay.height });
-          }
-          // self avatar frustum も更新 (自視点表示テスト用)
-          if (myId) rebuildAvatarFrustum(myId, myDisplay);
+          // ※ space3: emit / avatar rebuild はここでは行わない (入室時とフルスクリーン時のみ)
         }
       } catch (e) {
         log('display detect err: ' + e.message, 'err');
@@ -707,25 +772,32 @@
           const a = ensureAvatar(id, u.color, u.role, u.display);
           a.grp.position.set(u.x, u.y, u.z);
           a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
+          if (u.entryTag)   a.entryTag   = u.entryTag;
+          if (u.customTags) a.customTags = u.customTags.slice();
         }
         // ★ テスト: 自分自身のプレビュー avatar も生成 (option A)
-        //   myDisplay がまだ default 値だが、直後の refreshMyDisplaySize → rebuildAvatarFrustum で
-        //   正確値に置き換わる。tick 内で毎フレーム grp = camera pose に追従。
-        ensureAvatar(myId, state.myColor, ROLE, myDisplay);
+        //   myDisplay がまだ default 値だが、直後の refreshMyDisplaySize →
+        //   computeAndApplyEffectiveSize('init') で正確な canvas 物理サイズに置き換わる。
+        //   tick 内で毎フレーム grp = camera pose に追従。
+        ensureAvatar(myId, state.myColor, ROLE, effectiveDisplaySize);
         log('self preview avatar: ' + myId.substring(0,6) + ' (テスト: 自視点で自身表示)', 'ok');
 
         rebuildClientSelect();
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
+        // canvas 物理サイズ = base/box の実効サイズ を確定して self avatar 再構築 + emit
+        computeAndApplyEffectiveSize('init');
       });
 
       socket.on('join', (u) => {
         const a = ensureAvatar(u.id, u.color, u.role, u.display);
         a.grp.position.set(u.x, u.y, u.z);
         a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
+        if (u.entryTag)   a.entryTag   = u.entryTag;
+        if (u.customTags) a.customTags = u.customTags.slice();
         rebuildClientSelect();
-        log('join: ' + u.id.substring(0, 6) +
+        log('join: ' + (u.entryTag ? u.entryTag + ' ' : '') + u.id.substring(0, 6) +
             (u.display ? ' display=' + u.display.width.toFixed(3) + '×' + u.display.height.toFixed(3) + 'm' : ''),
             'ok');
       });
@@ -736,6 +808,27 @@
         a.grp.position.set(u.x, u.y, u.z);
         a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         if (u.role) a.role = u.role;
+        // observer に遷移した瞬間 server が entryTag を配信するので反映
+        if (u.entryTag && a.entryTag !== u.entryTag) {
+          a.entryTag = u.entryTag;
+          rebuildClientSelect();
+          log('entry tag: ' + a.entryTag + ' ← ' + u.id.substring(0,6), 'ok');
+        }
+      });
+
+      // カスタムタグ (hole_test 等) の付与/解除を全クライアントで反映
+      socket.on('avatarTag', (data) => {
+        if (!data || typeof data.id !== 'string') return;
+        const a = avatars.get(data.id);
+        if (a) {
+          a.customTags = Array.isArray(data.tags) ? data.tags.slice() : [];
+        }
+        rebuildClientSelect();
+        // master: 選択中クライアントなら tag ボタンの表示を更新
+        if (ROLE === 'master' && data.id === selectedClientId && window.__syncMasterTagButtons) {
+          window.__syncMasterTagButtons();
+        }
+        log('avatarTag: ' + data.id.substring(0,6) + ' ' + data.tag + ' = ' + (data.on ? 'ON' : 'OFF'), 'ok');
       });
 
       socket.on('leave', (u) => {
@@ -1271,16 +1364,112 @@
         }
         log('observer offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
       });
+
+      // ========== Canvas 同期 トグル ==========
+      //   ON  : window resize / DPR 変化のたびに base/box を canvas 物理サイズに追従
+      //   OFF : init と fullscreenchange のみで rebuild (デフォルト)
+      const obsCsBtn = _by('obs-canvasync-toggle');
+      function syncObsCsBtn() {
+        if (!obsCsBtn) return;
+        obsCsBtn.textContent = canvasSyncEnabled ? 'ON' : 'OFF';
+        obsCsBtn.style.background = canvasSyncEnabled ? '#22c55e' : '#475569';
+        obsCsBtn.style.color = canvasSyncEnabled ? '#052e16' : 'white';
+      }
+      syncObsCsBtn();
+      // resize イベント → デバウンス → sync ON なら effective 再計算 + rebuild
+      let _csResizeTimer = null;
+      let _csLastDpr = window.devicePixelRatio || 1;
+      function _canvasSyncOnResize() {
+        if (!canvasSyncEnabled) return;
+        if (_csResizeTimer) clearTimeout(_csResizeTimer);
+        _csResizeTimer = setTimeout(() => {
+          _csResizeTimer = null;
+          applyCanvasLayout();
+          computeAndApplyEffectiveSize('resize sync');
+        }, 120);
+      }
+      window.addEventListener('resize', _canvasSyncOnResize);
+      // DPR 変化 (モニタ間ドラッグ, ズーム) → matchMedia で監視
+      function _watchDpr() {
+        const mq = matchMedia('(resolution: ' + _csLastDpr + 'dppx)');
+        const onChange = () => {
+          _csLastDpr = window.devicePixelRatio || 1;
+          _canvasSyncOnResize();
+          _watchDpr(); // 新しい DPR で再監視
+        };
+        if (mq.addEventListener) mq.addEventListener('change', onChange, { once: true });
+        else mq.addListener(onChange);
+      }
+      try { _watchDpr(); } catch (_) {}
+
+      _bind('obs-canvasync-toggle', 'click', () => {
+        canvasSyncEnabled = !canvasSyncEnabled;
+        syncObsCsBtn();
+        log('canvas 同期 → ' + (canvasSyncEnabled ? 'ON (myDisplay aspect に letterbox)' : 'OFF (window 全体)'), 'ok');
+        // canvas レイアウトを即時切替 (letterbox ↔ full window)
+        applyCanvasLayout();
+        // 実効サイズ再計算 + self avatar base/box 再構築
+        computeAndApplyEffectiveSize('sync toggle ' + (canvasSyncEnabled ? 'ON' : 'OFF'));
+      });
+
+      // ========== FOV 入力 (Enter で適応) ==========
+      //   camera.fov (vertical) を書き換え + apex-base 距離 d = H / (2 tan(fov/2)) を再計算。
+      //   base サイズは effectiveDisplaySize (m) のまま → FOV に応じて apex が近づく/遠ざかる。
+      //   他の observer 入力欄と同じく: input で dirty、Enter で apply + blur、
+      //   tick で camera.fov を入力欄に反映 (dirty/focus 中は上書きしない)。
+      let _obsFovDirty = false;
+      const _obsFovInput = _by('obs-fov');
+      if (_obsFovInput) _obsFovInput.value = String(Math.round(camera.fov));
+
+      function applyObsFov() {
+        const el = _by('obs-fov');
+        if (!el) return;
+        const v = parseFloat(el.value);
+        if (!isFinite(v) || v < 10 || v > 170) {
+          log('FOV 不正 (10 〜 170°)', 'err');
+          return;
+        }
+        camera.fov = v;
+        camera.updateProjectionMatrix();
+        // apex-base 距離 d を FOV から算出 (垂直/水平の小さい方 = base 全体が viewport 内に収まる距離)
+        const vfov = v * Math.PI / 180;
+        const asp  = camera.aspect || (window.innerWidth / window.innerHeight);
+        const hfov = 2 * Math.atan(Math.tan(vfov / 2) * asp);
+        const H = (effectiveDisplaySize && effectiveDisplaySize.height) || 0.2;
+        const W = (effectiveDisplaySize && effectiveDisplaySize.width)  || 0.3;
+        const dV = H / (2 * Math.tan(vfov / 2));
+        const dH = W / (2 * Math.tan(hfov / 2));
+        const d = Math.max(0.02, Math.min(dV, dH));
+        SELF_FRUSTUM_DEPTH = d;
+        if (myId) rebuildAvatarFrustum(myId, effectiveDisplaySize, d);
+        log('FOV → ' + v.toFixed(0) + '° / apex-base = ' + d.toFixed(3) + 'm', 'ok');
+      }
+      _bind('obs-fov', 'input',   () => { _obsFovDirty = true; });
+      _bind('obs-fov', 'change',  () => { applyObsFov(); _obsFovDirty = false; });
+      _bind('obs-fov', 'keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          applyObsFov();
+          _obsFovDirty = false;
+          if (e.target && e.target.blur) e.target.blur();
+        }
+      });
+      // tick からも呼ばれる: camera.fov → 入力欄 (dirty/focus 中は上書きしない)
+      window.__obsSyncFovInput = function() {
+        if (!_obsFovInput) return;
+        if (_obsFovDirty) return;
+        if (document.activeElement === _obsFovInput) return;
+        _obsFovInput.value = Math.round(camera.fov).toString();
+      };
       // 表示サイズ入力: ユーザーが手入力したら自動再取得を停止 (手動優先)
       function pushDisplaySize() {
         const w = parseFloat((_by('obs-display-w') || {}).value) || 0.3;
         const h = parseFloat((_by('obs-display-h') || {}).value) || 0.2;
         myDisplay.width = w; myDisplay.height = h;
         _displaySizeManuallyEdited = true;
-        if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
-        // self avatar 再構築 (option A 自視点表示テスト)
-        if (myId) rebuildAvatarFrustum(myId, myDisplay);
-        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (以降 自動値で上書きしない)', 'ok');
+        // ※ space3: myDisplay の更新のみ。avatar rebuild / emit は行わない
+        //   (base/box サイズ変更は入室時と fullscreen 時のみ)
+        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (myDisplay 更新、avatar は据置)', 'ok');
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
@@ -1321,13 +1510,10 @@
         const hinp = _by('obs-display-h');
         if (winp) winp.value = wm.toFixed(4);
         if (hinp) hinp.value = hm.toFixed(4);
-        if (socket && socket.connected) {
-          socket.emit('displaySize', { width: wm, height: hm });
-        }
-        // self avatar 再構築 (option A 自視点表示テスト)
-        if (myId) rebuildAvatarFrustum(myId, myDisplay);
+        // ※ space3: myDisplay の更新のみ。avatar rebuild / emit は行わない
+        //   (base/box サイズ変更は入室時と fullscreen 時のみ)
         log('display 再計算: diag=' + inch.toFixed(1) + '" res=' + rw + '×' + rh +
-            ' → PPI=' + ppi.toFixed(1) + ' → ' + wm.toFixed(4) + '×' + hm.toFixed(4) + 'm', 'ok');
+            ' → PPI=' + ppi.toFixed(1) + ' → ' + wm.toFixed(4) + '×' + hm.toFixed(4) + 'm (myDisplay 更新、avatar は据置)', 'ok');
       }
       _bind('obs-display-calc', 'click', applyDiagResCalc);
       // Enter で発火 (どのフィールドからも)
@@ -1379,8 +1565,11 @@
       }
       // updater として毎フレーム呼ぶ
       updaters.push(() => _obsSyncInputsFromCamera());
+      // FOV 入力欄も毎フレーム camera.fov に同期 (dirty/focus 中は上書きしない)
+      updaters.push(() => { if (window.__obsSyncFovInput) window.__obsSyncFovInput(); });
       // 起動直後にも一度反映
       _obsSyncInputsFromCamera();
+      if (window.__obsSyncFovInput) window.__obsSyncFovInput();
 
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
@@ -1399,11 +1588,26 @@
       document.addEventListener('fullscreenchange', () => {
         const active = !!document.fullscreenElement;
         document.body.classList.toggle('fs-mode', active);
-        // canvas サイズ再計算
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
+        // canvas レイアウト再適用 (letterbox / 全体) + サイズ確定
+        applyCanvasLayout();
         log('fullscreen ' + (active ? 'ON' : 'OFF'), 'ok');
+        // canvas 物理サイズが変化 → 実効サイズを再計算 → self avatar 再構築 + emit
+        //   ※ fullscreenchange は FS 遷移「開始時」にも発火することがあり、直後の
+        //      canvas サイズはまだ切替わっていないケースがある。
+        //   → 実際に canvas rect が安定するまで rAF ×2 + 250ms 待って rebuild。
+        //      更にサイズが後から動く場合に備え、複数回チェックして変化があれば追加 rebuild。
+        const tag = 'fullscreen ' + (active ? 'ON' : 'OFF');
+        let lastW = 0, lastH = 0, attempts = 0;
+        const settle = () => {
+          const r = renderer.domElement.getBoundingClientRect();
+          if (Math.abs(r.width - lastW) > 0.5 || Math.abs(r.height - lastH) > 0.5) {
+            lastW = r.width; lastH = r.height;
+            computeAndApplyEffectiveSize(tag + ' settle#' + attempts);
+          }
+          attempts++;
+          if (attempts < 5) setTimeout(settle, 120);
+        };
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(settle, 50)));
       });
       // F キーでもフルスクリーン切替 (旧 /test/space 準拠)
       window.addEventListener('keydown', (e) => {
@@ -1466,7 +1670,46 @@
       _bind('m-client-select', 'change', () => {
         selectedClientId = selEl ? selEl.value : '';
         readCurrentToInputs();
+        if (window.__syncMasterTagButtons) window.__syncMasterTagButtons();
       });
+
+      // ========== カスタムタグ付与 (hole_test 等) ==========
+      //   ・選択中クライアントに entryTag がある (= observer) 時のみ行を表示
+      //   ・ボタンクリックで avatarTag emit (server 経由で全クライアント反映)
+      //   ・ボタン状態は選択中クライアントの customTags を反映
+      const _tagRow = _by('m-avatar-tags-row');
+      const _tagBtns = _tagRow ? Array.from(_tagRow.querySelectorAll('.m-tag-toggle')) : [];
+      window.__syncMasterTagButtons = function() {
+        if (!_tagRow) return;
+        const a = selectedClientId ? avatars.get(selectedClientId) : null;
+        const hasEntry = !!(a && a.entryTag);
+        _tagRow.style.display = hasEntry ? 'flex' : 'none';
+        if (!hasEntry) return;
+        const cur = (a.customTags || []);
+        _tagBtns.forEach((btn) => {
+          const tag = btn.getAttribute('data-tag');
+          const on  = cur.indexOf(tag) >= 0;
+          btn.classList.toggle('on', on);
+          btn.textContent = tag + (on ? ' ✓' : '');
+        });
+      };
+      // クリックで tag ON/OFF を送信
+      _tagBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (!selectedClientId) { log('未選択', 'err'); return; }
+          const a = avatars.get(selectedClientId);
+          if (!a || !a.entryTag) { log('entry tag 無しには付与不可', 'err'); return; }
+          const tag = btn.getAttribute('data-tag');
+          const cur = a.customTags || [];
+          const nextOn = (cur.indexOf(tag) < 0);
+          if (socket && socket.connected) {
+            socket.emit('avatarTag', { targetId: selectedClientId, tag, on: nextOn });
+          }
+          log('avatarTag → ' + a.entryTag + ' ' + tag + ' = ' + (nextOn ? 'ON' : 'OFF'), 'ok');
+        });
+      });
+      // 起動時にも 1 度呼んで初期非表示に
+      if (window.__syncMasterTagButtons) window.__syncMasterTagButtons();
 
       // 適用 (強制ポーズ)
       function applyForcePose() {
@@ -1591,13 +1834,28 @@
       if (!sel) return;
       const prev = sel.value;
       sel.innerHTML = '<option value="">-- 未選択 --</option>';
-      avatars.forEach((a, id) => {
+      // 並び順: entryTag 番号昇順 → 無タグ (role 別)
+      const list = Array.from(avatars.entries());
+      list.sort((A, B) => {
+        const na = (A[1].entryTag || '').replace('#', '');
+        const nb = (B[1].entryTag || '').replace('#', '');
+        const ia = na ? parseInt(na, 10) : Infinity;
+        const ib = nb ? parseInt(nb, 10) : Infinity;
+        if (ia !== ib) return ia - ib;
+        return A[0].localeCompare(B[0]);
+      });
+      list.forEach(([id, a]) => {
         const opt = document.createElement('option');
         opt.value = id;
-        opt.textContent = (a.role || '?').substring(0, 3) + ' ' + id.substring(0, 6);
+        const tag  = a.entryTag ? a.entryTag + ' ' : '';
+        const role = (a.role || '?').substring(0, 3);
+        const cust = (a.customTags && a.customTags.length) ? ' [' + a.customTags.join(',') + ']' : '';
+        opt.textContent = tag + role + ' ' + id.substring(0, 6) + cust;
         sel.appendChild(opt);
       });
       if (prev && avatars.has(prev)) sel.value = prev;
+      // 選択済み client の tag ボタン UI も再同期
+      if (window.__syncMasterTagButtons) window.__syncMasterTagButtons();
     }
 
     // ========== UI 表示切替 ==========

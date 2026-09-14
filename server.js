@@ -51,6 +51,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 const users = new Map();
 function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60%)`; }
 
+// 入室した observer に順番タグ (#1, #2, #3, ...) を付与する counter。
+//   ・observer ロールに初めて遷移したタイミングで割当。
+//   ・切断しても番号は再利用しない (常にインクリメント)。
+let observerCounter = 0;
+// 付与可能なカスタムタグの一覧 (master が付け外し可能)
+const ALLOWED_CUSTOM_TAGS = new Set(['hole_test']);
+
 // 壁を這う球体 (全クライアント共有)
 // s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
 // y: 高さ (m)
@@ -120,6 +127,10 @@ io.on('connection', (socket) => {
       roll: 0,     // 度
       offaxis: false,
     },
+    // 入室順タグ (observer ロールへの遷移時に割当、以後不変)。null = 未割当。
+    entryTag: null,
+    // master が付与するカスタムタグ (ALLOWED_CUSTOM_TAGS のみ)
+    customTags: [],
   };
   users.set(socket.id, me);
   console.log(`[+] ${socket.id} (total=${users.size})`);
@@ -169,16 +180,24 @@ io.on('connection', (socket) => {
     if (typeof pose.qw === 'number') u.qw = pose.qw;
     u.hasPose = true;
 
+    // observer に遷移した時点で 1 度だけ entryTag を割り当てる (#1, #2, ...)
+    if (u.role === 'observer' && !u.entryTag) {
+      observerCounter++;
+      u.entryTag = '#' + observerCounter;
+    }
+
     if (wasFirst) {
       socket.broadcast.emit('join', {
         id: socket.id, color: u.color, role: u.role, lightOn: u.lightOn,
         display: u.display,
+        entryTag: u.entryTag, customTags: u.customTags,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
     } else {
       socket.broadcast.emit('pose', {
         id: socket.id, role: u.role,
+        entryTag: u.entryTag,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
@@ -350,6 +369,27 @@ io.on('connection', (socket) => {
       id: data.targetId,
       x: target.x, y: target.y, z: target.z,
       qx: target.qx, qy: target.qy, qz: target.qz, qw: target.qw,
+    });
+  });
+
+  // Master からのカスタムタグ付け外し (ALLOWED_CUSTOM_TAGS のみ受付)
+  //   data: { targetId, tag: 'hole_test', on: true/false }
+  //   結果は全クライアントに 'avatarTag' で配信 (各クライアントは自身の avatar 記録を更新)
+  socket.on('avatarTag', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.targetId !== 'string' || typeof data.tag !== 'string') return;
+    if (!ALLOWED_CUSTOM_TAGS.has(data.tag)) return;
+    const target = users.get(data.targetId);
+    if (!target) return;
+    target.customTags = target.customTags || [];
+    const on = !!data.on;
+    const idx = target.customTags.indexOf(data.tag);
+    if (on && idx < 0) target.customTags.push(data.tag);
+    if (!on && idx >= 0) target.customTags.splice(idx, 1);
+    io.emit('avatarTag', {
+      id: data.targetId, tag: data.tag, on,
+      tags: target.customTags.slice(),
     });
   });
 
