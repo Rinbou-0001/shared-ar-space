@@ -269,9 +269,72 @@
     }
     const APEX_CUBE_SIZE = 0.01;   // 1cm 立方体 = apex 選択判定域
 
-    // observer avatar の全構成要素を作る: frustum ワイヤ + apex/base hit mesh + 各 highlight edges
+    // observer avatar の box 生成 (視錐台底面を「手前壁」として、そこから -Z 方向に W/2 の奥行き)
+    //   ・dimensions: W (幅) × H (高さ) × D (奥行) = W × H × (W/2)
+    //   ・前壁 (z = -FRUSTUM_DEPTH、apex 側)  = 視錐台底面と重複 → 描画スキップ (透過)
+    //   ・後壁 (z = -FRUSTUM_DEPTH - D)、上下左右壁 = 半透明 plane + wireframe edges
+    //   ・観測者アバターと同じ color で塗る (fog: false で常時可視)
+    function makeAvatarBox(color, W, H) {
+      const grp = new THREE.Group();
+      grp.name = 'avatar-box';
+      const D = W / 2;
+      const c = new THREE.Color(color || '#fbbf24');
+      const visMat = new THREE.MeshBasicMaterial({
+        color: c,
+        transparent: true, opacity: 0.15,
+        side: THREE.DoubleSide,
+        fog: false,
+        depthWrite: false,
+      });
+      const zFront = -FRUSTUM_DEPTH;         // 前壁 = 視錐台底面 (skip)
+      const zBack  = -FRUSTUM_DEPTH - D;     // 後壁
+      const zMid   = -FRUSTUM_DEPTH - D * 0.5;
+      // 後壁 (面法線 +Z、apex 側に向く)
+      const back = new THREE.Mesh(new THREE.PlaneGeometry(W, H), visMat);
+      back.position.set(0, 0, zBack);
+      grp.add(back);
+      // 上壁 (y = +H/2、面法線 -Y)
+      const top = new THREE.Mesh(new THREE.PlaneGeometry(W, D), visMat);
+      top.position.set(0, +H * 0.5, zMid);
+      top.rotation.x = Math.PI * 0.5;
+      grp.add(top);
+      // 下壁 (y = -H/2、面法線 +Y)
+      const bot = new THREE.Mesh(new THREE.PlaneGeometry(W, D), visMat);
+      bot.position.set(0, -H * 0.5, zMid);
+      bot.rotation.x = -Math.PI * 0.5;
+      grp.add(bot);
+      // 左壁 (x = -W/2、面法線 +X)
+      const left = new THREE.Mesh(new THREE.PlaneGeometry(D, H), visMat);
+      left.position.set(-W * 0.5, 0, zMid);
+      left.rotation.y = Math.PI * 0.5;
+      grp.add(left);
+      // 右壁 (x = +W/2、面法線 -X)
+      const right = new THREE.Mesh(new THREE.PlaneGeometry(D, H), visMat);
+      right.position.set(+W * 0.5, 0, zMid);
+      right.rotation.y = -Math.PI * 0.5;
+      grp.add(right);
+      // 前壁 (zFront) は視錐台底面と重複するため描画しない (透過)
+      //   ※ raycast も走らないので選択に干渉なし
+
+      // 12 稜線 (box 外形) を wireframe で追加 — box の輪郭を見えやすく
+      //   前壁の 4 稜線は視錐台 base 矩形 (frustumLines 内) と重複するので、
+      //   別 material でうっすら重ね描き (完全消しにするには line ごとに個別生成が必要)
+      const edgeGeom = new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, D));
+      const edgeMat  = new THREE.LineBasicMaterial({
+        color: c, transparent: true, opacity: 0.55, fog: false,
+      });
+      const edges = new THREE.LineSegments(edgeGeom, edgeMat);
+      edges.position.set(0, 0, zMid);
+      grp.add(edges);
+
+      grp.userData.__boxDims = { W, H, D };
+      return grp;
+    }
+
+    // observer avatar の全構成要素を作る: frustum ワイヤ + apex/base hit mesh + 各 highlight edges + box
     //   ・apex hit: 1cm 立方体、透明 (raycast 用)、子に橙 edges を持ち選択時のみ visible
     //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
+    //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
     function makeObserverFrustumMeshes(color, W, H, id) {
       const frustumLines = makeAvatarFrustum(color, W, H);
@@ -312,7 +375,8 @@
       baseEdges.visible = false;
       baseHit.add(baseEdges);
 
-      return { frustumLines, apexHit, apexEdges, baseHit, baseEdges };
+      const box = makeAvatarBox(color, W, H);
+      return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
     }
 
     const avatars = new Map();
@@ -332,10 +396,12 @@
         av.frustumLines = parts.frustumLines;
         av.apexHit  = parts.apexHit;  av.apexEdges = parts.apexEdges;
         av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
+        av.box      = parts.box;
         av.mesh     = parts.frustumLines;   // 後方互換 (mesh フィールド)
         grp.add(parts.frustumLines);
         grp.add(parts.apexHit);
         grp.add(parts.baseHit);
+        grp.add(parts.box);
         // selectables 登録 (raycast 対象)
         selectables.push(parts.apexHit);
         selectables.push(parts.baseHit);
@@ -378,6 +444,18 @@
         }
         a[k] = null;
       });
+      // box は Group なので子孫を辿って dispose
+      if (a.box) {
+        if (a.box.parent) a.box.parent.remove(a.box);
+        a.box.traverse((n) => {
+          if (n.geometry) n.geometry.dispose();
+          if (n.material) {
+            if (Array.isArray(n.material)) n.material.forEach((mm) => mm.dispose());
+            else n.material.dispose();
+          }
+        });
+        a.box = null;
+      }
     }
 
     // 既存 avatar の frustum + hit mesh を作り直し (displayConfig で size 変化時)
@@ -394,10 +472,12 @@
       a.frustumLines = parts.frustumLines;
       a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
+      a.box     = parts.box;
       a.mesh    = parts.frustumLines;
       a.grp.add(parts.frustumLines);
       a.grp.add(parts.apexHit);
       a.grp.add(parts.baseHit);
+      a.grp.add(parts.box);
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
       log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm', 'ok');
