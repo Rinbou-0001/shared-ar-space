@@ -447,6 +447,20 @@ io.on('connection', (socket) => {
     io.emit('sceneObjectUpdated', { id: obj.id, config: obj.config });
   });
 
+  // Master がシーンオブジェクトの位置を更新 (WASD/QE 移動)
+  //   data: { id, x, y, z }
+  socket.on('sceneObjectPose', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.id !== 'string') return;
+    const obj = sceneObjects.get(data.id);
+    if (!obj) return;
+    if (typeof data.x === 'number' && isFinite(data.x)) obj.x = data.x;
+    if (typeof data.y === 'number' && isFinite(data.y)) obj.y = data.y;
+    if (typeof data.z === 'number' && isFinite(data.z)) obj.z = data.z;
+    io.emit('sceneObjectPose', { id: obj.id, x: obj.x, y: obj.y, z: obj.z });
+  });
+
   // Master がシーン全体の環境光強度を設定
   //   data: { intensity: 0-1 }
   socket.on('sceneAmbient', (data) => {

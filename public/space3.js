@@ -370,7 +370,11 @@
       const CELL = 0.03;   // 3cm 格子
 
       // 壁: 白の不透明面 (両面描画 = 内外どちらから見ても白い実体)
-      const wallMat = new THREE.MeshBasicMaterial({
+      //   MeshLambertMaterial に変更: 拡散光 (Ambient + Directional + 各 light 球) の
+      //   影響を受けるので、環境光スライダー / 光源球の intensity 変化に応じて明暗が変わる。
+      //   ・ambient=1.0 → ほぼ真っ白  ・ambient=0.0 → 真っ黒
+      //   ・DirectionalLight (10,20,10) により上壁と下壁で自然な明るさの違い (陰影) が付く
+      const wallMat = new THREE.MeshLambertMaterial({
         color: 0xffffff,
         side: THREE.DoubleSide,
         fog: false,
@@ -380,17 +384,42 @@
       const BORDER_COLOR = 0x111827;
 
       // 2D 格子生成 (原点中心 XY 平面、局所座標)
-      function makeGridLines(w, h, cell, colorHex) {
+      //   holeR > 0 の時は中心の半径 holeR 円内部を除外
+      //   ・垂直線 (x = const): |x| >= holeR → 全部描画
+      //                          |x| <  holeR → y ∈ [-√(r²-x²), +√(r²-x²)] を除外
+      //   ・水平線 (y = const): 同様
+      function makeGridLines(w, h, cell, colorHex, holeR) {
         const positions = [];
+        const HR = (holeR > 0) ? holeR : 0;
+        const HR2 = HR * HR;
+        function addSeg(x0, y0, x1, y1) {
+          positions.push(x0, y0, 0,  x1, y1, 0);
+        }
+        // 垂直線 (x = const, y から -h/2 ..+h/2)
         const nx = Math.max(1, Math.round(w / cell));
         for (let i = 0; i <= nx; i++) {
           const x = -w/2 + i * cell;
-          positions.push(x, -h/2, 0,  x, +h/2, 0);
+          if (HR > 0 && Math.abs(x) < HR) {
+            const yh = Math.sqrt(HR2 - x * x);
+            // 上 (+): +yh から +h/2
+            if (+yh < +h/2) addSeg(x, +yh, x, +h/2);
+            // 下 (-): -h/2 から -yh
+            if (-yh > -h/2) addSeg(x, -h/2, x, -yh);
+          } else {
+            addSeg(x, -h/2, x, +h/2);
+          }
         }
+        // 水平線 (y = const)
         const ny = Math.max(1, Math.round(h / cell));
         for (let j = 0; j <= ny; j++) {
           const y = -h/2 + j * cell;
-          positions.push(-w/2, y, 0,  +w/2, y, 0);
+          if (HR > 0 && Math.abs(y) < HR) {
+            const xh = Math.sqrt(HR2 - y * y);
+            if (+xh < +w/2) addSeg(+xh, y, +w/2, y);
+            if (-xh > -w/2) addSeg(-w/2, y, -xh, y);
+          } else {
+            addSeg(-w/2, y, +w/2, y);
+          }
         }
         const geom = new THREE.BufferGeometry();
         geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -431,7 +460,8 @@
         const wall = new THREE.Mesh(makeWallGeom(pw, ph, holeR), wallMat);
         g.add(wall);
         // 内面格子 (壁の +Z 方向 = 内側へ 0.5mm オフセット → z-fighting 回避)
-        const grid = makeGridLines(pw, ph, CELL, GRID_COLOR);
+        //   holeR > 0 の時は格子線も円内部で除外
+        const grid = makeGridLines(pw, ph, CELL, GRID_COLOR, holeR);
         grid.position.z = 0.0005;
         g.add(grid);
         // 穴の輪郭 (border color) を面の内側にも描いておく (視覚的な明示)
@@ -987,11 +1017,23 @@
         log('sceneObject created: ' + o.id + ' tags=[' + (o.tags||[]).join(',') + ']', 'ok');
         // master: 選択済なら intensity スライダーを反映
         if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+        rebuildClientSelect();
       });
       socket.on('sceneObjectUpdated', (data) => {
         if (!data || !data.id) return;
         updateSceneObjectConfig(data.id, data.config);
         if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
+      });
+      // シーンオブジェクトの位置更新 (master が WASD/QE で移動)
+      socket.on('sceneObjectPose', (data) => {
+        if (!data || !data.id) return;
+        const rec = sceneLightObjects.get(data.id);
+        if (!rec) return;
+        // ローカルで送信済みの位置は上書きしない ( _selfMovingObjId 中は skip )
+        if (window.__selfMovingObjId === data.id) return;
+        if (typeof data.x === 'number') rec.grp.position.x = data.x;
+        if (typeof data.y === 'number') rec.grp.position.y = data.y;
+        if (typeof data.z === 'number') rec.grp.position.z = data.z;
       });
       // space3 グローバル環境光 (master スライダー変更 → 全クライアント反映)
       socket.on('sceneAmbient', (data) => {
@@ -1437,6 +1479,7 @@
       window.addEventListener('keyup', (e) => keys.delete(e.code));
 
       const moveTmp = new THREE.Vector3();
+      let _sceneObjSentAt = 0;
       function updateMove(dt) {
         const shift = keys.has('ShiftLeft') || keys.has('ShiftRight');
         const speed = (shift ? 6.0 : 2.5) * dt;
@@ -1451,6 +1494,40 @@
         if (keys.has('KeyD')) moveTmp.addScaledVector(right, speed);
         if (keys.has('KeyQ')) moveTmp.y -= speed;
         if (keys.has('KeyE')) moveTmp.y += speed;
+        // Master + シーンオブジェクト選択中 → オブジェクトを移動 (カメラは動かさない)
+        if (ROLE === 'master' && selectedObject && selectedObject.userData
+            && selectedObject.userData.sceneObjectId) {
+          const oid = selectedObject.userData.sceneObjectId;
+          const rec = sceneLightObjects.get(oid);
+          if (rec && (moveTmp.x || moveTmp.y || moveTmp.z)) {
+            rec.grp.position.add(moveTmp);
+            // 床下貫通防止 + 大きな範囲外へ飛ばないようクランプ
+            const HL2 = FIELD_HALF * 2;
+            rec.grp.position.x = Math.max(-HL2, Math.min(HL2, rec.grp.position.x));
+            rec.grp.position.z = Math.max(-HL2, Math.min(HL2, rec.grp.position.z));
+            rec.grp.position.y = Math.max(0.05, Math.min(50, rec.grp.position.y));
+            // サーバー送信 (throttle 40ms)、エコー抑制フラグ
+            const now = performance.now();
+            if (now - _sceneObjSentAt > 40) {
+              _sceneObjSentAt = now;
+              window.__selfMovingObjId = oid;
+              // 少し後にフラグを解除 (echo 到着後)
+              clearTimeout(window.__selfMovingObjTimer);
+              window.__selfMovingObjTimer = setTimeout(() => {
+                window.__selfMovingObjId = null;
+              }, 200);
+              if (socket && socket.connected) {
+                socket.emit('sceneObjectPose', {
+                  id: oid,
+                  x: rec.grp.position.x,
+                  y: rec.grp.position.y,
+                  z: rec.grp.position.z,
+                });
+              }
+            }
+          }
+          return; // camera は動かさない
+        }
         camera.position.add(moveTmp);
         // 床範囲外へ大きく飛ばないよう緩やかにクランプ
         const HL = FIELD_HALF * 2;
@@ -1835,11 +1912,28 @@
       }
 
       // クライアント選択
+      //   ドロップダウン値の prefix で分岐:
+      //     ・'av:<id>'  → クライアント (avatar) 選択 → selectedClientId 更新
+      //     ・'obj:<id>' → シーンオブジェクト選択 → selectObject(sphere)
+      //     ・空          → 選択解除
       const selEl = _by('m-client-select');
       _bind('m-client-select', 'change', () => {
-        selectedClientId = selEl ? selEl.value : '';
+        const raw = selEl ? selEl.value : '';
+        if (raw.indexOf('av:') === 0) {
+          selectedClientId = raw.substring(3);
+          selectObject(null);
+        } else if (raw.indexOf('obj:') === 0) {
+          const oid = raw.substring(4);
+          selectedClientId = '';
+          const rec = sceneLightObjects.get(oid);
+          if (rec) selectObject(rec.sphere);
+        } else {
+          selectedClientId = '';
+          selectObject(null);
+        }
         readCurrentToInputs();
-        if (window.__syncMasterTagButtons) window.__syncMasterTagButtons();
+        if (window.__syncMasterTagButtons)  window.__syncMasterTagButtons();
+        if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
       });
 
       // ========== カスタムタグ付与 (hole_test 等) ==========
@@ -2158,16 +2252,33 @@
       });
       list.forEach(([id, a]) => {
         const opt = document.createElement('option');
-        opt.value = id;
+        opt.value = 'av:' + id;
         const tag  = a.entryTag ? a.entryTag + ' ' : '';
         const role = (a.role || '?').substring(0, 3);
         const cust = (a.customTags && a.customTags.length) ? ' [' + a.customTags.join(',') + ']' : '';
         opt.textContent = tag + role + ' ' + id.substring(0, 6) + cust;
         sel.appendChild(opt);
       });
-      if (prev && avatars.has(prev)) sel.value = prev;
+      // シーンオブジェクト (light タグ持ち) も選択肢に追加
+      const objList = Array.from(sceneLightObjects.entries())
+        .filter(([, rec]) => rec.tags.indexOf('light') >= 0);
+      if (objList.length) {
+        const sep = document.createElement('option');
+        sep.disabled = true;
+        sep.textContent = '── scene objects ──';
+        sel.appendChild(sep);
+        objList.forEach(([id, rec]) => {
+          const opt = document.createElement('option');
+          opt.value = 'obj:' + id;
+          const p = rec.grp.position;
+          opt.textContent = '💡 ' + id + ' (' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ',' + p.z.toFixed(1) + ')';
+          sel.appendChild(opt);
+        });
+      }
+      if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
       // 選択済み client の tag ボタン UI も再同期
       if (window.__syncMasterTagButtons) window.__syncMasterTagButtons();
+      if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
     }
 
     // ========== UI 表示切替 ==========
