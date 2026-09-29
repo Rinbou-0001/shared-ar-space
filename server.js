@@ -63,6 +63,8 @@ const ALLOWED_CUSTOM_TAGS = new Set(['hole_test']);
 //   type 'light' → tags に 'light' が入る + config.intensity (0-1)
 const sceneObjects = new Map();
 let sceneObjectCounter = 0;
+// 移動 Box (cube1..4) の質量 (kg): name → mass。master が設定、全クライアントで共有。
+const cubeMasses = new Map();
 // space3 のグローバル環境光 (AmbientLight 強度、master スライダーから制御)。
 //   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
 let sceneAmbientConfig = { intensity: 0.85 };
@@ -171,6 +173,10 @@ io.on('connection', (socket) => {
   }
   // space3 グローバル環境光の現在値
   socket.emit('sceneAmbient', sceneAmbientConfig);
+  // 既存の cube 質量設定を配信
+  for (const [name, mass] of cubeMasses.entries()) {
+    socket.emit('cubeMass', { name, mass });
+  }
 
   socket.on('orb', (data) => {
     if (typeof data.s === 'number' && typeof data.y === 'number' &&
@@ -470,6 +476,18 @@ io.on('connection', (socket) => {
     if (!data || typeof data.intensity !== 'number' || !isFinite(data.intensity)) return;
     sceneAmbientConfig.intensity = Math.max(0, Math.min(1, data.intensity));
     io.emit('sceneAmbient', sceneAmbientConfig);
+  });
+
+  // Master が移動 Box の質量を設定
+  //   data: { name, mass }
+  socket.on('cubeMass', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.name !== 'string') return;
+    if (typeof data.mass !== 'number' || !isFinite(data.mass)) return;
+    const mass = Math.max(0.01, Math.min(1000, data.mass));
+    cubeMasses.set(data.name, mass);
+    io.emit('cubeMass', { name: data.name, mass });
   });
 
   socket.on('disconnect', () => {

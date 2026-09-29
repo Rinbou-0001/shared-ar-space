@@ -100,7 +100,9 @@
     camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
     camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, INIT_ROLL, 'YXZ'));
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // alpha:true にすると scene.background=null 時に canvas が透過し、下敷きの
+    //   #bg-video (getUserMedia の背面カメラ映像) が透けて見える (camera role の AR モード)。
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(window.innerWidth, window.innerHeight);
     document.getElementById('stage').appendChild(renderer.domElement);
@@ -176,11 +178,55 @@
     centerMarker.position.set(0, 0.035, 0);
     scene.add(centerMarker);
 
-    // space3: cube1 (選択で移動する立方体) は削除。selectables は空にする。
-    //   → 選択/ドラッグ/矢印キー移動ロジック自体は残るが、対象が無いので発火しない (dormant)。
-    //     もし後で選択可能なオブジェクトを追加したい時は selectables.push(mesh) するだけで有効化。
-    const selectables = [];
+    // ===== 移動 Box (cube1..4) =====
+    //   ・1m 立方体、物理挙動 (重力 + 床反発 + 摩擦)
+    //   ・observer/master: マウス/タッチでドラッグ → XZ 平面 1m スナップ移動 (従来)
+    //   ・camera (スマホ): タップで掴む/離す (phone forward の 1.5m 先に追従、離すと投げ or 落下)
+    //   ・全ロールで physics tick が動く。emit された objectPose で位置は逐次上書きされる
+    //   ・objectPose で全クライアント同期
+    function makeMovableCube(name, x, y, z, colorHex) {
+      const c = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshStandardMaterial({
+          color: colorHex, roughness: 0.8, metalness: 0.0,
+        })
+      );
+      c.position.set(x, y, z);
+      c.name = name;
+      scene.add(c);
+      // 選択ハイライト (黄色 edges)
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(c.geometry),
+        new THREE.LineBasicMaterial({
+          color: 0xfbbf24, transparent: true, opacity: 1.0,
+          depthTest: false, fog: false,
+        })
+      );
+      edges.renderOrder = 999;
+      edges.visible = false;
+      c.add(edges);
+      // 物理状態
+      c.userData.__movable = true;
+      c.userData.vel    = new THREE.Vector3(0, 0, 0);   // 並進速度 m/s
+      c.userData.angVel = new THREE.Vector3(0, 0, 0);   // 角速度 rad/s (Euler XYZ)
+      c.userData.held   = false;
+      c.userData.mass   = 1.0;                          // 質量 kg (空気抵抗の効きを制御)
+      return c;
+    }
+    const cube1 = makeMovableCube('cube1',  1.5, 0.5, -0.5, 0x6b7280); // 灰
+    const cube2 = makeMovableCube('cube2', -1.5, 0.5, -0.5, 0xef4444); // 赤
+    const cube3 = makeMovableCube('cube3',  1.5, 0.5,  1.5, 0x22c55e); // 緑
+    const cube4 = makeMovableCube('cube4', -1.5, 0.5,  1.5, 0x3b82f6); // 青
+    const movableCubes = [cube1, cube2, cube3, cube4];
+
+    // selectables: raycast 対象。movable cube 全部を含める。
+    const selectables = [...movableCubes];
     let selectedObject = null;
+    // Box 表示 (observer avatar の box オブジェクト + 格子 + 選択ハイライト) の ON/OFF フラグ。
+    //   ・false: box.visible = false + avatar 選択枠 (apex/base edges) も強制非表示
+    //   ・true : box.visible = true + 選択枠は選択状態に応じて表示
+    //   ・light オブジェクトの選択枠 (__isAvatarEdge を持たない) は影響を受けない
+    let boxVisibilityEnabled = true;
 
     // ============================================================
     // シーンオブジェクト (master が右クリックメニューで生成する光源等)
@@ -316,6 +362,10 @@
           if (!n.isLineSegments) return;
           // __alwaysVisible フラグ (master の light border 等) は選択解除で消さない
           if (n.userData && n.userData.__alwaysVisible) { n.visible = true; return; }
+          // Box表示 OFF の間は avatar 選択枠 (__isAvatarEdge) を出さない
+          if (n.userData && n.userData.__isAvatarEdge && !boxVisibilityEnabled) {
+            n.visible = false; return;
+          }
           n.visible = on;
         });
       }
@@ -331,8 +381,200 @@
     }
     function updateSelectionHint() {
       const el = document.getElementById('obs-sel-info');
-      if (!el) return;
-      el.textContent = selectedObject ? selectedObject.name : '--';
+      if (el) el.textContent = selectedObject ? selectedObject.name : '--';
+    }
+
+    // ========================================================
+    // 物理シミュレーション (cube1..4 の重力/床反発/摩擦)
+    //   ・全ロール共通で tick 毎に更新
+    //   ・held=true (掴まれ中) はスキップ (位置は grabber が制御)
+    //   ・cube 底面 y = center.y - 0.5 が床 (y=0) に触れる時: 反発 + 摩擦
+    //   ・object の外周が field を越えたら弾性壁で戻す
+    // ========================================================
+    const GRAVITY = 9.81;
+    const REST_COEFF = 0.35;   // 床反発
+    const FRICTION_H = 0.90;   // 水平摩擦 (床接触時)
+    const CUBE_HALF_Y = 0.5;
+    // 空気抵抗係数 (kg/m): 抵抗力 F = k · |v|·v、加速度 = F/m
+    //   ・軽い (mass 小) → 抵抗の効きが強く落下ゆっくり (羽のようにフラフラ)
+    //   ・重い (mass 大) → 抵抗の効きが弱く落下速い (鉛玉のように直落)
+    //   終端速度 v_term = sqrt(g · m / k):
+    //     m=0.1: ~4.4 m/s   m=1: ~14 m/s   m=10: ~44 m/s
+    const AIR_DRAG = 0.05;
+    const _phys_lastEmit = new Map();   // name → last emit ms
+    function _emitCubePoseThrottled(cube, forceMs) {
+      if (!socket || !socket.connected) return;
+      const now = performance.now();
+      const last = _phys_lastEmit.get(cube.name) || 0;
+      const interval = (typeof forceMs === 'number') ? forceMs : 33; // 30Hz
+      if (now - last < interval) return;
+      _phys_lastEmit.set(cube.name, now);
+      socket.emit('objectPose', {
+        name: cube.name,
+        x: cube.position.x, y: cube.position.y, z: cube.position.z,
+        qx: cube.quaternion.x, qy: cube.quaternion.y, qz: cube.quaternion.z, qw: cube.quaternion.w,
+      });
+    }
+    function _physicsTick(dt) {
+      for (const c of movableCubes) {
+        if (c.userData.held) continue;
+        const v  = c.userData.vel;
+        const av = c.userData.angVel;
+        const mass = c.userData.mass || 1.0;
+        // 重力
+        v.y -= GRAVITY * dt;
+        // 空気抵抗 (質量が大きいほど効きが弱い = 重い物ほど落下が速い)
+        const sp = v.length();
+        if (sp > 0.01) {
+          const dragMag = AIR_DRAG * sp * sp / mass;   // m/s²
+          const drag = v.clone().normalize().multiplyScalar(-dragMag * dt);
+          v.add(drag);
+        }
+        c.position.addScaledVector(v, dt);
+        // 回転 (Euler intrinsic、視覚上のスピン)
+        if (av.lengthSq() > 1e-6) {
+          c.rotation.x += av.x * dt;
+          c.rotation.y += av.y * dt;
+          c.rotation.z += av.z * dt;
+          av.multiplyScalar(0.995);   // 空気抵抗
+        }
+        // 床衝突
+        if (c.position.y <= CUBE_HALF_Y) {
+          c.position.y = CUBE_HALF_Y;
+          if (v.y < 0) v.y = -v.y * REST_COEFF;
+          v.x *= FRICTION_H;
+          v.z *= FRICTION_H;
+          av.multiplyScalar(0.7);     // 床摩擦で回転を減衰
+          if (Math.abs(v.y) < 0.08) v.y = 0;
+          if (v.lengthSq() < 0.0004) v.set(0, 0, 0);
+          if (av.lengthSq() < 0.02) av.set(0, 0, 0);
+        }
+        // 場所範囲: FIELD_HALF (10m) 壁で反発
+        if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
+        if (c.position.x < -FIELD_HALF + CUBE_HALF_Y) { c.position.x = -FIELD_HALF + CUBE_HALF_Y; v.x = -v.x * 0.5; }
+        if (c.position.z >  FIELD_HALF - CUBE_HALF_Y) { c.position.z =  FIELD_HALF - CUBE_HALF_Y; v.z = -v.z * 0.5; }
+        if (c.position.z < -FIELD_HALF + CUBE_HALF_Y) { c.position.z = -FIELD_HALF + CUBE_HALF_Y; v.z = -v.z * 0.5; }
+      }
+      // Box-Box 衝突判定 + 分離 (物理更新後に解決)
+      _resolveCubeCollisions();
+      // 動いていれば objectPose emit (throttle 30Hz)
+      for (const c of movableCubes) {
+        if (c.userData.vel.lengthSq() > 0.0001 || c.userData.angVel.lengthSq() > 1e-4) {
+          _emitCubePoseThrottled(c);
+        }
+      }
+    }
+    // AABB (軸整列) 衝突判定 — cube1..4 は 1×1×1 の立方体で回転なし
+    //   ・重なりが 3 軸すべてにある時、最小侵入軸で押し離す
+    //   ・両方 free: 半分ずつ押し離し + 速度弾性反射 (係数 0.7)
+    //   ・片方 held: held を動かさず、free 側を全量押し離し + 速度反転で跳ね返す
+    function _resolveCubeCollisions() {
+      for (let i = 0; i < movableCubes.length; i++) {
+        for (let j = i + 1; j < movableCubes.length; j++) {
+          const a = movableCubes[i], b = movableCubes[j];
+          const dx = b.position.x - a.position.x;
+          const dy = b.position.y - a.position.y;
+          const dz = b.position.z - a.position.z;
+          const ox = 1 - Math.abs(dx);
+          const oy = 1 - Math.abs(dy);
+          const oz = 1 - Math.abs(dz);
+          if (ox <= 0 || oy <= 0 || oz <= 0) continue;
+          // 最小侵入軸を選択
+          let ax = 'x', min = ox, d = dx;
+          if (oy < min) { ax = 'y'; min = oy; d = dy; }
+          if (oz < min) { ax = 'z'; min = oz; d = dz; }
+          const sign = d >= 0 ? 1 : -1;
+          const va = a.userData.vel, vb = b.userData.vel;
+          const aHeld = a.userData.held, bHeld = b.userData.held;
+          if (aHeld && bHeld) continue;   // 両方保持中は無視
+          if (aHeld && !bHeld) {
+            b.position[ax] += min * sign;
+            vb[ax] = Math.abs(vb[ax]) * sign * 0.5;
+          } else if (!aHeld && bHeld) {
+            a.position[ax] -= min * sign;
+            va[ax] = -Math.abs(va[ax]) * sign * 0.5;
+          } else {
+            const half = (min / 2) * sign;
+            a.position[ax] -= half;
+            b.position[ax] += half;
+            // 弾性: 相対速度を反射 (係数 0.7)
+            const tmp = va[ax];
+            va[ax] = vb[ax] * 0.7;
+            vb[ax] = tmp * 0.7;
+          }
+        }
+      }
+    }
+
+    // ========================================================
+    // Grab / Release (camera role: スマホでタップして掴む・離す)
+    //   ・_heldCube: 現在掴んでいる cube (最大 1 個)
+    //   ・held 中は毎フレーム camera.position + forward * GRAB_DIST に位置更新
+    //   ・release 時に直前フレームからの Δpos/Δt で初速を計算 (1.4倍で投げる感)
+    //   ・emit は throttle 30Hz、release 時は force emit
+    // ========================================================
+    const GRAB_DIST = 1.5;      // 掴んだ物を保持する距離 (m)
+    const RELEASE_BOOST = 1.4;
+    let _heldCube = null;
+    function grabCube(cube) {
+      if (!cube || cube.userData.held) return;
+      cube.userData.held = true;
+      cube.userData.vel.set(0, 0, 0);
+      cube.userData.angVel.set(0, 0, 0);
+      cube.userData._prevPos  = cube.position.clone();
+      cube.userData._prevQuat = cube.quaternion.clone();
+      cube.userData._prevTime = performance.now();
+      _heldCube = cube;
+      log('grab: ' + cube.name, 'ok');
+    }
+    // quaternion 差分 → 角速度 (Vector3, XYZ 軸周り rad/s) を近似
+    function _quatDeltaToAngVel(qFrom, qTo, dt) {
+      const qInv = qFrom.clone().invert();
+      const qDelta = qTo.clone().multiply(qInv);   // = qTo * qFrom^-1
+      // Euler XYZ で近似
+      const e = new THREE.Euler().setFromQuaternion(qDelta, 'XYZ');
+      return new THREE.Vector3(e.x, e.y, e.z).divideScalar(Math.max(0.001, dt));
+    }
+    function releaseCube(cube) {
+      if (!cube || !cube.userData.held) return;
+      const now = performance.now();
+      const prev = cube.userData._prevPos;
+      const prevQ = cube.userData._prevQuat;
+      const dt = Math.max(0.001, (now - (cube.userData._prevTime || now)) / 1000);
+      if (prev) {
+        cube.userData.vel
+          .copy(cube.position).sub(prev)
+          .divideScalar(dt)
+          .multiplyScalar(RELEASE_BOOST);
+        // 極端な速度制限 (20 m/s)
+        if (cube.userData.vel.length() > 20) cube.userData.vel.setLength(20);
+      }
+      if (prevQ) {
+        const av = _quatDeltaToAngVel(prevQ, cube.quaternion, dt);
+        av.multiplyScalar(RELEASE_BOOST);
+        if (av.length() > 15) av.setLength(15);   // 過剰スピン抑制 (~2.4 rev/s)
+        cube.userData.angVel.copy(av);
+      }
+      cube.userData.held = false;
+      _heldCube = null;
+      _emitCubePoseThrottled(cube, 0);   // 強制送信
+      log('release: ' + cube.name +
+          ' vel=' + cube.userData.vel.length().toFixed(2) + 'm/s' +
+          ' angVel=' + cube.userData.angVel.length().toFixed(2) + 'rad/s', 'ok');
+    }
+    function _heldTick(dt) {
+      if (!_heldCube || ROLE !== 'camera') return;
+      // 前フレーム状態を保存 (release 時の velocity/angVel 計算用)
+      _heldCube.userData._prevPos  = _heldCube.position.clone();
+      _heldCube.userData._prevQuat = _heldCube.quaternion.clone();
+      _heldCube.userData._prevTime = performance.now();
+      // camera + forward * GRAB_DIST の位置に追従、姿勢も camera に追従 (スマホ回転が cube に反映)
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      _heldCube.position.copy(camera.position).addScaledVector(forward, GRAB_DIST);
+      _heldCube.quaternion.copy(camera.quaternion);
+      // 床貫通防止
+      if (_heldCube.position.y < CUBE_HALF_Y) _heldCube.position.y = CUBE_HALF_Y;
+      _emitCubePoseThrottled(_heldCube);
     }
     // space3: 移動機能撤去 (選択のみ)。以下 snapAndClamp/moveSelected/emitObjectPose は
     //   関数定義は残すが呼び出しは削除済み。参照は起きないので事実上デッドコード。
@@ -592,7 +834,7 @@
     //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
-    function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole) {
+    function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole, omitBox) {
       const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
       const frustumLines = makeAvatarFrustum(color, W, H, d);
 
@@ -612,6 +854,7 @@
       );
       apexEdges.renderOrder = 999;
       apexEdges.visible = false;
+      apexEdges.userData.__isAvatarEdge = true;   // Box表示トグル対象マーク
       apexHit.add(apexEdges);
 
       // base hit (raycast 用透明平面、frustum base と同じ位置 = -Z 方向 FRUSTUM_DEPTH 先)
@@ -630,9 +873,13 @@
       );
       baseEdges.renderOrder = 999;
       baseEdges.visible = false;
+      baseEdges.userData.__isAvatarEdge = true;   // Box表示トグル対象マーク
       baseHit.add(baseEdges);
 
-      const box = makeAvatarBox(color, W, H, d, !!hasHole);
+      // box は「アバターのロール」が camera (スマホ) の時のみ生成しない (視錐台ワイヤーのみ)。
+      //   つまり: 対象がスマホなら誰から見ても box 無し、対象が observer なら誰から見ても box 有り。
+      //   omitBox 引数は呼び出し側 (makeAvatar / rebuildAvatarFrustum) がアバターの role から derive。
+      const box = omitBox ? null : makeAvatarBox(color, W, H, d, !!hasHole);
       return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
     }
 
@@ -645,29 +892,46 @@
       grp.userData.__avatarId = id;
       // entryTag: 入室順 (#1,#2,...) — server が付与。customTags: master が付与。
       const av = { grp, color: color || '#ffffff', role: role || 'camera', entryTag: null, customTags: [] };
-      if (role === 'observer') {
+      // frustum を描くのは:
+      //   ・observer ロール (全クライアントで表示、通常機能)
+      //   ・camera ロール + local ROLE が master (master にのみ視錐台として表示)
+      const wantsFrustum = (role === 'observer')
+                        || (role === 'camera' && ROLE === 'master');
+      av._hasFrustum = wantsFrustum;
+      if (wantsFrustum) {
         const dW = (display && typeof display.width  === 'number' && display.width  > 0)
           ? display.width  : (myDisplay.width  || 0.3);
         const dH = (display && typeof display.height === 'number' && display.height > 0)
           ? display.height : (myDisplay.height || 0.2);
         // 初期生成時点で hole 情報は未確定 (customTags は後から入る場合が多い) — false で作り、
         //   tag 受信 or displayConfig 受信で rebuildAvatarFrustum が正しい hasHole で作り直す。
-        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id, null, false);
+        //   omitBox = 対象アバターが camera ロール (スマホ) の時 true。閲覧側の ROLE は無関係。
+        const omitBox = (role === 'camera');
+        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id, null, false, omitBox);
         av.frustumLines = parts.frustumLines;
         av.apexHit  = parts.apexHit;  av.apexEdges = parts.apexEdges;
         av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
         av.box      = parts.box;
         av.mesh     = parts.frustumLines;   // 後方互換 (mesh フィールド)
+        // 視錐台ワイヤーも Box 表示トグルに従う
+        parts.frustumLines.visible = boxVisibilityEnabled;
         grp.add(parts.frustumLines);
         grp.add(parts.apexHit);
         grp.add(parts.baseHit);
-        grp.add(parts.box);
-        // selectables 登録 (raycast 対象)
+        // box は camera role では null。observer / master のみ scene に追加。
+        //   Box 表示トグル (boxVisibilityEnabled) が OFF なら非表示で追加。
+        if (parts.box) {
+          parts.box.visible = boxVisibilityEnabled;
+          grp.add(parts.box);
+        }
+        // selectables 登録 (raycast 対象、master 側のみ実質的に使う)
         selectables.push(parts.apexHit);
         selectables.push(parts.baseHit);
         try {
-          log('frustum init: ' + id.substring(0,6) + ' ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm ' +
-              (display ? '(remote)' : '(fallback)') + ' [apex+base selectable]', 'ok');
+          log('frustum init: ' + role + ' ' + id.substring(0,6) + ' ' +
+              dW.toFixed(3) + '×' + dH.toFixed(3) + 'm ' +
+              (display ? '(remote)' : '(fallback)') +
+              (role === 'camera' ? ' [master-only view]' : ''), 'ok');
         } catch (_) {}
       } else {
         av.mesh = new THREE.Mesh(
@@ -676,8 +940,38 @@
         );
         grp.add(av.mesh);
       }
+      // ---- スマホ (camera role): 姿勢センサー由来の 3D レイ ----
+      //   ・camera.quaternion は setupDeviceOrientation により phone の実姿勢を反映
+      //   ・grp.quaternion は毎フレーム camera pose と同期 (tick 内)
+      //   ・スマホの「上方向」(端末の top edge = local +Y) を基準に、
+      //     avatar 位置 (apex, grp 原点) から +Y 方向へ 5m の Line を伸ばす
+      if (role === 'camera') {
+        const ray = makeAvatarPointerRay(av.color);
+        av.pointer = ray;
+        grp.add(ray);
+      }
       scene.add(grp);
       return av;
+    }
+
+    // スマホの上方向を基準にした 3D レイ (LineSegments)。
+    //   ・原点 (0,0,0) = apex (avatar 位置)
+    //   ・終点 (0, +DIST, 0) = 端末上方向 (local +Y) → grp.quaternion で world 変換
+    //   ・fog:false で遠くでも視認可能
+    function makeAvatarPointerRay(color) {
+      const c = new THREE.Color(color || '#ff4444');
+      const DIST = 5.0;
+      const pts = new Float32Array([0, 0, 0,  0, DIST, 0]);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+      const line = new THREE.Line(
+        geom,
+        new THREE.LineBasicMaterial({
+          color: c, transparent: true, opacity: 0.9, fog: false,
+        })
+      );
+      line.name = 'avatar-pointer-ray';
+      return line;
     }
 
     // observer 用アバターの hit mesh を selectables から取り除く (leave/rebuild 時)
@@ -724,23 +1018,31 @@
     function rebuildAvatarFrustum(id, display, depthOverride) {
       const a = avatars.get(id);
       if (!a) { log('rebuild frustum: avatar ' + id.substring(0,6) + ' 未生成、スキップ', 'err'); return; }
-      if (a.role !== 'observer') return;
+      // observer 常時、camera は local ROLE が master の時のみ (_hasFrustum フラグ判定)
+      if (!a._hasFrustum) return;
       if (!display) return;
       const dW = (typeof display.width  === 'number' && display.width  > 0) ? display.width  : 0.3;
       const dH = (typeof display.height === 'number' && display.height > 0) ? display.height : 0.2;
       const hasHole = !!(a.customTags && a.customTags.indexOf('hole_test') >= 0);
       _removeAvatarSelectables(a);
       _disposeAvatarSubMeshes(a);
-      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride, hasHole);
+      const omitBox = (a.role === 'camera');
+      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride, hasHole, omitBox);
       a.frustumLines = parts.frustumLines;
       a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
       a.box     = parts.box;
       a.mesh    = parts.frustumLines;
+      // 視錐台ワイヤーも Box 表示トグルに従う
+      parts.frustumLines.visible = boxVisibilityEnabled;
       a.grp.add(parts.frustumLines);
       a.grp.add(parts.apexHit);
       a.grp.add(parts.baseHit);
-      a.grp.add(parts.box);
+      // box は camera role では null。observer / master のみ追加 (Box表示 OFF 時は不可視で保持)。
+      if (parts.box) {
+        parts.box.visible = boxVisibilityEnabled;
+        a.grp.add(parts.box);
+      }
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
       const dTag = (typeof depthOverride === 'number' && depthOverride > 0) ? (' D=' + depthOverride.toFixed(3) + 'm') : '';
@@ -1008,8 +1310,22 @@
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
-        // canvas 物理サイズ = base/box の実効サイズ を確定して self avatar 再構築 + emit
-        computeAndApplyEffectiveSize('init');
+        if (ROLE !== 'camera') {
+          // observer/master: canvas 物理サイズを確定して self avatar 再構築 + emit
+          computeAndApplyEffectiveSize('init');
+        } else {
+          // camera (スマホ): 自身の視錐台は無いが server の u.display をここで更新しないと
+          //   後で first pose → join broadcast が default {0.5,0.3} (横長) のまま master に飛び
+          //   master 側で横長 frustum が生成されてしまう。
+          //   → init 直後に myDisplay (portrait) を emit しておくと、server が u.display を
+          //     更新 → その後の join broadcast は portrait 寸法を含む。
+          if (socket && socket.connected) {
+            const w = (myDisplay.width  && myDisplay.width  > 0) ? myDisplay.width  : 0.07;
+            const h = (myDisplay.height && myDisplay.height > 0) ? myDisplay.height : 0.15;
+            socket.emit('displaySize', { width: w, height: h });
+            log('camera init displaySize emit: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm', 'ok');
+          }
+        }
       });
 
       socket.on('join', (u) => {
@@ -1134,16 +1450,35 @@
         }
       });
 
-      // 他クライアントからの objectPose (将来オブジェクト追加時用、現在 space3 は対象なし)
+      // 移動 Box の質量更新 (master スライダー由来、全クライアントで共有)
+      socket.on('cubeMass', (data) => {
+        if (!data || typeof data.name !== 'string' || typeof data.mass !== 'number') return;
+        const c = movableCubes.find((m) => m.name === data.name);
+        if (!c) return;
+        c.userData.mass = Math.max(0.01, Math.min(1000, data.mass));
+        if (window.__syncMasterMassInput) window.__syncMasterMassInput();
+      });
+
+      // 他クライアントからの objectPose (cube1..4 の位置更新)
       //   selectables に登録された name 一致する Mesh の position を反映
+      //   ・ローカルで drag 中 (observer/master) は無視 (自身がオーナー)
+      //   ・ローカルで grab 中 (camera) は無視 (自身がオーナー)
+      //   ・その他は受信位置を採用 + 速度をリセット (物理は他者の emit が優先)
       socket.on('objectPose', (data) => {
         if (!data || typeof data.name !== 'string') return;
         const target = selectables.find((m) => m && m.name === data.name);
         if (!target) return;
         if (selectedObject === target && window.__cubeDragActive) return;
+        if (_heldCube === target) return;
         if (typeof data.x === 'number') target.position.x = data.x;
         if (typeof data.y === 'number') target.position.y = data.y;
         if (typeof data.z === 'number') target.position.z = data.z;
+        if (typeof data.qx === 'number' && typeof data.qw === 'number') {
+          target.quaternion.set(data.qx, data.qy || 0, data.qz || 0, data.qw);
+        }
+        // 受信で強制上書きされたので、ローカル物理速度/角速度をリセット
+        if (target.userData && target.userData.vel)    target.userData.vel.set(0, 0, 0);
+        if (target.userData && target.userData.angVel) target.userData.angVel.set(0, 0, 0);
       });
 
       socket.on('moveConfig', (data) => {
@@ -1223,6 +1558,10 @@
 
     // ========== メインループ用: フレーム更新関数のレジストリ (setupObserver が push するので先に宣言) ==========
     const updaters = [];
+    // 物理シミュレーション: 全ロールで cube1..4 に重力を適用
+    updaters.push(_physicsTick);
+    // camera role の held cube 追従 (毎フレーム phone forward に位置更新)
+    updaters.push(_heldTick);
 
     // ========== ロール別: パネル表示 + セットアップ ==========
     let _obsResync = null; // observer の yaw/pitch 再同期用 (forcePose 受信後)
@@ -1266,16 +1605,65 @@
             await DeviceMotionEvent.requestPermission();
           }
         } catch (_) {}
+        // AR 疑似モード: 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
+        //   ・成功: body.ar-mode 付与 → CSS で #bg-video 表示 + canvas 透過
+        //           床/格子/背景色をオフにして 3D オブジェクトのみ現実空間に重畳
+        //   ・失敗 (権限拒否/端末非対応): AR モードをスキップ、従来の暗背景 3D モードで継続
+        await enableCameraPassthrough();
         enterAsCamera();
       });
     }
 
+    // ========== AR 疑似モード (getUserMedia + DeviceOrientation) ==========
+    //   iOS Safari は WebXR immersive-ar 非対応だが、背面カメラ映像を <video> に流して
+    //   その上に透過 canvas を重ねれば "見た目の AR" が実現できる。
+    //   位置追跡 (SLAM) は無いので、端末を並進移動しても 3D オブジェクトは動かない (回転のみ追従)。
+    async function enableCameraPassthrough() {
+      const video = document.getElementById('bg-video');
+      if (!video) { log('bg-video 要素なし', 'err'); return false; }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        log('getUserMedia 非対応ブラウザ', 'err');
+        return false;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },   // 背面カメラ優先
+            width:  { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        // 3D シーン側を透過モードに (現実映像を透かす)
+        document.body.classList.add('ar-mode');
+        scene.background = null;
+        scene.fog = null;
+        renderer.setClearColor(0x000000, 0);
+        // 床/格子/境界は現実の床が見える AR モードでは邪魔になるので非表示
+        if (typeof floor      !== 'undefined' && floor)      floor.visible      = false;
+        if (typeof grid       !== 'undefined' && grid)       grid.visible       = false;
+        if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = false;
+        if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = false;
+        // 環境光は AR 現実光と混ざるので明るめに (ベース照度を上げる)
+        if (typeof sceneAmbient !== 'undefined' && sceneAmbient) sceneAmbient.intensity = 1.0;
+        log('AR passthrough ON (背面カメラ + gyro)', 'ok');
+        return true;
+      } catch (e) {
+        log('camera passthrough err: ' + (e && e.message ? e.message : e), 'err');
+        return false;
+      }
+    }
+
     function enterAsCamera() {
       state.entered = true;
-      camera.position.set(SPAWN_POS.x, SPAWN_POS.y, SPAWN_POS.z);
-      // 初期方向: +Y (真上、DeviceOrientation が来るまでの一瞬用)
+      // camera (スマホ) 専用の spawn: 目線高さ 1.7m
+      const CAM_SPAWN = { x: 0, y: 1.7, z: 0 };
+      camera.position.set(CAM_SPAWN.x, CAM_SPAWN.y, CAM_SPAWN.z);
+      // 初期方向: +X (Start 押下時のスマホ方位が +X 正方向にマップされる)
       camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
-      log('spawn(camera): (' + SPAWN_POS.x + ',' + SPAWN_POS.y + ',' + SPAWN_POS.z + ') 初期 +Y 向き', 'ok');
+      log('spawn(camera): (' + CAM_SPAWN.x + ',' + CAM_SPAWN.y + ',' + CAM_SPAWN.z + ') 初期 +X 向き', 'ok');
       const overlay = _by('enter-overlay');
       if (overlay) overlay.style.display = 'none';
       setupDeviceOrientation();
@@ -1291,6 +1679,9 @@
 
       let alpha = 0, beta = 0, gamma = 0;
       let hasEvent = false;
+      // 入室時に最初の alpha を捕捉して基準化。以後は (alpha - alphaOffset + INIT_YAW) を
+      //   使うことで、Start ボタン押下時のスマホが向いていた方位が +X 正方向にマッピングされる。
+      let alphaOffset = null;
       let screenOrient = (typeof window.orientation === 'number') ? window.orientation : 0;
 
       window.addEventListener('orientationchange', () => {
@@ -1299,14 +1690,21 @@
 
       window.addEventListener('deviceorientation', (e) => {
         if (e.alpha === null) return;
-        alpha = THREE.MathUtils.degToRad(e.alpha);
+        const alphaRaw = THREE.MathUtils.degToRad(e.alpha);
+        if (alphaOffset === null) {
+          // 初回イベント: この方位を「Start 時の基準」とする
+          //   camera が +X (yaw = INIT_YAW = -π/2) を向くように補正
+          alphaOffset = alphaRaw;
+          log('camera 基準方位を捕捉: raw α=' + e.alpha.toFixed(1) + '° → +X 正方向にマップ', 'ok');
+        }
+        alpha = alphaRaw - alphaOffset + INIT_YAW;
         beta  = THREE.MathUtils.degToRad(e.beta || 0);
         gamma = THREE.MathUtils.degToRad(e.gamma || 0);
         hasEvent = true;
       }, true);
 
       _cameraTickFn = () => {
-        if (!hasEvent) return;  // gyro が来るまで初期 +Y 向きを維持
+        if (!hasEvent) return;  // gyro が来るまで初期 +X 向きを維持
         const orient = THREE.MathUtils.degToRad(screenOrient);
         euler.set(beta, alpha, -gamma, 'YXZ');
         camera.quaternion.setFromEuler(euler);
@@ -1348,15 +1746,50 @@
         const hits = _rayTap.intersectObjects(selectables, false);
         return hits.length > 0 ? hits[0] : null;
       }
+      // カメラ基準の水平 right / forward ベクトル (XZ 平面へ投影して正規化)
+      //   cube1 の drag 移動方向計算に使用
+      function _computeCamBasis() {
+        const camR = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        camR.y = 0;
+        if (camR.lengthSq() < 1e-6) camR.set(1, 0, 0); else camR.normalize();
+        const camF = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        camF.y = 0;
+        if (camF.lengthSq() < 1e-6) camF.set(0, 0, -1); else camF.normalize();
+        return { camR, camF };
+      }
 
       function _pressBegin(x, y) {
         _pressAt = { x, y };
         _tapMoved = false;
         _dragState = null;
-        if (ROLE !== 'master') return;   // ★ master 以外は選択操作しない
+        window.__cubeDragActive = false;
         const hit = _raycastAt(x, y);
         if (!hit) return;
         const obj = hit.object;
+
+        // 移動 Box (cube1..4)
+        if (obj.userData && obj.userData.__movable) {
+          selectObject(obj);
+          // camera (スマホ): tap で grab/release トグル (drag ではない)
+          //   _dragState は張らない → _pressEnd で tap 判定 → toggleGrab
+          if (ROLE === 'camera') return;
+          // observer/master: mousedown で grab → mousemove で XZ 平面フリー移動 → mouseup で release
+          //   1m スナップ廃止、重力を持つ物理オブジェクトを自由に「掴んで」動かす
+          if (obj.userData.held) return;
+          grabCube(obj);
+          _dragState = {
+            type: 'cubeGrab',
+            targetObj: obj,
+            startX: x, startY: y,
+            grabDist: camera.position.distanceTo(obj.position), // 掴んだ時のカメラとの距離を保持
+            moved: false,
+          };
+          window.__cubeDragActive = true;
+          return;
+        }
+
+        // avatar apex/base 選択・視錐台回転 (master のみ)
+        if (ROLE !== 'master') return;
         const type = obj.userData && obj.userData.selectType;
         const avId = obj.userData && obj.userData.avatarId;
         if (!type || !avId) return;
@@ -1381,8 +1814,33 @@
         if (!_pressAt) return;
         const dx = x - _pressAt.x, dy = y - _pressAt.y;
         if (Math.hypot(dx, dy) > slop) _tapMoved = true;
-        if (!_dragState || _dragState.type !== 'base' || !_tapMoved) return;
+        if (!_dragState || !_tapMoved) return;
+
+        // cube grab (observer/master): マウス位置からのレイを camera から grabDist 進んだ点に置く
+        //   ・カメラ視線に垂直な平面 (深度 = grabDist) 上を自由に移動
+        //   ・上下ドラッグで持ち上げ/下ろし可、床貫通防止のみクランプ
+        if (_dragState.type === 'cubeGrab') {
+          const rect = _canvas.getBoundingClientRect();
+          _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
+          _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
+          _rayTap.setFromCamera(_ndcTap, camera);
+          const target = _rayTap.ray.origin.clone()
+            .addScaledVector(_rayTap.ray.direction, _dragState.grabDist);
+          // 床貫通防止 + Field 範囲クランプ
+          if (target.y < CUBE_HALF_Y) target.y = CUBE_HALF_Y;
+          target.x = Math.max(-FIELD_HALF + CUBE_HALF_Y, Math.min(FIELD_HALF - CUBE_HALF_Y, target.x));
+          target.z = Math.max(-FIELD_HALF + CUBE_HALF_Y, Math.min(FIELD_HALF - CUBE_HALF_Y, target.z));
+          const t = _dragState.targetObj;
+          t.userData._prevPos = t.position.clone();
+          t.userData._prevTime = performance.now();
+          t.position.copy(target);
+          _dragState.moved = true;
+          _emitCubePoseThrottled(t);
+          return;
+        }
+
         // base drag → apex 軸で Yaw/Pitch 回転
+        if (_dragState.type !== 'base') return;
         const degPerPx = 15 / Math.max(5, moveSensitivity);
         const dYaw   = -dx * degPerPx * (Math.PI / 180);   // 右ドラッグ = -yaw
         const dPitch = -dy * degPerPx * (Math.PI / 180);   // 下ドラッグ = -pitch (下を見る)
@@ -1410,11 +1868,22 @@
       }
 
       function _pressEnd(x, y) {
-        const hadDrag = _dragState && _tapMoved;
         const savedDrag = _dragState;
         _dragState = null;
-        if (hadDrag) {
-          // 最終位置を確実に送信 (スロットルで最後の更新が漏れないよう)
+        window.__cubeDragActive = false;
+
+        // cube grab 終了 (observer/master) → releaseCube で velocity 計算 + 物理再開
+        //   drag 有無に関わらず必ず release (短クリックは vel≒0 で落下、drag ありは投げる)
+        if (savedDrag && savedDrag.type === 'cubeGrab') {
+          releaseCube(savedDrag.targetObj);
+          _pressAt = null;
+          return;
+        }
+
+        const hadDrag = savedDrag && _tapMoved;
+
+        // base drag 終了 (master のみ)
+        if (hadDrag && savedDrag && savedDrag.type === 'base') {
           const av = avatars.get(savedDrag.avatarId);
           if (av && socket && socket.connected) {
             const q = av.grp.quaternion;
@@ -1434,14 +1903,39 @@
           _pressAt = null;
           return;
         }
+
         const wasTap = _pressAt && !_tapMoved;
         _pressAt = null;
-        if (!wasTap) return;
-        // master 以外は tap で選択解除だけ (raycast も無し)
-        if (ROLE !== 'master') { selectObject(null); return; }
+        if (!wasTap) {
+          // camera role: tap 以外 (drag 系) は特に何もしない
+          return;
+        }
+        // tap の判定
         const hit = _raycastAt(x, y);
-        if (hit) selectObject(hit.object);
-        else selectObject(null);
+        if (!hit) {
+          // 空 tap: camera が cube を掴んでいれば release、それ以外は選択解除
+          if (ROLE === 'camera' && _heldCube) releaseCube(_heldCube);
+          selectObject(null);
+          return;
+        }
+        const obj = hit.object;
+        // 移動 Box (cube1..4): camera はタップで grab/release トグル
+        if (obj.userData && obj.userData.__movable) {
+          if (ROLE === 'camera') {
+            if (_heldCube === obj) {
+              releaseCube(obj);
+            } else {
+              // 別 cube を持っていたら先に release
+              if (_heldCube) releaseCube(_heldCube);
+              grabCube(obj);
+            }
+          }
+          selectObject(obj);
+          return;
+        }
+        // それ以外 (apex/base/light sphere) は master のみ選択可
+        if (ROLE !== 'master') { selectObject(null); return; }
+        selectObject(obj);
       }
 
       // Mouse
@@ -1499,12 +1993,18 @@
       const _obsRay = new THREE.Raycaster();
       const _obsNDC = new THREE.Vector2();
       function _mousedownHitsSelectable(clientX, clientY) {
-        if (ROLE !== 'master' || selectables.length === 0) return false;
+        if (selectables.length === 0) return false;
         const rect = renderer.domElement.getBoundingClientRect();
         _obsNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         _obsNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
         _obsRay.setFromCamera(_obsNDC, camera);
-        return _obsRay.intersectObjects(selectables, false).length > 0;
+        const hits = _obsRay.intersectObjects(selectables, false);
+        if (hits.length === 0) return false;
+        const obj = hits[0].object;
+        // 移動 Box (cube1..4) は全ロールで cube grab に譲る (camera 回転はスキップ)
+        if (obj.userData && obj.userData.__movable) return true;
+        // apex/base/light sphere などは master のみ選択優先
+        return ROLE === 'master';
       }
       let dragging = false, lastX = 0, lastY = 0;
       dom.addEventListener('mousedown', (e) => {
@@ -1539,6 +2039,10 @@
       const moveTmp = new THREE.Vector3();
       let _sceneObjSentAt = 0;
       function updateMove(dt) {
+        // 移動 Box を掴んでいる間は WASD/QE / camera 移動を全て凍結 (画面固定)
+        for (const c of movableCubes) {
+          if (c.userData.held) return;
+        }
         const shift = keys.has('ShiftLeft') || keys.has('ShiftRight');
         const speed = (shift ? 6.0 : 2.5) * dt;
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -1716,6 +2220,41 @@
         computeAndApplyEffectiveSize('sync toggle ' + (canvasSyncEnabled ? 'ON' : 'OFF'));
       });
 
+      // ========== Box表示 トグル ==========
+      //   box (壁 + 3cm 内面格子 + hole/border) と avatar 選択枠 (apex/base edges) を
+      //   まとめて ON/OFF する。light オブジェクトの選択枠 (__alwaysVisible/__isAvatarEdge 無し)
+      //   は影響を受けない。
+      const obsBoxBtn = _by('obs-box-toggle');
+      function syncObsBoxBtn() {
+        if (!obsBoxBtn) return;
+        obsBoxBtn.textContent = boxVisibilityEnabled ? 'ON' : 'OFF';
+        obsBoxBtn.style.background = boxVisibilityEnabled ? '#22c55e' : '#475569';
+        obsBoxBtn.style.color      = boxVisibilityEnabled ? '#052e16' : 'white';
+      }
+      syncObsBoxBtn();
+      function applyBoxVisibility() {
+        avatars.forEach((a) => {
+          if (a.box) a.box.visible = boxVisibilityEnabled;
+          // 視錐台ワイヤー (apex→4 隅 + base 四辺、avatar 色) も同時にトグル
+          if (a.frustumLines) a.frustumLines.visible = boxVisibilityEnabled;
+          // 選択中の avatar edge は選択状態に合わせて再評価
+          if (a.apexEdges) {
+            const sel = (selectedObject === a.apexHit);
+            a.apexEdges.visible = boxVisibilityEnabled && sel;
+          }
+          if (a.baseEdges) {
+            const sel = (selectedObject === a.baseHit);
+            a.baseEdges.visible = boxVisibilityEnabled && sel;
+          }
+        });
+      }
+      _bind('obs-box-toggle', 'click', () => {
+        boxVisibilityEnabled = !boxVisibilityEnabled;
+        syncObsBoxBtn();
+        applyBoxVisibility();
+        log('box 表示 → ' + (boxVisibilityEnabled ? 'ON' : 'OFF') + ' (box + 内面格子 + 選択枠)', 'ok');
+      });
+
       // ========== FOV 入力 (Enter で適応) ==========
       //   camera.fov (vertical) を書き換え + apex-base 距離 d = H / (2 tan(fov/2)) を再計算。
       //   base サイズは effectiveDisplaySize (m) のまま → FOV に応じて apex が近づく/遠ざかる。
@@ -1877,17 +2416,23 @@
 
       // ========== フルスクリーン (旧 /test/space から継承) ==========
       //   ・obs-fullscreen ボタン: html 要素で requestFullscreen
-      //   ・fs-exit-btn      : exitFullscreen
+      //   ・解除は Enter キー (fs-exit-btn は廃止済み) — window keydown handler で処理
       //   ・fullscreenchange 監視: body.fs-mode class を付け外し
-      //       → CSS で status/panel/log/ui-toggle 一括非表示、fs-exit-btn のみ表示
+      //       → CSS で status/panel/log/ui-toggle 一括非表示
       //   ・resize もイベント経由で呼ばれるが念のため手動更新
       _bind('obs-fullscreen', 'click', () => {
         const el = document.documentElement;
         if (el.requestFullscreen) el.requestFullscreen().catch((e) => log('fullscreen err: ' + e.message, 'err'));
         else log('requestFullscreen 非対応ブラウザ', 'err');
       });
-      _bind('fs-exit-btn', 'click', () => {
-        if (document.exitFullscreen) document.exitFullscreen();
+      // Enter キー: フルスクリーン中なら解除 (INPUT/SELECT フォーカス中は無視)
+      window.addEventListener('keydown', (e) => {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+        if (e.code !== 'Enter' && e.code !== 'NumpadEnter') return;
+        if (document.fullscreenElement) {
+          e.preventDefault();
+          if (document.exitFullscreen) document.exitFullscreen();
+        }
       });
       document.addEventListener('fullscreenchange', () => {
         const active = !!document.fullscreenElement;
@@ -2291,6 +2836,51 @@
         });
       }
       if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider();
+
+      // ==================================================
+      // 移動 Box 質量 (cube 選択 + 数値入力、Enter で即時適用)
+      //   ・cubeMass イベントで全クライアントに配信、物理 tick の空気抵抗で反映
+      // ==================================================
+      const _cubeSel  = _by('m-cube-select');
+      const _cubeMass = _by('m-cube-mass');
+      const _cubeMassCur = _by('m-cube-mass-current');
+      window.__syncMasterMassInput = function() {
+        if (!_cubeSel || !_cubeMass) return;
+        const name = _cubeSel.value;
+        const c = movableCubes.find((m) => m.name === name);
+        if (!c) return;
+        _cubeMass.value = String(c.userData.mass);
+        if (_cubeMassCur) _cubeMassCur.textContent = c.userData.mass.toFixed(2);
+      };
+      function _applyCubeMass() {
+        if (!_cubeSel || !_cubeMass) return;
+        const name = _cubeSel.value;
+        const v = parseFloat(_cubeMass.value);
+        if (!isFinite(v) || v < 0.01 || v > 1000) {
+          log('質量が不正 (0.01 〜 1000)', 'err');
+          return;
+        }
+        if (socket && socket.connected) {
+          socket.emit('cubeMass', { name, mass: v });
+        }
+        log('cubeMass emit: ' + name + ' = ' + v.toFixed(2) + ' kg', 'ok');
+      }
+      if (_cubeSel) {
+        _cubeSel.addEventListener('change', () => {
+          if (window.__syncMasterMassInput) window.__syncMasterMassInput();
+        });
+      }
+      if (_cubeMass) {
+        _cubeMass.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            _applyCubeMass();
+            if (e.target && e.target.blur) e.target.blur();
+          }
+        });
+      }
+      _bind('m-cube-mass-apply', 'click', _applyCubeMass);
+      if (window.__syncMasterMassInput) window.__syncMasterMassInput();
     }
 
     // ========== クライアント選択ドロップダウン ==========
@@ -2340,12 +2930,62 @@
       if (window.__syncMasterLightSlider) window.__syncMasterLightSlider();
     }
 
-    // ========== UI 表示切替 ==========
-    _bind('ui-toggle', 'click', () => {
+    // ========== UI 表示切替 + フルスクリーン連動 ==========
+    //   ・非表示にした瞬間に requestFullscreen (物理ビューポート全域を canvas で使う)
+    //   ・再度押したら exitFullscreen + UI 復帰
+    //   ・ユーザーが Safari 側ジェスチャー等で fullscreen 解除した時は
+    //     fullscreenchange handler で UI を自動復帰させる (下記グローバルハンドラ)
+    _bind('ui-toggle', 'click', async () => {
       const btn = _by('ui-toggle');
-      document.body.classList.toggle('ui-hidden');
-      if (btn) btn.textContent = document.body.classList.contains('ui-hidden') ? '◉' : 'UI';
+      const nextHidden = !document.body.classList.contains('ui-hidden');
+      document.body.classList.toggle('ui-hidden', nextHidden);
+      if (btn) btn.textContent = nextHidden ? '◉' : 'UI';
+      // Fullscreen 要求 (標準 API と Safari 用 webkit-prefix 両方に対応)
+      //   iOS 17+ Safari は標準 API に対応、iOS 16 以前は不可 (video 以外は非対応)。
+      //   非対応環境ではエラーログを残し、ユーザーには「ホーム画面追加で PWA 化」を案内。
+      const el  = document.documentElement;
+      const req = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen;
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      try {
+        if (nextHidden) {
+          if (!fsEl && typeof req === 'function') {
+            await req.call(el);
+          } else if (!req) {
+            log('requestFullscreen 非対応 (iOS 16 以前など)。ホーム画面追加で PWA 化を推奨', 'err');
+          }
+        } else {
+          if (fsEl && typeof exit === 'function') {
+            await exit.call(document);
+          }
+        }
+      } catch (e) {
+        log('fullscreen err: ' + (e && e.message ? e.message : e), 'err');
+      }
     });
+    // 全ロール共通の fullscreenchange 監視:
+    //   ・canvas サイズを viewport 変化に追随 (camera ロールでも動く)
+    //   ・fullscreen 解除時に UI 非表示状態も自動復帰
+    //   ※ fs-mode class の付与は setupObserver 側の handler が担当 (observer/master のみ)
+    //     camera ロールでは fs-mode を付けないので ui-toggle が残り、再タップで戻せる
+    function _onFsChange() {
+      const active = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      if (typeof camera !== 'undefined') {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+      }
+      if (typeof renderer !== 'undefined') {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+      // 外部要因 (ジェスチャー / Esc / fs-exit-btn) で解除された時は UI 状態も戻す
+      if (!active && document.body.classList.contains('ui-hidden')) {
+        document.body.classList.remove('ui-hidden');
+        const btn = _by('ui-toggle');
+        if (btn) btn.textContent = 'UI';
+      }
+    }
+    document.addEventListener('fullscreenchange', _onFsChange);
+    document.addEventListener('webkitfullscreenchange', _onFsChange);
 
     // ========================================================
     // オフアクシス投影 (/test/space から移植)
