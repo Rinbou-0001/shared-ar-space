@@ -208,9 +208,20 @@
       // 物理状態
       c.userData.__movable = true;
       c.userData.vel    = new THREE.Vector3(0, 0, 0);   // 並進速度 m/s
-      c.userData.angVel = new THREE.Vector3(0, 0, 0);   // 角速度 rad/s (Euler XYZ)
+      c.userData.angVel = new THREE.Vector3(0, 0, 0);   // 角速度 rad/s (world 軸)
       c.userData.held   = false;
-      c.userData.mass   = 1.0;                          // 質量 kg (空気抵抗の効きを制御)
+      c.userData.mass   = 10.0;                         // 質量 kg (基準 10、空気抵抗の効きを制御)
+      // Sleep システム (微振動抑制): 一定時間ほぼ静止したら物理 tick をスキップ、
+      //   grab/衝突/サーバー同期で起こされる。
+      c.userData.sleeping   = false;
+      c.userData.restFrames = 0;
+      // 掴み中の Spring-Damper 目標位置 (null で未設定)
+      c.userData.targetPos  = null;
+      // Ownership: 最後に掴んだクライアント socket.id (null = 未所有)
+      //   ・オーナーのみ物理 tick + objectPose emit を実行
+      //   ・非オーナーは受信位置を適用するだけ (ローカル物理は停止)
+      //   → 複数クライアントが同じ cube を同時シミュレートする相互上書きループを防ぐ
+      c.userData.ownerId    = null;
       return c;
     }
     const cube1 = makeMovableCube('cube1',  1.5, 0.5, -0.5, 0x6b7280); // 灰
@@ -226,7 +237,8 @@
     //   ・false: box.visible = false + avatar 選択枠 (apex/base edges) も強制非表示
     //   ・true : box.visible = true + 選択枠は選択状態に応じて表示
     //   ・light オブジェクトの選択枠 (__isAvatarEdge を持たない) は影響を受けない
-    let boxVisibilityEnabled = true;
+    //   ・入室時は OFF にして、必要に応じて obs-box-toggle で手動 ON する運用。
+    let boxVisibilityEnabled = false;
 
     // ============================================================
     // シーンオブジェクト (master が右クリックメニューで生成する光源等)
@@ -393,7 +405,6 @@
     // ========================================================
     const GRAVITY = 9.81;
     const REST_COEFF = 0.35;   // 床反発
-    const FRICTION_H = 0.90;   // 水平摩擦 (床接触時)
     const CUBE_HALF_Y = 0.5;
     // 空気抵抗係数 (kg/m): 抵抗力 F = k · |v|·v、加速度 = F/m
     //   ・軽い (mass 小) → 抵抗の効きが強く落下ゆっくり (羽のようにフラフラ)
@@ -401,9 +412,31 @@
     //   終端速度 v_term = sqrt(g · m / k):
     //     m=0.1: ~4.4 m/s   m=1: ~14 m/s   m=10: ~44 m/s
     const AIR_DRAG = 0.05;
+    // 簡易剛体力学パラメータ:
+    //   ・CUBE_INERTIA_FACTOR = L²/6 (1m 立方体の慣性モーメント係数)
+    //     → 実効 I = mass × 1/6
+    //   ・FRICTION_COEFF = Coulomb 摩擦係数 (接触点の tangent 方向の impulse 上限)
+    //     ・前回の velocity 減衰 0.90 → 実効 μ ~0.3 相当 → 倍増して μ = 0.6
+    //   ・ANGULAR_DAMP = 空気抵抗 (回転)、1 frame 毎
+    const CUBE_INERTIA_FACTOR = 1 / 6;
+    const FRICTION_COEFF = 0.6;
+    const ANGULAR_DAMP = 0.995;
+    // 掴み中 (held) の Spring-Damper 係数 (質量比例)
+    //   ・k_eff = SPRING_K_PER_KG × mass, d_eff = SPRING_DAMPING_PER_KG × mass
+    //   ・加速度 a = (k·(target-pos) - d·v) / m = SPRING_K_PER_KG·x - SPRING_DAMPING_PER_KG·v
+    //     → 質量が変わっても追従感・振り感は一定 (ω = sqrt(k/m) = sqrt(SPRING_K_PER_KG) ≈ 5.5 rad/s、周期 ~1.1s)
+    //   ・ζ = SPRING_DAMPING_PER_KG / (2·sqrt(SPRING_K_PER_KG)) ≈ 0.55 (弱振動 = ほどよい振り返し)
+    const SPRING_K_PER_KG = 45;   // 22.5 × 2: 引っ張り力を 2 倍に
+    const SPRING_DAMPING_PER_KG = 6;
+    const SPRING_VEL_CAP = 20;    // 速度上限 m/s (発散防止)
     const _phys_lastEmit = new Map();   // name → last emit ms
     function _emitCubePoseThrottled(cube, forceMs) {
       if (!socket || !socket.connected) return;
+      // Ownership guard: 自分がオーナーの時のみ emit (未所有 null でも emit しない)
+      //   → 初期状態 (ownerId=null、誰も掴んでいない) では一切 emit されず、
+      //     複数クライアントが同じ cube の位置を競合送信して往復する問題が消滅。
+      //     cubes は決定論的な初期物理 (同じ初期条件 → 同じ settling) でローカル一致。
+      if (cube.userData.ownerId !== myId) return;
       const now = performance.now();
       const last = _phys_lastEmit.get(cube.name) || 0;
       const interval = (typeof forceMs === 'number') ? forceMs : 33; // 30Hz
@@ -415,53 +448,230 @@
         qx: cube.quaternion.x, qy: cube.quaternion.y, qz: cube.quaternion.z, qw: cube.quaternion.w,
       });
     }
+    // 剛体力学用の一時変数 (allocation 削減)
+    const _phTmpV1 = new THREE.Vector3();
+    const _phTmpV2 = new THREE.Vector3();
+    const _phTmpV3 = new THREE.Vector3();
+    const _phTmpV4 = new THREE.Vector3();
+    const _phTmpQ  = new THREE.Quaternion();
+    const _phNormal = new THREE.Vector3(0, 1, 0);
+    // 1m 立方体の 8 頂点 (local coord) と world 回転済みキャッシュ
+    const _cubeCorners = [
+      new THREE.Vector3(-0.5,-0.5,-0.5), new THREE.Vector3(+0.5,-0.5,-0.5),
+      new THREE.Vector3(-0.5,+0.5,-0.5), new THREE.Vector3(+0.5,+0.5,-0.5),
+      new THREE.Vector3(-0.5,-0.5,+0.5), new THREE.Vector3(+0.5,-0.5,+0.5),
+      new THREE.Vector3(-0.5,+0.5,+0.5), new THREE.Vector3(+0.5,+0.5,+0.5),
+    ];
+    const _rotatedCorners = [];
+    for (let i = 0; i < 8; i++) _rotatedCorners.push(new THREE.Vector3());
+    const _phCentroid = new THREE.Vector3();
+
+    // 入力 quaternion に最も近い軸整列 (24 cardinal rotations) を見つけて outQuat に書き込む。
+    //   立方体の対称性から 24 通りの rotation が同じ外見 (面着地)。
+    //   実装簡略化: 現在の rotation 行列から各 face 法線が world ±Y に最も近いペアを選び、
+    //   そこから最も近い yaw 90° stepping で spin を snap。
+    const _snapM = new THREE.Matrix4();
+    const _snapE = new THREE.Euler();
+    function _snapToNearestCardinal(curQuat, outQuat) {
+      _snapM.makeRotationFromQuaternion(curQuat);
+      _snapE.setFromRotationMatrix(_snapM, 'YXZ');
+      // Yaw/Pitch/Roll を π/2 単位にスナップ
+      const q = Math.PI / 2;
+      const snap = (x) => Math.round(x / q) * q;
+      _snapE.y = snap(_snapE.y);
+      _snapE.x = snap(_snapE.x);
+      _snapE.z = snap(_snapE.z);
+      outQuat.setFromEuler(_snapE);
+    }
+
+    // 微振動抑制 (sleep) 閾値
+    //   ・resting-contact の short-circuit で v.y がゼロ化された後、
+    //     水平摩擦と角速度減衰で全成分が小さくなった時 sleep へ遷移。
+    //   ・閾値は "重力 1 フレーム分の v.y 累積 (~0.16 m/s)" を少し超える値に設定し、
+    //     resting 中は毎フレーム法線成分がゼロ化されるので余裕を持って sleep に乗る。
+    const SLEEP_LIN2 = 0.04;      // |v|² < 0.04 → |v| < 0.2 m/s
+    const SLEEP_ANG2 = 0.04;      // |ω|² < 0.04 → |ω| < 0.2 rad/s
+    const SLEEP_HOLD_FRAMES = 12; // 連続安定フレーム数
+    function _wakeCube(c) {
+      if (c && c.userData) {
+        c.userData.sleeping = false;
+        c.userData.restFrames = 0;
+      }
+    }
     function _physicsTick(dt) {
       for (const c of movableCubes) {
-        if (c.userData.held) continue;
+        // Ownership チェック: 他クライアントが所有している cube の物理はスキップ
+        //   (受信した位置を描画するだけ、ローカルシミュレーションしない → 競合消失)
+        const owner = c.userData.ownerId;
+        if (owner && owner !== myId) continue;
         const v  = c.userData.vel;
         const av = c.userData.angVel;
         const mass = c.userData.mass || 1.0;
+        // held: Spring-Damper で targetPos へ引っ張る (アームの先端 → バネ紐 → 物体)
+        //   ・v += ((k·x - d·v) / m) · dt、ただし k/m と d/m は定数化
+        //   ・gravity は加え続ける (紐で吊るされてわずかに垂れる)
+        //   ・float しないよう速度上限クランプ
+        //   ・床衝突は held でも実行 (下にぶつかればゴリゴリこする)
+        if (c.userData.held) {
+          const t = c.userData.targetPos;
+          if (t) {
+            _phTmpV1.copy(t).sub(c.position).multiplyScalar(SPRING_K_PER_KG);  // k/m · x
+            _phTmpV2.copy(v).multiplyScalar(-SPRING_DAMPING_PER_KG);           // -d/m · v
+            _phTmpV1.add(_phTmpV2);                                            // 加速度 (m/s²)
+            v.addScaledVector(_phTmpV1, dt);
+          }
+          v.y -= GRAVITY * dt;
+          // 発散防止: 速度上限
+          if (v.length() > SPRING_VEL_CAP) v.setLength(SPRING_VEL_CAP);
+          c.position.addScaledVector(v, dt);
+          _resolveFloorContactRigid(c, dt);
+          // 壁反発
+          if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
+          if (c.position.x < -FIELD_HALF + CUBE_HALF_Y) { c.position.x = -FIELD_HALF + CUBE_HALF_Y; v.x = -v.x * 0.5; }
+          if (c.position.z >  FIELD_HALF - CUBE_HALF_Y) { c.position.z =  FIELD_HALF - CUBE_HALF_Y; v.z = -v.z * 0.5; }
+          if (c.position.z < -FIELD_HALF + CUBE_HALF_Y) { c.position.z = -FIELD_HALF + CUBE_HALF_Y; v.z = -v.z * 0.5; }
+          continue;
+        }
+        if (c.userData.sleeping) continue;   // sleep 中は tick 全スキップ
         // 重力
         v.y -= GRAVITY * dt;
-        // 空気抵抗 (質量が大きいほど効きが弱い = 重い物ほど落下が速い)
+        // 空気抵抗 (質量が大きいほど効きが弱い)
         const sp = v.length();
         if (sp > 0.01) {
-          const dragMag = AIR_DRAG * sp * sp / mass;   // m/s²
-          const drag = v.clone().normalize().multiplyScalar(-dragMag * dt);
-          v.add(drag);
+          const dragMag = AIR_DRAG * sp * sp / mass;
+          _phTmpV1.copy(v).normalize().multiplyScalar(-dragMag * dt);
+          v.add(_phTmpV1);
         }
+        // 位置更新
         c.position.addScaledVector(v, dt);
-        // 回転 (Euler intrinsic、視覚上のスピン)
+        // 回転更新 (quaternion integration、world 軸基準角速度)
         if (av.lengthSq() > 1e-6) {
-          c.rotation.x += av.x * dt;
-          c.rotation.y += av.y * dt;
-          c.rotation.z += av.z * dt;
-          av.multiplyScalar(0.995);   // 空気抵抗
+          const angSp = av.length();
+          _phTmpV1.copy(av).divideScalar(angSp);
+          _phTmpQ.setFromAxisAngle(_phTmpV1, angSp * dt);
+          c.quaternion.premultiply(_phTmpQ).normalize();
+          av.multiplyScalar(ANGULAR_DAMP);   // 空気抵抗
         }
-        // 床衝突
-        if (c.position.y <= CUBE_HALF_Y) {
-          c.position.y = CUBE_HALF_Y;
-          if (v.y < 0) v.y = -v.y * REST_COEFF;
-          v.x *= FRICTION_H;
-          v.z *= FRICTION_H;
-          av.multiplyScalar(0.7);     // 床摩擦で回転を減衰
-          if (Math.abs(v.y) < 0.08) v.y = 0;
-          if (v.lengthSq() < 0.0004) v.set(0, 0, 0);
-          if (av.lengthSq() < 0.02) av.set(0, 0, 0);
-        }
-        // 場所範囲: FIELD_HALF (10m) 壁で反発
+        // 床接地 (簡易剛体: 最下頂点検出 + 法線反力 + Coulomb 摩擦 + トルク)
+        _resolveFloorContactRigid(c, dt);
+        // 場所範囲: FIELD_HALF (10m) 壁で反発 (center ベース、簡易)
         if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
         if (c.position.x < -FIELD_HALF + CUBE_HALF_Y) { c.position.x = -FIELD_HALF + CUBE_HALF_Y; v.x = -v.x * 0.5; }
         if (c.position.z >  FIELD_HALF - CUBE_HALF_Y) { c.position.z =  FIELD_HALF - CUBE_HALF_Y; v.z = -v.z * 0.5; }
         if (c.position.z < -FIELD_HALF + CUBE_HALF_Y) { c.position.z = -FIELD_HALF + CUBE_HALF_Y; v.z = -v.z * 0.5; }
+        // Sleep 判定: ほぼ静止が連続した時 sleep フラグ ON → tick 全スキップ
+        if (v.lengthSq() < SLEEP_LIN2 && av.lengthSq() < SLEEP_ANG2) {
+          c.userData.restFrames++;
+          if (c.userData.restFrames >= SLEEP_HOLD_FRAMES) {
+            c.userData.sleeping = true;
+            v.set(0, 0, 0);
+            av.set(0, 0, 0);
+          }
+        } else {
+          c.userData.restFrames = 0;
+        }
       }
-      // Box-Box 衝突判定 + 分離 (物理更新後に解決)
+      // Box-Box 衝突判定 + 分離
       _resolveCubeCollisions();
       // 動いていれば objectPose emit (throttle 30Hz)
       for (const c of movableCubes) {
         if (c.userData.vel.lengthSq() > 0.0001 || c.userData.angVel.lengthSq() > 1e-4) {
           _emitCubePoseThrottled(c);
         }
+      }
+    }
+
+    // 床接地 (剛体力学): 回転 cube が床に当たった時、
+    //   ・8 頂点の worldY を計算 → min y に近い (0.01m 以内) 頂点全ての centroid を
+    //     "有効 pivot" とすることで、面接触=4corners→centroid が面中央 (0,-0.5,0) で安定、
+    //     辺接触=2corners→辺中央で一軸トルク→面に倒れる、角接触=1corner→強トルクで倒れる。
+    //   ・最下点を 0 まで押し戻し + 法線反力 + Coulomb 摩擦 + 重力 couple トルクを適用
+    //   ・θ ≈ 面水平 で angVel ≈ 0 の時は orientation snap で axis-aligned にスナップ
+    function _resolveFloorContactRigid(cube, dt) {
+      const mass = cube.userData.mass || 1.0;
+      const I = mass * CUBE_INERTIA_FACTOR;
+      const v  = cube.userData.vel;
+      const av = cube.userData.angVel;
+      const CONTACT_TOL = 0.01;
+      // 8 頂点を world 回転適用、キャッシュに保存。最下点 minY を記録。
+      let minY = Infinity;
+      for (let k = 0; k < 8; k++) {
+        _rotatedCorners[k].copy(_cubeCorners[k]).applyQuaternion(cube.quaternion);
+        const worldY = cube.position.y + _rotatedCorners[k].y;
+        if (worldY < minY) minY = worldY;
+      }
+      if (minY >= 0) return;
+      // 床突き抜け補正: 最下点が y=0 になるよう center を押し上げ
+      cube.position.y -= minY;
+      // 接触する頂点 (minY + CONTACT_TOL 以内) の centroid を有効 pivot とする
+      _phCentroid.set(0, 0, 0);
+      let contactCount = 0;
+      for (let k = 0; k < 8; k++) {
+        const worldY = cube.position.y + _rotatedCorners[k].y;
+        if (worldY <= (0 + CONTACT_TOL)) {
+          _phCentroid.add(_rotatedCorners[k]);
+          contactCount++;
+        }
+      }
+      if (contactCount === 0) return;
+      _phCentroid.divideScalar(contactCount);
+      const r = _phCentroid;   // 接触点 - center のオフセット (world 座標)
+      // 接触点速度 = v_center + ω × r
+      _phTmpV2.copy(av).cross(r);
+      _phTmpV3.copy(v).add(_phTmpV2);
+      const vn = _phTmpV3.dot(_phNormal);
+      if (vn >= 0) return;   // 既に離れる方向
+      // ====== 静止接触 short-circuit (微振動抑制 + 角立ち転倒) ======
+      //   ・centroid pivot により face 接触では r.x=r.z=0 → couple トルク=0 → 振動なし
+      //   ・edge/corner 接触では r.x または r.z ≠ 0 → couple トルクで面着地へ転倒
+      if (minY > -0.01 && vn > -0.5) {
+        // 法線成分ゼロ化 (重力累積キャンセル)
+        _phTmpV2.copy(_phNormal).multiplyScalar(vn);
+        v.sub(_phTmpV2);
+        v.multiplyScalar(0.80);
+        // 重力 couple トルク Δω = (r × F_up) / I · dt
+        _phTmpV2.set(0, mass * GRAVITY, 0);
+        _phTmpV4.copy(r).cross(_phTmpV2);
+        av.addScaledVector(_phTmpV4, dt / I);   // ← dt 掛け忘れを修正 (以前 60× overdrive)
+        av.multiplyScalar(0.90);
+        // ★ Orientation snap: contact が複数 corners (面 or 辺) で角速度ほぼ 0 の時、
+        //   最寄の axis-aligned 向きへゆっくり補間 → 傾いた固定を解消
+        if (contactCount >= 2 && av.lengthSq() < 0.05) {
+          _phTmpQ.copy(cube.quaternion);
+          // 最寄 cardinal (XYZ 軸整列) quaternion を探し、slerp で近づける
+          _snapToNearestCardinal(cube.quaternion, _phTmpQ);
+          cube.quaternion.slerp(_phTmpQ, Math.min(1.0, dt * 6.0));
+        }
+        return;
+      }
+      // 法線 impulse
+      _phTmpV2.copy(r).cross(_phNormal);        // r × n
+      const inertialN = _phTmpV2.dot(_phTmpV2) / I;
+      const j = -(1 + REST_COEFF) * vn / (1 / mass + inertialN);
+      _phTmpV4.copy(_phNormal).multiplyScalar(j);  // normal impulse
+      v.addScaledVector(_phTmpV4, 1 / mass);
+      _phTmpV2.copy(r).cross(_phTmpV4);
+      av.addScaledVector(_phTmpV2, 1 / I);
+      // 摩擦 (tangent 方向、Coulomb)
+      _phTmpV2.copy(_phNormal).multiplyScalar(vn);
+      _phTmpV3.sub(_phTmpV2);                     // v_tangential
+      const vtLen = _phTmpV3.length();
+      if (vtLen > 0.001) {
+        _phTmpV3.divideScalar(vtLen).negate();     // tangent unit (opposing)
+        _phTmpV2.copy(r).cross(_phTmpV3);
+        const inertialT = _phTmpV2.dot(_phTmpV2) / I;
+        const jtMax = FRICTION_COEFF * j;
+        const jtNeeded = vtLen / (1 / mass + inertialT);
+        const jt = Math.min(jtMax, jtNeeded);
+        _phTmpV4.copy(_phTmpV3).multiplyScalar(jt);
+        v.addScaledVector(_phTmpV4, 1 / mass);
+        _phTmpV2.copy(r).cross(_phTmpV4);
+        av.addScaledVector(_phTmpV2, 1 / I);
+      }
+      // 微小振動抑制 (静止判定)
+      if (v.lengthSq() < 0.001 && av.lengthSq() < 0.01) {
+        v.set(0, 0, 0);
+        av.set(0, 0, 0);
       }
     }
     // AABB (軸整列) 衝突判定 — cube1..4 は 1×1×1 の立方体で回転なし
@@ -490,9 +700,11 @@
           if (aHeld && !bHeld) {
             b.position[ax] += min * sign;
             vb[ax] = Math.abs(vb[ax]) * sign * 0.5;
+            _wakeCube(b);
           } else if (!aHeld && bHeld) {
             a.position[ax] -= min * sign;
             va[ax] = -Math.abs(va[ax]) * sign * 0.5;
+            _wakeCube(a);
           } else {
             const half = (min / 2) * sign;
             a.position[ax] -= half;
@@ -501,6 +713,30 @@
             const tmp = va[ax];
             va[ax] = vb[ax] * 0.7;
             vb[ax] = tmp * 0.7;
+            _wakeCube(a); _wakeCube(b);
+          }
+          // ★ 対策 1 + 3: 垂直積み重ね時の摩擦 + 重力累積キャンセル
+          //   ・ax === 'y' = 垂直衝突 (積み重ね)
+          //   ・top/bottom を dy の符号で判定 (dy > 0 なら b が上)
+          //   ・top cube の v.y を 0 寄せ (重力累積で下方向に加速してしまうのを抑制)
+          //   ・両 cube の XZ 速度を減衰 (タンジェント摩擦) → 横滑りを防ぐ
+          //   ・角速度も減衰
+          if (ax === 'y') {
+            const STACK_FRICTION = 0.80;
+            const STACK_ANG_DAMP = 0.85;
+            va.x *= STACK_FRICTION; va.z *= STACK_FRICTION;
+            vb.x *= STACK_FRICTION; vb.z *= STACK_FRICTION;
+            a.userData.angVel.multiplyScalar(STACK_ANG_DAMP);
+            b.userData.angVel.multiplyScalar(STACK_ANG_DAMP);
+            // 重力累積キャンセル: top cube の下方向 v.y をゼロに近づける
+            //   (床の resting-contact short-circuit と同等の効果を cube-cube で実現)
+            if (dy > 0) {
+              // b が上 → b の下方向 v.y をキャンセル
+              if (vb.y < 0) vb.y = 0;
+            } else {
+              // a が上 → a の下方向 v.y をキャンセル
+              if (va.y < 0) va.y = 0;
+            }
           }
         }
       }
@@ -513,19 +749,45 @@
     //   ・release 時に直前フレームからの Δpos/Δt で初速を計算 (1.4倍で投げる感)
     //   ・emit は throttle 30Hz、release 時は force emit
     // ========================================================
-    const GRAB_DIST = 1.5;      // 掴んだ物を保持する距離 (m)
+    const GRAB_DIST = 1.5;      // 掴んだ物を保持するデフォルト距離 (m)
+    const GRAB_DIST_MIN = 0.5;  // スワイプ調整の下限 (m)
+    const GRAB_DIST_MAX = 10;   // スワイプ調整の上限 (m)
+    const GRAB_DIST_SENS = 0.015; // スワイプの Δy (px) → 距離 (m) の変換係数
+    // 勢いスワイプ投擲の閾値と倍率
+    //   ・|swipeVel| (px/s) がこの値を超えたら touchend 時に奥 (camera forward) へ投げる
+    //   ・|swipeVel| × SWIPE_THROW_SCALE_M_PER_PX が初速 (m/s)、上限 SPRING_VEL_CAP
+    const SWIPE_THROW_THRESHOLD_PX_PER_S = 1200;
+    const SWIPE_THROW_SCALE_M_PER_PX = 0.005;
     const RELEASE_BOOST = 1.4;
     let _heldCube = null;
     function grabCube(cube) {
       if (!cube || cube.userData.held) return;
       cube.userData.held = true;
+      // Ownership を自分に設定 (他クライアントに emit で伝達 → 二重シミュを防ぐ)
+      cube.userData.ownerId = myId;
       cube.userData.vel.set(0, 0, 0);
       cube.userData.angVel.set(0, 0, 0);
+      // targetPos を現在位置で seed (grab 瞬間の "引っ張り" を 0 からスタート、テレポ防止)
+      if (!cube.userData.targetPos) cube.userData.targetPos = new THREE.Vector3();
+      cube.userData.targetPos.copy(cube.position);
+      // アーム長 = 掴んだ瞬間のアバターからの距離を保持 (clamp)。以後 _heldTick で
+      //   target = camera + forward · grabDist に設定され、cube はこの距離を維持。
+      //   camera role は後からスワイプで距離を変更可能 (cubeAdjust 内で grabDist を更新)。
+      const d = cube.position.distanceTo(camera.position);
+      cube.userData.grabDist = Math.max(GRAB_DIST_MIN, Math.min(GRAB_DIST_MAX, d));
       cube.userData._prevPos  = cube.position.clone();
       cube.userData._prevQuat = cube.quaternion.clone();
       cube.userData._prevTime = performance.now();
+      _wakeCube(cube);   // sleep 解除
       _heldCube = cube;
-      log('grab: ' + cube.name, 'ok');
+      // Ownership transfer を即時 broadcast (専用イベント cubeOwnership)
+      //   他クライアントが受信 → ownerId を自分以外に設定 → 物理+emit 停止
+      if (socket && socket.connected) {
+        socket.emit('cubeOwnership', { name: cube.name, owner: myId });
+      }
+      // 掴み後の初回 pose を force emit (遅延なく位置同期)
+      _emitCubePoseThrottled(cube, 0);
+      log('grab: ' + cube.name + ' dist=' + cube.userData.grabDist.toFixed(2) + 'm', 'ok');
     }
     // quaternion 差分 → 角速度 (Vector3, XYZ 軸周り rad/s) を近似
     function _quatDeltaToAngVel(qFrom, qTo, dt) {
@@ -538,42 +800,43 @@
     function releaseCube(cube) {
       if (!cube || !cube.userData.held) return;
       const now = performance.now();
-      const prev = cube.userData._prevPos;
       const prevQ = cube.userData._prevQuat;
       const dt = Math.max(0.001, (now - (cube.userData._prevTime || now)) / 1000);
-      if (prev) {
-        cube.userData.vel
-          .copy(cube.position).sub(prev)
-          .divideScalar(dt)
-          .multiplyScalar(RELEASE_BOOST);
-        // 極端な速度制限 (20 m/s)
-        if (cube.userData.vel.length() > 20) cube.userData.vel.setLength(20);
-      }
+      // vel は Spring-Damper で既に自然な速度が積分されているのでそのまま継続。
+      //   釣竿を振って離すような動作で vel が大きければそのまま飛ぶ。
+      //   極端値だけクランプ。
+      if (cube.userData.vel.length() > SPRING_VEL_CAP) cube.userData.vel.setLength(SPRING_VEL_CAP);
+      // angVel は spring 対象外 (quaternion を rigid に camera 追従していたため)。
+      //   quaternion delta から計算 → RELEASE_BOOST 倍 (手首フリック)
       if (prevQ) {
         const av = _quatDeltaToAngVel(prevQ, cube.quaternion, dt);
         av.multiplyScalar(RELEASE_BOOST);
-        if (av.length() > 15) av.setLength(15);   // 過剰スピン抑制 (~2.4 rev/s)
+        if (av.length() > 15) av.setLength(15);
         cube.userData.angVel.copy(av);
       }
       cube.userData.held = false;
+      cube.userData.targetPos = null;    // spring 目標解除
+      _wakeCube(cube);
       _heldCube = null;
-      _emitCubePoseThrottled(cube, 0);   // 強制送信
+      _emitCubePoseThrottled(cube, 0);
       log('release: ' + cube.name +
           ' vel=' + cube.userData.vel.length().toFixed(2) + 'm/s' +
           ' angVel=' + cube.userData.angVel.length().toFixed(2) + 'rad/s', 'ok');
     }
     function _heldTick(dt) {
       if (!_heldCube || ROLE !== 'camera') return;
-      // 前フレーム状態を保存 (release 時の velocity/angVel 計算用)
+      // 前フレーム状態を保存 (release 時の angVel 計算用。vel は spring 由来で既に保持)
       _heldCube.userData._prevPos  = _heldCube.position.clone();
       _heldCube.userData._prevQuat = _heldCube.quaternion.clone();
       _heldCube.userData._prevTime = performance.now();
-      // camera + forward * GRAB_DIST の位置に追従、姿勢も camera に追従 (スマホ回転が cube に反映)
+      // Spring-Damper の目標位置 = アーム先端 (camera + forward · grabDist)
+      //   grabDist は grab 瞬間のアバター→cube 距離を保持 (スワイプで変更可能)
       const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      _heldCube.position.copy(camera.position).addScaledVector(forward, GRAB_DIST);
+      if (!_heldCube.userData.targetPos) _heldCube.userData.targetPos = new THREE.Vector3();
+      const dist = _heldCube.userData.grabDist || GRAB_DIST;
+      _heldCube.userData.targetPos.copy(camera.position).addScaledVector(forward, dist);
+      // 姿勢は camera に追従 (回転は spring せず rigid - MVP)
       _heldCube.quaternion.copy(camera.quaternion);
-      // 床貫通防止
-      if (_heldCube.position.y < CUBE_HALF_Y) _heldCube.position.y = CUBE_HALF_Y;
       _emitCubePoseThrottled(_heldCube);
     }
     // space3: 移動機能撤去 (選択のみ)。以下 snapAndClamp/moveSelected/emitObjectPose は
@@ -1450,6 +1713,20 @@
         }
       });
 
+      // 移動 Box の ownership transfer (grab した時の宣言、全クライアントに配信)
+      socket.on('cubeOwnership', (data) => {
+        if (!data || typeof data.name !== 'string') return;
+        const c = movableCubes.find((m) => m.name === data.name);
+        if (!c) return;
+        c.userData.ownerId = (typeof data.owner === 'string') ? data.owner : null;
+        // 他人がオーナーになった時、自分のローカル物理はリセット (競合防止)
+        if (c.userData.ownerId !== myId) {
+          c.userData.vel.set(0, 0, 0);
+          c.userData.angVel.set(0, 0, 0);
+          c.userData.sleeping = false;   // 以後 receive で描画
+        }
+      });
+
       // 移動 Box の質量更新 (master スライダー由来、全クライアントで共有)
       socket.on('cubeMass', (data) => {
         if (!data || typeof data.name !== 'string' || typeof data.mass !== 'number') return;
@@ -1470,15 +1747,21 @@
         if (!target) return;
         if (selectedObject === target && window.__cubeDragActive) return;
         if (_heldCube === target) return;
+        // objectPose では ownership を変更しない (別イベント cubeOwnership で管理)
         if (typeof data.x === 'number') target.position.x = data.x;
         if (typeof data.y === 'number') target.position.y = data.y;
         if (typeof data.z === 'number') target.position.z = data.z;
         if (typeof data.qx === 'number' && typeof data.qw === 'number') {
           target.quaternion.set(data.qx, data.qy || 0, data.qz || 0, data.qw);
         }
-        // 受信で強制上書きされたので、ローカル物理速度/角速度をリセット
+        // 受信で強制上書きされたので、ローカル物理速度/角速度をリセット + sleep も解除
+        //   (このクライアントは非オーナーとして受信位置だけを描画する、物理は走らない)
         if (target.userData && target.userData.vel)    target.userData.vel.set(0, 0, 0);
         if (target.userData && target.userData.angVel) target.userData.angVel.set(0, 0, 0);
+        if (target.userData) {
+          target.userData.sleeping = false;
+          target.userData.restFrames = 0;
+        }
       });
 
       socket.on('moveConfig', (data) => {
@@ -1558,10 +1841,12 @@
 
     // ========== メインループ用: フレーム更新関数のレジストリ (setupObserver が push するので先に宣言) ==========
     const updaters = [];
-    // 物理シミュレーション: 全ロールで cube1..4 に重力を適用
-    updaters.push(_physicsTick);
-    // camera role の held cube 追従 (毎フレーム phone forward に位置更新)
+    // camera role の held cube 追従 (毎フレーム targetPos を camera + forward·GRAB_DIST に更新)
+    //   ・物理 tick より先に実行することで、Spring-Damper が最新 targetPos を即座に参照できる
+    //     → スマホ回転 → 1 フレーム以内に spring 加速度が反映 → cube が phone 方向に追従
     updaters.push(_heldTick);
+    // 物理シミュレーション: 全ロールで cube1..4 に重力/spring/衝突を適用
+    updaters.push(_physicsTick);
 
     // ========== ロール別: パネル表示 + セットアップ ==========
     let _obsResync = null; // observer の yaw/pitch 再同期用 (forcePose 受信後)
@@ -1738,13 +2023,20 @@
       const _tmpQuat  = new THREE.Quaternion();
 
       // 現在の press 座標で raycast → 最初のヒット (mesh) を返す (なければ null)
+      //   ・選択安定化: 移動 Box (cube1..4) を最優先。距離が近くても apex/base/light を
+      //     間違って掴まないよう、まず movable cube のヒットを探し、無ければ他 selectable。
       function _raycastAt(x, y) {
         const rect = _canvas.getBoundingClientRect();
         _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
         _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
         _rayTap.setFromCamera(_ndcTap, camera);
         const hits = _rayTap.intersectObjects(selectables, false);
-        return hits.length > 0 ? hits[0] : null;
+        if (hits.length === 0) return null;
+        // Priority 1: movable cube
+        for (const h of hits) {
+          if (h.object.userData && h.object.userData.__movable) return h;
+        }
+        return hits[0];
       }
       // カメラ基準の水平 right / forward ベクトル (XZ 平面へ投影して正規化)
       //   cube1 の drag 移動方向計算に使用
@@ -1770,18 +2062,48 @@
         // 移動 Box (cube1..4)
         if (obj.userData && obj.userData.__movable) {
           selectObject(obj);
-          // camera (スマホ): tap で grab/release トグル (drag ではない)
-          //   _dragState は張らない → _pressEnd で tap 判定 → toggleGrab
-          if (ROLE === 'camera') return;
+          // camera (スマホ): touchstart の瞬間に grab/release トグル
+          //   さらに同じ指のタッチ継続中は上下スワイプで grabDist を調整できる状態にする
+          //   (cubeAdjust: startY と initialDist を保持し、_pressCheck で Δy から距離更新)
+          if (ROLE === 'camera') {
+            if (_heldCube === obj) {
+              releaseCube(obj);
+              return;
+            }
+            if (_heldCube) releaseCube(_heldCube);
+            grabCube(obj);
+            _dragState = {
+              type: 'cubeAdjust',
+              targetObj: obj,
+              startY: y,
+              startT: performance.now(),
+              lastY: y,
+              lastT: performance.now(),
+              swipeVel: 0,   // px/s (正 = 下向き、負 = 上向き)
+              initialDist: obj.userData.grabDist,
+            };
+            return;
+          }
           // observer/master: mousedown で grab → mousemove で XZ 平面フリー移動 → mouseup で release
           //   1m スナップ廃止、重力を持つ物理オブジェクトを自由に「掴んで」動かす
           if (obj.userData.held) return;
           grabCube(obj);
+          // 掴んだ瞬間のマウス位置に相当する world 上の "ハンドル点" を保存
+          //   drag sensitivity 適用時: (rayHitNow - handleStart) × sens を startCubePos に加算
+          const dist0 = camera.position.distanceTo(obj.position);
+          const rectG = _canvas.getBoundingClientRect();
+          _ndcTap.x = ((x - rectG.left) / rectG.width) * 2 - 1;
+          _ndcTap.y = -((y - rectG.top) / rectG.height) * 2 + 1;
+          _rayTap.setFromCamera(_ndcTap, camera);
+          const handleStart = _rayTap.ray.origin.clone()
+            .addScaledVector(_rayTap.ray.direction, dist0);
           _dragState = {
             type: 'cubeGrab',
             targetObj: obj,
             startX: x, startY: y,
-            grabDist: camera.position.distanceTo(obj.position), // 掴んだ時のカメラとの距離を保持
+            grabDist: dist0,
+            startCubePos: obj.position.clone(),
+            handleStart: handleStart,
             moved: false,
           };
           window.__cubeDragActive = true;
@@ -1816,24 +2138,48 @@
         if (Math.hypot(dx, dy) > slop) _tapMoved = true;
         if (!_dragState || !_tapMoved) return;
 
-        // cube grab (observer/master): マウス位置からのレイを camera から grabDist 進んだ点に置く
-        //   ・カメラ視線に垂直な平面 (深度 = grabDist) 上を自由に移動
-        //   ・上下ドラッグで持ち上げ/下ろし可、床貫通防止のみクランプ
+        // cube distance adjust (camera スマホ): touchstart した指のΔy で grabDist を調整
+        //   ・上スワイプ (y↓) → 距離↑ (遠ざかる)、下スワイプ (y↑) → 距離↓ (近づく)
+        //   ・grabDist が変わると _heldTick が targetPos を更新 → spring で滑らかに追従
+        //   ・同時に swipeVel (px/s、EMA 平滑) を記録 → touchend で勢い投擲判定に使う
+        if (_dragState.type === 'cubeAdjust') {
+          const t = _dragState.targetObj;
+          const now = performance.now();
+          const dtLast = Math.max(0.001, (now - _dragState.lastT) / 1000);
+          const inst = (y - _dragState.lastY) / dtLast;    // px/s
+          _dragState.swipeVel = _dragState.swipeVel * 0.5 + inst * 0.5;   // EMA 0.5
+          _dragState.lastY = y;
+          _dragState.lastT = now;
+          const dy = _dragState.startY - y;
+          let next = _dragState.initialDist + dy * GRAB_DIST_SENS;
+          next = Math.max(GRAB_DIST_MIN, Math.min(GRAB_DIST_MAX, next));
+          t.userData.grabDist = next;
+          return;
+        }
+        // cube grab (observer/master): マウス位置からレイ先端 (grabDist) を計算 → targetPos
+        //   実際の cube 位置は Spring-Damper で targetPos に遅延追従 (慣性感)
+        //   ・drag sensitivity: (rayHit - handleStart) × sens
         if (_dragState.type === 'cubeGrab') {
           const rect = _canvas.getBoundingClientRect();
           _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
           _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
           _rayTap.setFromCamera(_ndcTap, camera);
-          const target = _rayTap.ray.origin.clone()
+          const rayHit = _rayTap.ray.origin.clone()
             .addScaledVector(_rayTap.ray.direction, _dragState.grabDist);
+          const sens = (typeof window.__dragSensitivity === 'number') ? window.__dragSensitivity : 1.0;
+          const delta = rayHit.clone().sub(_dragState.handleStart).multiplyScalar(sens);
+          const target = _dragState.startCubePos.clone().add(delta);
           // 床貫通防止 + Field 範囲クランプ
           if (target.y < CUBE_HALF_Y) target.y = CUBE_HALF_Y;
           target.x = Math.max(-FIELD_HALF + CUBE_HALF_Y, Math.min(FIELD_HALF - CUBE_HALF_Y, target.x));
           target.z = Math.max(-FIELD_HALF + CUBE_HALF_Y, Math.min(FIELD_HALF - CUBE_HALF_Y, target.z));
           const t = _dragState.targetObj;
+          // 直接位置更新をやめ、Spring-Damper 目標位置として保存
+          if (!t.userData.targetPos) t.userData.targetPos = new THREE.Vector3();
+          t.userData.targetPos.copy(target);
+          // 投擲時の初速が自然に出るよう _prevPos は維持 (release で参照されるが基本 spring の vel をそのまま使う)
           t.userData._prevPos = t.position.clone();
           t.userData._prevTime = performance.now();
-          t.position.copy(target);
           _dragState.moved = true;
           _emitCubePoseThrottled(t);
           return;
@@ -1872,6 +2218,23 @@
         _dragState = null;
         window.__cubeDragActive = false;
 
+        // cube distance adjust (camera スマホ) 終了:
+        //   ・|swipeVel| > SWIPE_THROW_THRESHOLD_PX_PER_S なら奥へ投げる (release + vel=forward·|speed|)
+        //   ・それ未満ならそのまま保持 (距離調整として確定)
+        if (savedDrag && savedDrag.type === 'cubeAdjust') {
+          const speed = Math.abs(savedDrag.swipeVel);
+          if (speed > SWIPE_THROW_THRESHOLD_PX_PER_S) {
+            const t = savedDrag.targetObj;
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            let throwSpeed = speed * SWIPE_THROW_SCALE_M_PER_PX;
+            if (throwSpeed > SPRING_VEL_CAP) throwSpeed = SPRING_VEL_CAP;
+            t.userData.vel.copy(forward).multiplyScalar(throwSpeed);
+            releaseCube(t);
+            log('throw: ' + t.name + ' speed=' + throwSpeed.toFixed(2) + 'm/s (swipe ' + Math.round(speed) + 'px/s)', 'ok');
+          }
+          _pressAt = null;
+          return;
+        }
         // cube grab 終了 (observer/master) → releaseCube で velocity 計算 + 物理再開
         //   drag 有無に関わらず必ず release (短クリックは vel≒0 で落下、drag ありは投げる)
         if (savedDrag && savedDrag.type === 'cubeGrab') {
@@ -1906,10 +2269,7 @@
 
         const wasTap = _pressAt && !_tapMoved;
         _pressAt = null;
-        if (!wasTap) {
-          // camera role: tap 以外 (drag 系) は特に何もしない
-          return;
-        }
+        if (!wasTap) return;
         // tap の判定
         const hit = _raycastAt(x, y);
         if (!hit) {
@@ -1919,18 +2279,9 @@
           return;
         }
         const obj = hit.object;
-        // 移動 Box (cube1..4): camera はタップで grab/release トグル
+        // 移動 Box (cube1..4): camera は touchstart で既にトグル済み → 何もしない
         if (obj.userData && obj.userData.__movable) {
-          if (ROLE === 'camera') {
-            if (_heldCube === obj) {
-              releaseCube(obj);
-            } else {
-              // 別 cube を持っていたら先に release
-              if (_heldCube) releaseCube(_heldCube);
-              grabCube(obj);
-            }
-          }
-          selectObject(obj);
+          if (ROLE !== 'camera') selectObject(obj);
           return;
         }
         // それ以外 (apex/base/light sphere) は master のみ選択可
@@ -2847,6 +3198,14 @@
       window.__syncMasterMassInput = function() {
         if (!_cubeSel || !_cubeMass) return;
         const name = _cubeSel.value;
+        if (name === '__all') {
+          // 全ての cube の質量が同一ならそれを、異なれば "混在" 表示
+          const masses = movableCubes.map((m) => m.userData.mass);
+          const same = masses.every((v) => v === masses[0]);
+          _cubeMass.value = same ? String(masses[0]) : '';
+          if (_cubeMassCur) _cubeMassCur.textContent = same ? masses[0].toFixed(2) : '混在';
+          return;
+        }
         const c = movableCubes.find((m) => m.name === name);
         if (!c) return;
         _cubeMass.value = String(c.userData.mass);
@@ -2860,10 +3219,20 @@
           log('質量が不正 (0.01 〜 1000)', 'err');
           return;
         }
-        if (socket && socket.connected) {
-          socket.emit('cubeMass', { name, mass: v });
+        if (name === '__all') {
+          // 全 cube に順次配信
+          movableCubes.forEach((c) => {
+            if (socket && socket.connected) {
+              socket.emit('cubeMass', { name: c.name, mass: v });
+            }
+          });
+          log('cubeMass emit (all): ' + v.toFixed(2) + ' kg × ' + movableCubes.length, 'ok');
+        } else {
+          if (socket && socket.connected) {
+            socket.emit('cubeMass', { name, mass: v });
+          }
+          log('cubeMass emit: ' + name + ' = ' + v.toFixed(2) + ' kg', 'ok');
         }
-        log('cubeMass emit: ' + name + ' = ' + v.toFixed(2) + ' kg', 'ok');
       }
       if (_cubeSel) {
         _cubeSel.addEventListener('change', () => {
@@ -2881,6 +3250,35 @@
       }
       _bind('m-cube-mass-apply', 'click', _applyCubeMass);
       if (window.__syncMasterMassInput) window.__syncMasterMassInput();
+
+      // ==================================================
+      // ドラッグ感度 (Enter で適用、ローカル設定)
+      //   _dragSensitivity は _pressCheck の cubeGrab 内で displacement 倍率として使う
+      // ==================================================
+      const _dragSensInp = _by('m-drag-sens');
+      const _dragSensCur = _by('m-drag-sens-current');
+      function _applyDragSens() {
+        if (!_dragSensInp) return;
+        const v = parseFloat(_dragSensInp.value);
+        if (!isFinite(v) || v < 0.1 || v > 10) {
+          log('ドラッグ感度が不正 (0.1 〜 10)', 'err');
+          return;
+        }
+        window.__dragSensitivity = v;
+        if (_dragSensCur) _dragSensCur.textContent = v.toFixed(2);
+        log('ドラッグ感度 → ' + v.toFixed(2) + '×', 'ok');
+      }
+      if (_dragSensInp) {
+        _dragSensInp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            _applyDragSens();
+            if (e.target && e.target.blur) e.target.blur();
+          }
+        });
+      }
+      _bind('m-drag-sens-apply', 'click', _applyDragSens);
+      _applyDragSens();
     }
 
     // ========== クライアント選択ドロップダウン ==========

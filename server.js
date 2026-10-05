@@ -65,6 +65,10 @@ const sceneObjects = new Map();
 let sceneObjectCounter = 0;
 // 移動 Box (cube1..4) の質量 (kg): name → mass。master が設定、全クライアントで共有。
 const cubeMasses = new Map();
+// 移動 Box の ownership: name → socket.id。grab した最新クライアントがオーナー。
+//   オーナー以外からの objectPose は broadcast 時に無視され、競合を防ぐ。
+//   disconnect 時に該当オーナーの cube はすべて owner=null に戻す。
+const cubeOwners = new Map();
 // space3 のグローバル環境光 (AmbientLight 強度、master スライダーから制御)。
 //   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
 let sceneAmbientConfig = { intensity: 0.85 };
@@ -176,6 +180,10 @@ io.on('connection', (socket) => {
   // 既存の cube 質量設定を配信
   for (const [name, mass] of cubeMasses.entries()) {
     socket.emit('cubeMass', { name, mass });
+  }
+  // 既存の cube ownership を配信 (非 null のみ)
+  for (const [name, owner] of cubeOwners.entries()) {
+    if (owner) socket.emit('cubeOwnership', { name, owner });
   }
 
   socket.on('orb', (data) => {
@@ -322,8 +330,25 @@ io.on('connection', (socket) => {
     if (!data || typeof data.name !== 'string') return;
     if (typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
     if (!isFinite(data.x) || !isFinite(data.y) || !isFinite(data.z)) return;
-    objectPoses.set(data.name, { x: data.x, y: data.y, z: data.z });
-    socket.broadcast.emit('objectPose', { name: data.name, x: data.x, y: data.y, z: data.z });
+    // ownership チェック: 送信者が cube の所有者 (cubeOwners.get(name) === socket.id) でなければ無視
+    //   → 誤って送られてきた位置を他クライアントへブロードキャストして競合を起こすのを防ぐ
+    const curOwner = cubeOwners.get(data.name);
+    if (curOwner && curOwner !== socket.id) return;
+    const pose = { x: data.x, y: data.y, z: data.z };
+    if (typeof data.qx === 'number') { pose.qx = data.qx; pose.qy = data.qy; pose.qz = data.qz; pose.qw = data.qw; }
+    objectPoses.set(data.name, pose);
+    socket.broadcast.emit('objectPose', Object.assign({ name: data.name }, pose));
+  });
+
+  // 移動 Box の ownership transfer (grab 時に送信者が宣言、全クライアントへ配信 + 保存)
+  //   ・サーバー保存で、新規参加者にも初期配信される (下記 connection 時)
+  //   ・disconnect 時に所有権を自動解放
+  socket.on('cubeOwnership', (data) => {
+    if (!data || typeof data.name !== 'string') return;
+    const owner = (typeof data.owner === 'string') ? data.owner : null;
+    if (owner && owner !== socket.id) return;   // 他人のアカウントで宣言は拒否
+    cubeOwners.set(data.name, owner);
+    io.emit('cubeOwnership', { name: data.name, owner });
   });
 
   // Master からのオブジェクト移動感度設定 (space2 で使用)
@@ -494,6 +519,13 @@ io.on('connection', (socket) => {
     const u = users.get(socket.id);
     users.delete(socket.id);
     if (u && u.hasPose) io.emit('leave', { id: socket.id });
+    // この socket が所有していた cube の ownership を解放
+    for (const [name, owner] of cubeOwners.entries()) {
+      if (owner === socket.id) {
+        cubeOwners.set(name, null);
+        io.emit('cubeOwnership', { name, owner: null });
+      }
+    }
     console.log(`[-] ${socket.id} (total=${users.size})`);
   });
 });
