@@ -151,23 +151,107 @@
     floor.name = 'floor';
     scene.add(floor);
 
-    // 1m グリッド (中グレー) — フォグでフェードして遠方が薄く消える
-    //   GridHelper は LineBasicMaterial (fog: true デフォルト) なので、
-    //   遠方の格子線が自動的に白フェードで薄くなる。
-    //   色を濃くすることで白 (背景) との差が大きくなり、フェードが視認しやすくなる。
-    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
-    grid.position.set(0, 0.01, 0);
-    scene.add(grid);
-    // 5m 主格子 (濃いグレー、はっきり見える)
-    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
-    majorGrid.position.set(0, 0.015, 0);
-    scene.add(majorGrid);
-    // 20m 境界 (ほぼ黒)
+    // ===== 1m タイル (角丸 50mm、3 色ランダム) =====
+    //   床面 60×60 = 3600 個のタイルを InstancedMesh で一括描画。
+    //   ・1 タイルは 1m × 1m、4 隅を半径 50mm で丸めた ShapeGeometry
+    //   ・配色: #029ecc / #e12b1e / #fecd1b をランダム (seed 固定で全クライアント一致)
+    //   ・角丸でできた余白 (タイル間の 4 隅の小さな空白) は白い床が透けて見える
+    //   ・GridHelper は廃止 (角丸の余白自体が格子線の役割)
+    //   ・tile は floor より僅かに上 (y=0.02) に配置して z-fighting 回避
+    const TILE_SIZE = 0.95;   // 中心起点に 950mm (1m セルの中に 25mm マージン)
+    const TILE_R    = 0.147;  // 155mm × 0.95 ≒ 147mm (等倍縮小)
+    const TILE_PALETTE = [0x029ecc, 0xe12b1e, 0xfecd1b];
+    // 角丸タイル形状: 1m × 1m の正方形の 4 隅を半径 R で丸める
+    function _makeRoundedTileGeom(size, r) {
+      const h = size * 0.5;
+      const shape = new THREE.Shape();
+      shape.moveTo(-h + r, -h);
+      shape.lineTo(+h - r, -h);
+      shape.absarc(+h - r, -h + r, r, -Math.PI / 2,            0,                 false);
+      shape.lineTo(+h,     +h - r);
+      shape.absarc(+h - r, +h - r, r,  0,                      +Math.PI / 2,      false);
+      shape.lineTo(-h + r, +h);
+      shape.absarc(-h + r, +h - r, r, +Math.PI / 2,            +Math.PI,          false);
+      shape.lineTo(-h,     -h + r);
+      shape.absarc(-h + r, -h + r, r, +Math.PI,               +Math.PI * 3 / 2,   false);
+      return new THREE.ShapeGeometry(shape, 8);
+    }
+    const tileGeom = _makeRoundedTileGeom(TILE_SIZE, TILE_R);
+    // ShapeGeometry は XY 平面上に作られる → -X 軸中心に -90° 回転して床 (XZ 平面) に寝かせる
+    tileGeom.rotateX(-Math.PI / 2);
+    const tileMat = new THREE.MeshStandardMaterial({
+      vertexColors: false,   // インスタンス色は instanceColor で指定
+      roughness: 1.0,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+    });
+    const TILE_COUNT = FIELD_SIZE * FIELD_SIZE;
+    const tiles = new THREE.InstancedMesh(tileGeom, tileMat, TILE_COUNT);
+    tiles.name = 'floor-tiles';
+    tiles.frustumCulled = false;
+    // 決定論的ランダム (seeded) で色を割り当て — 全クライアントで同じ配置になる
+    //   LCG: x_{n+1} = (a·x_n + c) mod m
+    let _rngState = 0x9e3779b1;
+    const _rand = () => { _rngState = (Math.imul(_rngState, 1664525) + 1013904223) >>> 0; return _rngState / 0x100000000; };
+    const _tmpMat = new THREE.Matrix4();
+    const _tmpCol = new THREE.Color();
+    let _tileIdx = 0;
+    for (let i = 0; i < FIELD_SIZE; i++) {
+      for (let j = 0; j < FIELD_SIZE; j++) {
+        const x = -FIELD_HALF + 0.5 + i;
+        const z = -FIELD_HALF + 0.5 + j;
+        _tmpMat.makeTranslation(x, 0.02, z);
+        tiles.setMatrixAt(_tileIdx, _tmpMat);
+        const colorHex = TILE_PALETTE[Math.floor(_rand() * TILE_PALETTE.length)];
+        _tmpCol.setHex(colorHex);
+        tiles.setColorAt(_tileIdx, _tmpCol);
+        _tileIdx++;
+      }
+    }
+    tiles.instanceMatrix.needsUpdate = true;
+    if (tiles.instanceColor) tiles.instanceColor.needsUpdate = true;
+    scene.add(tiles);
+
+    // 格子線は廃止 (タイル縮小によるマージン 25mm + 角丸余白が自然な格子として機能)。
+    //   参照互換のため同名の dummy Object3D を残置 (AR 切替コードが落ちないよう)。
+    const grid      = new THREE.Object3D(); grid.visible      = true;
+    const majorGrid = new THREE.Object3D(); majorGrid.visible = true;
+
+    // ===== モノクロ格子表示 (効果2 ON 時に有効) =====
+    //   旧 space3 の見た目: 1m グレー + 5m 濃グレー + 20m (= 旧 FIELD_HALF) 境界 相当。
+    //   初期は非表示。effect2 ON で tiles と差し替えて表示。
+    const monoGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
+    monoGrid.position.set(0, 0.015, 0);
+    monoGrid.visible = false;
+    scene.add(monoGrid);
+    const monoMajorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
+    monoMajorGrid.position.set(0, 0.018, 0);
+    monoMajorGrid.visible = false;
+    scene.add(monoMajorGrid);
+
+    // 床表示モードを現在の effect2 状態 + AR 状態から決めて適用
+    //   wantMono=true  : モノクロ格子 ON, タイル OFF
+    //   wantMono=false : タイル ON, モノクロ格子 OFF
+    //   AR passthrough が ON (= _passthroughState.active) の間はどちらも強制 OFF
+    function _applyFloorMode(wantMono) {
+      const arActive = _passthroughState && _passthroughState.active;
+      if (arActive) {
+        tiles.visible = false;
+        monoGrid.visible = false;
+        monoMajorGrid.visible = false;
+        return;
+      }
+      tiles.visible         = !wantMono;
+      monoGrid.visible      =  wantMono;
+      monoMajorGrid.visible =  wantMono;
+    }
+    window.__applyFloorMode = _applyFloorMode;
+    // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
       new THREE.LineBasicMaterial({ color: 0x111827 })
     );
-    boundary.position.set(0, 0.012, 0);
+    boundary.position.set(0, 0.025, 0);
     scene.add(boundary);
 
     // 中心マーカー (原点確認用)
@@ -222,6 +306,8 @@
       //   ・非オーナーは受信位置を適用するだけ (ローカル物理は停止)
       //   → 複数クライアントが同じ cube を同時シミュレートする相互上書きループを防ぐ
       c.userData.ownerId    = null;
+      // 初期位置 (resetSpace イベントでここに戻す)
+      c.userData.initialPos = new THREE.Vector3(x, y, z);
       return c;
     }
     const cube1 = makeMovableCube('cube1',  1.5, 0.5, -0.5, 0x6b7280); // 灰
@@ -237,6 +323,120 @@
     const cube10 = makeMovableCube('cube10', -9.5, 0.5,  0.5, 0x06b6d4); // シアン
     const cube11 = makeMovableCube('cube11',  9.5, 0.5,  0.5, 0x84cc16); // ライム
     const movableCubes = [cube1, cube2, cube3, cube4, cube5, cube6, cube7, cube8, cube9, cube10, cube11];
+
+    // ===== スプレー描画: 原点中心 直径 20m (半径 10m) 半球 =====
+    //   ・半球は透明基材 + CanvasTexture で、塗った部分だけ色が付く
+    //   ・空の空間を 4 秒長押しで発射開始 → 離すと停止
+    //   ・色はアバター color (state.myColor)
+    //   ・入力はカメラ前方の 1 本レイで、半球にヒットした UV に円形ブラシを塗る
+    //   ・送信は 10 Hz スロットル + サーバー履歴に蓄積 → 新規接続時に再生で同期
+    const SPRAY_RADIUS_M = 10;
+    const SPRAY_CANVAS_W = 1024;
+    const SPRAY_CANVAS_H = 512;
+    const SPRAY_HOLD_MS  = 4000;   // 4 秒
+    const SPRAY_EMIT_HZ  = 10;     // 送信頻度
+    const SPRAY_BRUSH_R  = 22;     // canvas 上のブラシ半径 (px) — ~1.4m 実寸相当
+    const SPRAY_BRUSH_ALPHA = 0.35;
+
+    const _sprayCanvas = document.createElement('canvas');
+    _sprayCanvas.width  = SPRAY_CANVAS_W;
+    _sprayCanvas.height = SPRAY_CANVAS_H;
+    const _sprayCtx = _sprayCanvas.getContext('2d');
+    _sprayCtx.clearRect(0, 0, SPRAY_CANVAS_W, SPRAY_CANVAS_H);
+    const _sprayTex = new THREE.CanvasTexture(_sprayCanvas);
+    _sprayTex.wrapS = THREE.RepeatWrapping;   // phi 方向 (継ぎ目を環状にする)
+    _sprayTex.wrapT = THREE.ClampToEdgeWrapping;
+    _sprayTex.anisotropy = 4;
+    const _sprayMat = new THREE.MeshBasicMaterial({
+      map: _sprayTex,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      alphaTest: 0.01,
+      fog: false,
+    });
+    // 上半球 (theta ∈ [0, π/2])。UV は SphereGeometry 標準。
+    const _sprayGeom = new THREE.SphereGeometry(SPRAY_RADIUS_M, 64, 32, 0, Math.PI * 2, 0, Math.PI / 2);
+    const sprayDome = new THREE.Mesh(_sprayGeom, _sprayMat);
+    sprayDome.name = 'spray-dome';
+    sprayDome.renderOrder = 500;   // 他オブジェクトより後に描画 (ブレンドが正しく出るように)
+    scene.add(sprayDome);
+    // raycast 専用リスト (selectables とは分離 — 選択ロジックに影響させない)
+    const _sprayables = [sprayDome];
+
+    // キャンバスにブラシ 1 発描く (u,v は 0..1、color は #rrggbb or 数値)
+    function _drawSprayDot(u, v, colorStr) {
+      const x = u * SPRAY_CANVAS_W;
+      const y = (1 - v) * SPRAY_CANVAS_H;   // three.js UV は左下原点、canvas は左上原点
+      const r = SPRAY_BRUSH_R;
+      const g = _sprayCtx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0.0, _sprayAlphaStr(colorStr, SPRAY_BRUSH_ALPHA));
+      g.addColorStop(1.0, _sprayAlphaStr(colorStr, 0));
+      _sprayCtx.fillStyle = g;
+      _sprayCtx.beginPath();
+      _sprayCtx.arc(x, y, r, 0, Math.PI * 2);
+      _sprayCtx.fill();
+      // 継ぎ目 (u ≒ 0 / 1) 対応: 近縁側にもミラー描画
+      if (x < r)                       _sprayDotRaw(x + SPRAY_CANVAS_W, y, r, colorStr);
+      else if (x > SPRAY_CANVAS_W - r) _sprayDotRaw(x - SPRAY_CANVAS_W, y, r, colorStr);
+      _sprayTex.needsUpdate = true;
+    }
+    function _sprayDotRaw(x, y, r, colorStr) {
+      const g = _sprayCtx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0.0, _sprayAlphaStr(colorStr, SPRAY_BRUSH_ALPHA));
+      g.addColorStop(1.0, _sprayAlphaStr(colorStr, 0));
+      _sprayCtx.fillStyle = g;
+      _sprayCtx.beginPath();
+      _sprayCtx.arc(x, y, r, 0, Math.PI * 2);
+      _sprayCtx.fill();
+    }
+    // #rrggbb / 0xRRGGBB → rgba(r,g,b,a) 文字列
+    function _sprayAlphaStr(c, alpha) {
+      let hex;
+      if (typeof c === 'number') hex = c;
+      else if (typeof c === 'string') {
+        hex = parseInt(c.replace('#', ''), 16);
+      } else return 'rgba(255,255,255,' + alpha + ')';
+      const r = (hex >> 16) & 0xff;
+      const g = (hex >> 8) & 0xff;
+      const b = hex & 0xff;
+      return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+    }
+    // スプレー状態 (self): press-and-hold で発射開始、release で停止
+    const _spraySelf = {
+      pressStartT: 0,          // press 開始時刻 (ms)、0 = press 中でない
+      armed: false,            // 4 秒経過して発射中か
+      lastEmitT: 0,            // 直近送信時刻
+    };
+    const _sprayRay = new THREE.Raycaster();
+    const _sprayOrigin = new THREE.Vector3();
+    const _sprayDir    = new THREE.Vector3();
+    // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
+    function _sprayTick() {
+      if (!_spraySelf.pressStartT) return;
+      const now = performance.now();
+      const held = now - _spraySelf.pressStartT;
+      if (held < SPRAY_HOLD_MS) return;
+      if (!_spraySelf.armed) {
+        _spraySelf.armed = true;
+        log('spray armed (4s hold)', 'ok');
+      }
+      // 送信スロットル
+      if (now - _spraySelf.lastEmitT < 1000 / SPRAY_EMIT_HZ) return;
+      _spraySelf.lastEmitT = now;
+      // カメラ前方レイで半球にヒット → UV 取得 → 塗る + emit
+      camera.getWorldPosition(_sprayOrigin);
+      camera.getWorldDirection(_sprayDir);
+      _sprayRay.set(_sprayOrigin, _sprayDir);
+      const hits = _sprayRay.intersectObjects(_sprayables, false);
+      if (hits.length === 0 || !hits[0].uv) return;
+      const uv = hits[0].uv;
+      const colorHex = (state.myColor || '#ffffff').replace('#', '');
+      _drawSprayDot(uv.x, uv.y, '#' + colorHex);
+      if (socket && socket.connected) {
+        socket.emit('spray', { u: +uv.x.toFixed(4), v: +uv.y.toFixed(4), c: colorHex });
+      }
+    }
 
     // selectables: raycast 対象。movable cube 全部を含める。
     const selectables = [...movableCubes];
@@ -1813,6 +2013,43 @@
         }
       });
 
+      // スプレー描画: 他クライアントからの発射を受信してローカルの dome canvas に反映
+      //   データ: { u, v, c (hex without #) }
+      socket.on('spray', (data) => {
+        if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+        const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
+        _drawSprayDot(data.u, data.v, color);
+      });
+      // スプレー履歴バッチ (新規接続時にサーバーから届く)
+      socket.on('sprayBatch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) {
+          if (!d || typeof d.u !== 'number' || typeof d.v !== 'number') continue;
+          const color = (typeof d.c === 'string') ? ('#' + d.c) : '#ffffff';
+          _drawSprayDot(d.u, d.v, color);
+        }
+        log('sprayBatch recv: ' + list.length + ' pts', 'ok');
+      });
+      // 空間リセット: 塗り canvas 全消去 + cube1..N を初期位置へ復元
+      socket.on('resetSpace', () => {
+        _sprayCtx.clearRect(0, 0, SPRAY_CANVAS_W, SPRAY_CANVAS_H);
+        _sprayTex.needsUpdate = true;
+        for (const c of movableCubes) {
+          const ip = c.userData.initialPos;
+          if (!ip) continue;
+          c.position.copy(ip);
+          c.quaternion.identity();
+          if (c.userData.vel) c.userData.vel.set(0, 0, 0);
+          if (c.userData.angVel) c.userData.angVel.set(0, 0, 0);
+          c.userData.sleeping = false;
+          c.userData.restFrames = 0;
+          c.userData.held = false;
+          c.userData.targetPos = null;
+          c.userData.ownerId = null;
+        }
+        log('resetSpace: 塗り + 全 cube を初期位置へ復元', 'ok');
+      });
+
       // 検証用トグル (effect1..3) の全クライアント同期
       //   ・window.__effect[n] を上書き
       //   ・master はボタン UI を同期 (dirty なし、サーバー値が真)
@@ -1837,6 +2074,10 @@
         // 効果1: camera 空間表示モード切替
         if (n === 1 && ROLE === 'camera' && typeof window.__applyCameraSpaceMode === 'function') {
           window.__applyCameraSpaceMode(on);
+        }
+        // 効果2: 床表示 (タイル ↔ モノクロ格子) 切替 — 全ロールで同期
+        if (n === 2 && typeof window.__applyFloorMode === 'function') {
+          window.__applyFloorMode(on);
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
@@ -1899,6 +2140,8 @@
     updaters.push(_heldTick);
     // 物理シミュレーション: 全ロールで cube1..4 に重力/spring/衝突を適用
     updaters.push(_physicsTick);
+    // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
+    updaters.push(_sprayTick);
 
     // ========== ロール別: パネル表示 + セットアップ ==========
     let _obsResync = null; // observer の yaw/pitch 再同期用 (forcePose 受信後)
@@ -2004,12 +2247,13 @@
         scene.background = null;
         scene.fog = null;
         renderer.setClearColor(0x000000, 0);
-        // 床/格子/境界は現実の床が見える AR モードでは邪魔になるので非表示
+        // 床/格子/境界/タイル は現実の床が見える AR モードでは邪魔になるので非表示
         if (typeof floor      !== 'undefined' && floor)      floor.visible      = false;
         if (typeof grid       !== 'undefined' && grid)       grid.visible       = false;
         if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = false;
         if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = false;
         _passthroughState.active = true;
+        if (typeof _applyFloorMode === 'function') _applyFloorMode(!!(window.__effect && window.__effect[2]));
         log('AR passthrough ON (背面カメラ + gyro)', 'ok');
         return true;
       } catch (e) {
@@ -2035,12 +2279,12 @@
         scene.fog = s.fog;
         renderer.setClearColor(s.clearColor, s.clearAlpha);
       }
-      // 床/格子/境界を再表示
+      // 床/境界を再表示 (grid/majorGrid は dummy なので無視)
       if (typeof floor      !== 'undefined' && floor)      floor.visible      = true;
-      if (typeof grid       !== 'undefined' && grid)       grid.visible       = true;
-      if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = true;
       if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = true;
       _passthroughState.active = false;
+      // 床表示を効果2 に合わせて再適用 (タイル or モノクロ格子)
+      if (typeof _applyFloorMode === 'function') _applyFloorMode(!!(window.__effect && window.__effect[2]));
       log('AR passthrough OFF (VR 空間モードへ切替)', 'ok');
     }
     // 効果1 の現在値に基づいてモードを適用 (ROLE が camera の時のみ実効)
@@ -2171,6 +2415,13 @@
         _dragState = null;
         window.__cubeDragActive = false;
         const hit = _raycastAt(x, y);
+        // 空の空間 (selectable に当たらず) + 何も選択していない → スプレーの候補として長押し計測開始
+        //   移動は許容しない (tapMoved=true になった時点でキャンセル)。release で停止。
+        if (!hit && !selectedObject) {
+          _spraySelf.pressStartT = performance.now();
+          _spraySelf.armed = false;
+          _spraySelf.lastEmitT = 0;
+        }
         if (!hit) return;
         const obj = hit.object;
 
@@ -2228,7 +2479,13 @@
       function _pressCheck(x, y, slop) {
         if (!_pressAt) return;
         const dx = x - _pressAt.x, dy = y - _pressAt.y;
-        if (Math.hypot(dx, dy) > slop) _tapMoved = true;
+        if (Math.hypot(dx, dy) > slop) {
+          _tapMoved = true;
+          // 指が動いた → スプレー候補をキャンセル
+          if (_spraySelf.pressStartT && !_spraySelf.armed) {
+            _spraySelf.pressStartT = 0;
+          }
+        }
         if (!_dragState || !_tapMoved) return;
 
         // cube grab (全ロール共通): マウス/タップ位置からレイ先端 (grabDist) を計算 → targetPos
@@ -2292,6 +2549,12 @@
         const savedDrag = _dragState;
         _dragState = null;
         window.__cubeDragActive = false;
+        // スプレー停止 (press 終了)
+        if (_spraySelf.pressStartT) {
+          if (_spraySelf.armed) log('spray released', 'ok');
+          _spraySelf.pressStartT = 0;
+          _spraySelf.armed = false;
+        }
 
         // cube grab 終了 (全ロール共通) → releaseCube で velocity 計算 + 物理再開
         //   drag 有無に関わらず必ず release (短クリックは vel≒0 で落下、drag ありは投げる)
@@ -3336,6 +3599,16 @@
       }
       _bind('m-drag-sens-apply', 'click', _applyDragSens);
       _applyDragSens();
+
+      // ==================================================
+      // 空間リセット (master 専用): 塗り + Box 位置を全クライアントで初期化
+      // ==================================================
+      _bind('m-reset-space', 'click', () => {
+        if (socket && socket.connected) {
+          socket.emit('resetSpace');
+          log('resetSpace emit', 'ok');
+        }
+      });
 
       // ==================================================
       // 検証用トグル (効果1〜3): 実装内容の効果 ON/OFF 確認

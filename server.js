@@ -97,9 +97,16 @@ let moveConfig = { sensitivity: 60 };
 
 // space3 検証用トグル (master → 全クライアント配信)
 //   effect1: スマホ空間表示モード — false=AR passthrough (背面カメラ), true=VR 空間
-//   effect2, effect3: 未割当 (将来用)
+//   effect2: 床表示モード — false=カラータイル, true=モノクロ格子
+//   effect3: 未割当 (将来用)
 //   新規接続時にも initEffects で現在値を送る
 let effectState = { 1: false, 2: false, 3: false };
+
+// space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。
+//   各要素: { u, v, c (hex 6文字) } — 1 件 ~24 bytes
+//   SPRAY_HISTORY_CAP を超えた分は古い順に捨てる (リングバッファ的に運用)
+const SPRAY_HISTORY_CAP = 20000;
+let sprayHistory = [];
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
 //   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
@@ -176,6 +183,13 @@ io.on('connection', (socket) => {
   // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
   for (const n of [1, 2, 3]) {
     socket.emit('effectState', { effect: n, on: !!effectState[n] });
+  }
+  // 接続直後に space3 スプレー履歴をまとめて配信 (チャンク化して送信、新規接続者に塗りを同期)
+  if (sprayHistory.length > 0) {
+    const CHUNK = 1000;
+    for (let i = 0; i < sprayHistory.length; i += CHUNK) {
+      socket.emit('sprayBatch', sprayHistory.slice(i, i + CHUNK));
+    }
   }
   // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
   for (const [name, pose] of objectPoses.entries()) {
@@ -382,6 +396,39 @@ io.on('connection', (socket) => {
       fogConfig.density = Math.max(0, Math.min(1, data.density));
     }
     io.emit('fogConfig', fogConfig);
+  });
+
+  // space3 スプレー発射 (全ロールが発火可、broadcast して全員に反映)
+  //   data: { u, v, c (hex) } — 1 件 20Hz 以下の軽量イベント想定
+  //   履歴に蓄積 (CAP 超えたら古いものから削除) → 新規接続者へのリプレイ用
+  socket.on('spray', (data) => {
+    if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+    if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return;
+    const c = (typeof data.c === 'string') ? data.c.slice(0, 6) : 'ffffff';
+    const rec = { u: data.u, v: data.v, c };
+    sprayHistory.push(rec);
+    if (sprayHistory.length > SPRAY_HISTORY_CAP) {
+      sprayHistory.splice(0, sprayHistory.length - SPRAY_HISTORY_CAP);
+    }
+    socket.broadcast.emit('spray', rec);
+  });
+
+  // space3 リセット (master 専用: 塗り + cube 位置を全クライアントで一括リセット)
+  socket.on('resetSpace', () => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    sprayHistory = [];
+    // objectPoses (cube 位置の最新スナップショット) も消す → 新規接続者も初期位置になる
+    for (const key of Array.from(objectPoses.keys())) {
+      if (key && key.indexOf('cube') === 0) objectPoses.delete(key);
+    }
+    // ownership もクリア
+    if (typeof cubeOwners !== 'undefined') {
+      for (const key of Array.from(cubeOwners.keys())) {
+        if (key && key.indexOf('cube') === 0) cubeOwners.set(key, null);
+      }
+    }
+    io.emit('resetSpace', { t: Date.now() });
   });
 
   // space3 検証用トグル (master → 全クライアント配信)
