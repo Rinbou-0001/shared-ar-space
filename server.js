@@ -96,11 +96,12 @@ let fogConfig = { density: 0.1 };
 let moveConfig = { sensitivity: 60 };
 
 // space3 検証用トグル (master → 全クライアント配信)
-//   effect1: スマホ空間表示モード — false=AR passthrough (背面カメラ), true=VR 空間
-//   effect2: 床表示モード — false=カラータイル, true=モノクロ格子
-//   effect3: 未割当 (将来用)
+//   effect1: スマホ空間表示モード — false=VR 空間 (既定), true=AR passthrough
+//   effect2: 視錐台レイアウト — false=Canvas-plane, true=実視点 (apex=avatar)
+//   effect3: Fog 中心 — false=カメラ基準, true=原点固定
+//   effect4: cube しなりモード — false=直結ばね, true=2段ばね+向き追従 (遠心力感)
 //   新規接続時にも initEffects で現在値を送る
-let effectState = { 1: false, 2: false, 3: false };
+let effectState = { 1: false, 2: false, 3: false, 4: false };
 
 // space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。
 //   各要素: { u, v, c (hex 6文字) } — 1 件 ~24 bytes
@@ -181,7 +182,7 @@ io.on('connection', (socket) => {
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
   // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
-  for (const n of [1, 2, 3]) {
+  for (const n of [1, 2, 3, 4]) {
     socket.emit('effectState', { effect: n, on: !!effectState[n] });
   }
   // 接続直後に space3 スプレー履歴をまとめて配信 (チャンク化して送信、新規接続者に塗りを同期)
@@ -438,7 +439,7 @@ io.on('connection', (socket) => {
     if (!sender || sender.role !== 'master') return;
     if (!data || typeof data !== 'object') return;
     const n = data.effect;
-    if (n !== 1 && n !== 2 && n !== 3) return;
+    if (n !== 1 && n !== 2 && n !== 3 && n !== 4) return;
     effectState[n] = !!data.on;
     io.emit('effectState', { effect: n, on: effectState[n] });
   });

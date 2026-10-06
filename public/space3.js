@@ -86,6 +86,62 @@
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
     scene.fog = new THREE.FogExp2(0xffffff, 0.1);
 
+    // ========== Fog 中心切替 (効果3) ==========
+    //   既定: Three.js 標準の fog = カメラからの距離に基づくフェード (アバター追従)
+    //   効果3 ON: フィールド原点 (0,0,0) からの距離に基づくフェード (アバター位置不変)
+    //   実装: 全マテリアルの fog_vertex を onBeforeCompile で差し替え、
+    //         共有 uniform `uFogOriginMode` (0/1) で切替。
+    //         Mesh/Line 系どちらも vFogDepth varying を使うので同じ差し替えで動く。
+    const _uFogOriginMode = { value: 0 };
+    window.__uFogOriginMode = _uFogOriginMode;
+    function _patchMaterialFog(mat) {
+      if (!mat || !mat.isMaterial) return;
+      if (mat.userData && mat.userData.__originFogPatched) return;
+      mat.userData = mat.userData || {};
+      mat.userData.__originFogPatched = true;
+      const prevOBC = mat.onBeforeCompile ? mat.onBeforeCompile.bind(mat) : null;
+      mat.onBeforeCompile = (shader) => {
+        if (prevOBC) prevOBC(shader);
+        shader.uniforms.uFogOriginMode = _uFogOriginMode;
+        // 頂点シェーダー: fog_vertex を差し替え
+        //   ・既定 (uFogOriginMode<0.5): -mvPosition.z (= カメラ距離、Three.js 標準)
+        //   ・原点モード (>=0.5):          length((modelMatrix * vec4(transformed,1)).xyz)
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform float uFogOriginMode;')
+          .replace('#include <fog_vertex>', [
+            '#ifdef USE_FOG',
+            '  if (uFogOriginMode > 0.5) {',
+            '    vec4 _wpFog = vec4(transformed, 1.0);',
+            '    #ifdef USE_INSTANCING',
+            '      _wpFog = instanceMatrix * _wpFog;',
+            '    #endif',
+            '    _wpFog = modelMatrix * _wpFog;',
+            '    vFogDepth = length(_wpFog.xyz);',
+            '  } else {',
+            '    vFogDepth = -mvPosition.z;',
+            '  }',
+            '#endif',
+          ].join('\n'));
+      };
+      mat.needsUpdate = true;
+    }
+    function _patchSceneFog() {
+      scene.traverse((obj) => {
+        if (!obj) return;
+        if (obj.material) {
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          mats.forEach(_patchMaterialFog);
+        }
+      });
+    }
+    window.__patchSceneFog = _patchSceneFog;
+    function _applyFogOriginMode(wantOrigin) {
+      _uFogOriginMode.value = wantOrigin ? 1 : 0;
+      _patchSceneFog();   // 新しく追加されたマテリアルも含めて再走査
+      try { log('fog center → ' + (wantOrigin ? 'ORIGIN (fixed)' : 'CAMERA (default)'), 'ok'); } catch (_) {}
+    }
+    window.__applyFogOriginMode = _applyFogOriginMode;
+
     const camera = new THREE.PerspectiveCamera(
       72,
       window.innerWidth / window.innerHeight,
@@ -151,101 +207,17 @@
     floor.name = 'floor';
     scene.add(floor);
 
-    // ===== 1m タイル (角丸 50mm、3 色ランダム) =====
-    //   床面 60×60 = 3600 個のタイルを InstancedMesh で一括描画。
-    //   ・1 タイルは 1m × 1m、4 隅を半径 50mm で丸めた ShapeGeometry
-    //   ・配色: #029ecc / #e12b1e / #fecd1b をランダム (seed 固定で全クライアント一致)
-    //   ・角丸でできた余白 (タイル間の 4 隅の小さな空白) は白い床が透けて見える
-    //   ・GridHelper は廃止 (角丸の余白自体が格子線の役割)
-    //   ・tile は floor より僅かに上 (y=0.02) に配置して z-fighting 回避
-    const TILE_SIZE = 0.95;   // 中心起点に 950mm (1m セルの中に 25mm マージン)
-    const TILE_R    = 0.147;  // 155mm × 0.95 ≒ 147mm (等倍縮小)
-    const TILE_PALETTE = [0x029ecc, 0xe12b1e, 0xfecd1b];
-    // 角丸タイル形状: 1m × 1m の正方形の 4 隅を半径 R で丸める
-    function _makeRoundedTileGeom(size, r) {
-      const h = size * 0.5;
-      const shape = new THREE.Shape();
-      shape.moveTo(-h + r, -h);
-      shape.lineTo(+h - r, -h);
-      shape.absarc(+h - r, -h + r, r, -Math.PI / 2,            0,                 false);
-      shape.lineTo(+h,     +h - r);
-      shape.absarc(+h - r, +h - r, r,  0,                      +Math.PI / 2,      false);
-      shape.lineTo(-h + r, +h);
-      shape.absarc(-h + r, +h - r, r, +Math.PI / 2,            +Math.PI,          false);
-      shape.lineTo(-h,     -h + r);
-      shape.absarc(-h + r, -h + r, r, +Math.PI,               +Math.PI * 3 / 2,   false);
-      return new THREE.ShapeGeometry(shape, 8);
-    }
-    const tileGeom = _makeRoundedTileGeom(TILE_SIZE, TILE_R);
-    // ShapeGeometry は XY 平面上に作られる → -X 軸中心に -90° 回転して床 (XZ 平面) に寝かせる
-    tileGeom.rotateX(-Math.PI / 2);
-    const tileMat = new THREE.MeshStandardMaterial({
-      vertexColors: false,   // インスタンス色は instanceColor で指定
-      roughness: 1.0,
-      metalness: 0.0,
-      side: THREE.DoubleSide,
-    });
-    const TILE_COUNT = FIELD_SIZE * FIELD_SIZE;
-    const tiles = new THREE.InstancedMesh(tileGeom, tileMat, TILE_COUNT);
-    tiles.name = 'floor-tiles';
-    tiles.frustumCulled = false;
-    // 決定論的ランダム (seeded) で色を割り当て — 全クライアントで同じ配置になる
-    //   LCG: x_{n+1} = (a·x_n + c) mod m
-    let _rngState = 0x9e3779b1;
-    const _rand = () => { _rngState = (Math.imul(_rngState, 1664525) + 1013904223) >>> 0; return _rngState / 0x100000000; };
-    const _tmpMat = new THREE.Matrix4();
-    const _tmpCol = new THREE.Color();
-    let _tileIdx = 0;
-    for (let i = 0; i < FIELD_SIZE; i++) {
-      for (let j = 0; j < FIELD_SIZE; j++) {
-        const x = -FIELD_HALF + 0.5 + i;
-        const z = -FIELD_HALF + 0.5 + j;
-        _tmpMat.makeTranslation(x, 0.02, z);
-        tiles.setMatrixAt(_tileIdx, _tmpMat);
-        const colorHex = TILE_PALETTE[Math.floor(_rand() * TILE_PALETTE.length)];
-        _tmpCol.setHex(colorHex);
-        tiles.setColorAt(_tileIdx, _tmpCol);
-        _tileIdx++;
-      }
-    }
-    tiles.instanceMatrix.needsUpdate = true;
-    if (tiles.instanceColor) tiles.instanceColor.needsUpdate = true;
-    scene.add(tiles);
-
-    // 格子線は廃止 (タイル縮小によるマージン 25mm + 角丸余白が自然な格子として機能)。
-    //   参照互換のため同名の dummy Object3D を残置 (AR 切替コードが落ちないよう)。
-    const grid      = new THREE.Object3D(); grid.visible      = true;
-    const majorGrid = new THREE.Object3D(); majorGrid.visible = true;
-
-    // ===== モノクロ格子表示 (効果2 ON 時に有効) =====
-    //   旧 space3 の見た目: 1m グレー + 5m 濃グレー + 20m (= 旧 FIELD_HALF) 境界 相当。
-    //   初期は非表示。effect2 ON で tiles と差し替えて表示。
-    const monoGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
-    monoGrid.position.set(0, 0.015, 0);
-    monoGrid.visible = false;
-    scene.add(monoGrid);
-    const monoMajorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
-    monoMajorGrid.position.set(0, 0.018, 0);
-    monoMajorGrid.visible = false;
-    scene.add(monoMajorGrid);
-
-    // 床表示モードを現在の effect2 状態 + AR 状態から決めて適用
-    //   wantMono=true  : モノクロ格子 ON, タイル OFF
-    //   wantMono=false : タイル ON, モノクロ格子 OFF
-    //   AR passthrough が ON (= _passthroughState.active) の間はどちらも強制 OFF
-    function _applyFloorMode(wantMono) {
-      const arActive = _passthroughState && _passthroughState.active;
-      if (arActive) {
-        tiles.visible = false;
-        monoGrid.visible = false;
-        monoMajorGrid.visible = false;
-        return;
-      }
-      tiles.visible         = !wantMono;
-      monoGrid.visible      =  wantMono;
-      monoMajorGrid.visible =  wantMono;
-    }
-    window.__applyFloorMode = _applyFloorMode;
+    // ===== モノクロ格子表示 (恒常) =====
+    //   タイル機能は廃止。1m グレー + 5m 濃グレー格子を常時表示する。
+    //   AR passthrough 中は従来通り非表示に。
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
+    grid.position.set(0, 0.015, 0);
+    scene.add(grid);
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
+    majorGrid.position.set(0, 0.018, 0);
+    scene.add(majorGrid);
+    const monoGrid = grid;             // 参照互換 (dummy)
+    const monoMajorGrid = majorGrid;   // 参照互換 (dummy)
     // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
@@ -659,6 +631,9 @@
     // 剛体力学用の一時変数 (allocation 削減)
     const _phTmpV1 = new THREE.Vector3();
     const _phTmpV2 = new THREE.Vector3();
+    const _phTmpMat = new THREE.Matrix4();
+    const _phUpY   = new THREE.Vector3(0, 1, 0);
+    const _phZero  = new THREE.Vector3(0, 0, 0);
     const _phTmpV3 = new THREE.Vector3();
     const _phTmpV4 = new THREE.Vector3();
     const _phTmpQ  = new THREE.Quaternion();
@@ -723,7 +698,24 @@
         if (c.userData.held) {
           const t = c.userData.targetPos;
           if (t) {
-            _phTmpV1.copy(t).sub(c.position).multiplyScalar(SPRING_K_PER_KG);  // k/m · x
+            // 効果4 (しなりモード): 2 段ばね + 低剛性 K
+            //   ・OFF: 従来通り targetPos へダイレクト Spring-Damper (K=45)
+            //   ・ON : heldAnchor が targetPos へ遅延追従 (1 段目) → heldAnchor へ Spring (2 段目、K=25)
+            //          → 手首を振るほど cube が「遅れて」ついてくる = しなり & 遠心力的な弧
+            const whippy = !!(window.__effect && window.__effect[4]);
+            let anchor = t;
+            let springK = SPRING_K_PER_KG;
+            if (whippy) {
+              springK = 25;
+              if (!c.userData.heldAnchor) c.userData.heldAnchor = c.position.clone();
+              // alpha は dt 依存: 時定数 τ ≈ 0.1s → α = 1 - exp(-dt/τ)
+              const alpha = 1 - Math.exp(-dt / 0.1);
+              c.userData.heldAnchor.lerp(t, alpha);
+              anchor = c.userData.heldAnchor;
+            } else {
+              c.userData.heldAnchor = null;
+            }
+            _phTmpV1.copy(anchor).sub(c.position).multiplyScalar(springK);     // k/m · x
             _phTmpV2.copy(v).multiplyScalar(-SPRING_DAMPING_PER_KG);           // -d/m · v
             _phTmpV1.add(_phTmpV2);                                            // 加速度 (m/s²)
             v.addScaledVector(_phTmpV1, dt);
@@ -732,6 +724,16 @@
           // 発散防止: 速度上限
           if (v.length() > SPRING_VEL_CAP) v.setLength(SPRING_VEL_CAP);
           c.position.addScaledVector(v, dt);
+          // 効果4 ON: cube の向きを速度方向へ緩やかに slerp (しなり視覚効果)
+          //   ・|v| が小さい時は追従しない (静止時のガタつき防止)
+          //   ・up = +Y 固定で lookAt 行列から quaternion を導出
+          if (window.__effect && window.__effect[4] && v.lengthSq() > 0.5) {
+            _phTmpV1.copy(v).normalize();
+            // local -Z (forward) を v 方向へ向ける → lookAt(eye=0, target=-v, up=+Y)
+            _phTmpMat.lookAt(_phZero, _phTmpV2.copy(_phTmpV1).negate(), _phUpY);
+            _phTmpQ.setFromRotationMatrix(_phTmpMat);
+            c.quaternion.slerp(_phTmpQ, 0.08);
+          }
           _resolveFloorContactRigid(c, dt);
           // 壁反発
           if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
@@ -1105,19 +1107,57 @@
         return FRUSTUM_DEPTH;
       }
     }
+    // 視錐台レイアウト計算 (効果2 で切替):
+    //   mode OFF (既定、Canvas-plane モード):
+    //     ・base (= Canvas 相当の矩形、物理 W×H) at Z=0 (= avatar 位置)
+    //     ・apex at Z=+d (背後、仮想観測点、d = FOV で base を内接させる距離)
+    //   mode ON (案 A、実視点モード):
+    //     ・apex at Z=0 (= avatar 位置 = 実際の camera.position)
+    //     ・base at Z=-D (forward 方向、D m 前方)
+    //     ・base サイズは camera.fov と camera.aspect から導出: 2D·tan(hfov/2) × 2D·tan(vfov/2)
+    //       → Canvas の縦横比に一致し、実レンダリングの視錐台と apex・形状が揃う
+    function _computeFrustumLayout(W, H, depthOverride) {
+      const modeA = !!(window.__effect && window.__effect[2]);
+      if (modeA) {
+        const vfov = (camera.fov || 60) * Math.PI / 180;
+        const asp  = camera.aspect || (window.innerWidth / Math.max(1, window.innerHeight));
+        const hfov = 2 * Math.atan(Math.tan(vfov / 2) * asp);
+        const D = (typeof depthOverride === 'number' && depthOverride > 0)
+          ? depthOverride : computeApexDepth(W, H);
+        const bhw = D * Math.tan(hfov / 2);
+        const bhh = D * Math.tan(vfov / 2);
+        return {
+          modeA: true,
+          apexZ: 0,
+          baseZ: -D,
+          baseHW: bhw,
+          baseHH: bhh,
+          baseW: bhw * 2,
+          baseH: bhh * 2,
+          D,
+        };
+      }
+      const d = (typeof depthOverride === 'number' && depthOverride > 0)
+        ? depthOverride : computeApexDepth(W, H);
+      return {
+        modeA: false,
+        apexZ: +d,
+        baseZ: 0,
+        baseHW: W * 0.5,
+        baseHH: H * 0.5,
+        baseW: W,
+        baseH: H,
+        D: d,
+      };
+    }
     function makeAvatarFrustum(color, W, H, depthOverride) {
       const c = new THREE.Color(color || '#fbbf24');
-      const hw = W * 0.5, hh = H * 0.5;
-      const d  = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : computeApexDepth(W, H);
-      // ローカル座標系 (新): 矩形中心=(0,0,0)=avatar 位置、camera forward = -Z
-      //   矩形 (= Canvas 相当の長方形、アバター本体) 4 隅 at Z=0
-      //   apex = 法線 +Z 方向に d m 下がった仮想観測点 (FOV 由来)
-      //   見えている範囲 (視錐台): apex → 矩形 → 奥 (-Z 方向、forward)
-      const bl = [-hw, -hh, 0];
-      const br = [+hw, -hh, 0];
-      const tl = [-hw, +hh, 0];
-      const tr = [+hw, +hh, 0];
-      const apex = [0, 0, +d];
+      const L = _computeFrustumLayout(W, H, depthOverride);
+      const bl = [-L.baseHW, -L.baseHH, L.baseZ];
+      const br = [+L.baseHW, -L.baseHH, L.baseZ];
+      const tl = [-L.baseHW, +L.baseHH, L.baseZ];
+      const tr = [+L.baseHW, +L.baseHH, L.baseZ];
+      const apex = [0, 0, L.apexZ];
       const p = [];
       // apex → 各矩形 隅 (4 稜線)
       p.push(...apex, ...bl);   p.push(...apex, ...br);
@@ -1130,7 +1170,7 @@
       const mat = new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.9, fog: false });
       const lines = new THREE.LineSegments(geom, mat);
       lines.frustumCulled = false;
-      lines.userData.__frustumParams = { W, H, D: d };
+      lines.userData.__frustumParams = { W, H, D: L.D, modeA: L.modeA };
       return lines;
     }
     const APEX_CUBE_SIZE = 0.01;   // 1cm 立方体 = apex 選択判定域
@@ -1321,52 +1361,53 @@
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
     function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole, omitBox) {
-      const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : computeApexDepth(W, H);
-      const frustumLines = makeAvatarFrustum(color, W, H, d);
+      const L = _computeFrustumLayout(W, H, depthOverride);
+      const frustumLines = makeAvatarFrustum(color, W, H, depthOverride);
 
-      // apex hit (raycast 用透明立方体) — 新コード: avatar 位置 (= 矩形中心) から +Z (= -forward) 方向へ d
+      // apex hit (raycast 用透明立方体)
+      //   mode OFF: avatar 位置から +Z (背後) 方向 d m
+      //   mode A  : avatar 位置そのもの (= 実視点)
       const apexHit = new THREE.Mesh(
         new THREE.BoxGeometry(APEX_CUBE_SIZE, APEX_CUBE_SIZE, APEX_CUBE_SIZE),
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
       );
-      apexHit.position.set(0, 0, +d);
+      apexHit.position.set(0, 0, L.apexZ);
       apexHit.name = 'avatar-apex-hit';
       apexHit.userData.selectType = 'apex';
       apexHit.userData.avatarId = id;
-      // 橙 border (selectObject が isLineSegments 子を可視化する)
       const apexEdges = new THREE.LineSegments(
         new THREE.EdgesGeometry(new THREE.BoxGeometry(APEX_CUBE_SIZE, APEX_CUBE_SIZE, APEX_CUBE_SIZE)),
         new THREE.LineBasicMaterial({ color: 0xff8c00, transparent: true, opacity: 1.0, depthTest: false, fog: false, linewidth: 2 })
       );
       apexEdges.renderOrder = 999;
       apexEdges.visible = false;
-      apexEdges.userData.__isAvatarEdge = true;   // Box表示トグル対象マーク
+      apexEdges.userData.__isAvatarEdge = true;
       apexHit.add(apexEdges);
 
-      // base hit (raycast 用透明平面) — 新コード: 矩形 (= avatar 位置) と同じ Z=0
-      //   base = アバター本体 (Canvas 相当の長方形)。選択時は黄 edges で輪郭を表示。
+      // base hit (raycast 用透明平面)
+      //   mode OFF: W×H (物理ディスプレイサイズ) at Z=0
+      //   mode A  : fov 由来のサイズ at Z=-D (前方)
       const baseHit = new THREE.Mesh(
-        new THREE.PlaneGeometry(W, H),
+        new THREE.PlaneGeometry(L.baseW, L.baseH),
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide })
       );
-      baseHit.position.set(0, 0, 0);
+      baseHit.position.set(0, 0, L.baseZ);
       baseHit.name = 'avatar-base-hit';
       baseHit.userData.selectType = 'base';
       baseHit.userData.avatarId = id;
-      // 黄 border (base 選択時可視化)
       const baseEdges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)),
+        new THREE.EdgesGeometry(new THREE.PlaneGeometry(L.baseW, L.baseH)),
         new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 1.0, depthTest: false, fog: false, linewidth: 2 })
       );
       baseEdges.renderOrder = 999;
       baseEdges.visible = false;
-      baseEdges.userData.__isAvatarEdge = true;   // Box表示トグル対象マーク
+      baseEdges.userData.__isAvatarEdge = true;
       baseHit.add(baseEdges);
 
-      // box は「アバターのロール」が camera (スマホ) の時のみ生成しない (視錐台ワイヤーのみ)。
-      //   つまり: 対象がスマホなら誰から見ても box 無し、対象が observer なら誰から見ても box 有り。
-      //   omitBox 引数は呼び出し側 (makeAvatar / rebuildAvatarFrustum) がアバターの role から derive。
-      const box = omitBox ? null : makeAvatarBox(color, W, H, d, !!hasHole);
+      // box は「アバターのロール」が camera (スマホ) の時のみ生成しない。
+      //   mode A では apex が avatar 位置なので従来の box 配置 (base 前方) と自然に整合する。
+      //   box geometry 自体は mode に関わらず W×H×W/2 のまま (modeA でも物理サイズを維持)。
+      const box = omitBox ? null : makeAvatarBox(color, W, H, L.D, !!hasHole);
       return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
     }
 
@@ -1400,8 +1441,9 @@
         av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
         av.box      = parts.box;
         av.mesh     = parts.frustumLines;   // 後方互換 (mesh フィールド)
-        // 視錐台ワイヤーも Box 表示トグルに従う
-        parts.frustumLines.visible = boxVisibilityEnabled;
+        av.remoteDisplay = { width: dW, height: dH };   // 効果2 切替時の再構築用
+        // 視錐台ワイヤー: master は常に表示 (Box表示トグルと独立)、他は Box トグルに従う
+        parts.frustumLines.visible = (ROLE === 'master') ? true : boxVisibilityEnabled;
         grp.add(parts.frustumLines);
         grp.add(parts.apexHit);
         grp.add(parts.baseHit);
@@ -1438,6 +1480,8 @@
         grp.add(ray);
       }
       scene.add(grp);
+      // 効果3 (fog 原点固定) が ON の場合、新規マテリアルも patch
+      if (typeof _patchSceneFog === 'function') _patchSceneFog();
       return av;
     }
 
@@ -1520,8 +1564,9 @@
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
       a.box     = parts.box;
       a.mesh    = parts.frustumLines;
-      // 視錐台ワイヤーも Box 表示トグルに従う
-      parts.frustumLines.visible = boxVisibilityEnabled;
+      a.remoteDisplay = { width: dW, height: dH };   // 効果2 切替時の再構築用
+      // 視錐台ワイヤー: master は常に表示 (Box表示トグルと独立)
+      parts.frustumLines.visible = (ROLE === 'master') ? true : boxVisibilityEnabled;
       a.grp.add(parts.frustumLines);
       a.grp.add(parts.apexHit);
       a.grp.add(parts.baseHit);
@@ -1532,6 +1577,8 @@
       }
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
+      // 効果3 (fog 原点固定) 対応: 再構築で生成された新マテリアルも patch
+      if (typeof _patchSceneFog === 'function') _patchSceneFog();
       const dTag = (typeof depthOverride === 'number' && depthOverride > 0) ? (' D=' + depthOverride.toFixed(3) + 'm') : '';
       const hTag = hasHole ? ' [hole]' : '';
       log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm' + dTag + hTag, 'ok');
@@ -2057,9 +2104,9 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -2075,9 +2122,24 @@
         if (n === 1 && ROLE === 'camera' && typeof window.__applyCameraSpaceMode === 'function') {
           window.__applyCameraSpaceMode(on);
         }
-        // 効果2: 床表示 (タイル ↔ モノクロ格子) 切替 — 全ロールで同期
-        if (n === 2 && typeof window.__applyFloorMode === 'function') {
-          window.__applyFloorMode(on);
+        // 効果2: 視錐台レイアウト切替 — 既定 (Canvas-plane) ↔ 案 A (実視点)
+        //   全アバターの frustum を再構築 (makeObserverFrustumMeshes が window.__effect[2] を参照)
+        if (n === 2) {
+          avatars.forEach((a, aid) => {
+            if (!a._hasFrustum) return;
+            // self は effectiveDisplaySize + SELF_FRUSTUM_DEPTH、他は displayConfig で持っている W/H を使う
+            const isSelf = (aid === myId);
+            const disp = isSelf
+              ? effectiveDisplaySize
+              : (a.remoteDisplay || { width: 0.3, height: 0.2 });
+            const dOverride = isSelf ? SELF_FRUSTUM_DEPTH : null;
+            rebuildAvatarFrustum(aid, disp, dOverride);
+          });
+          log('frustum mode → ' + (on ? 'A (apex=実視点)' : 'default (base=avatar)'), 'ok');
+        }
+        // 効果3: Fog 中心をフィールド原点に固定 ↔ カメラ (= アバター) に戻す
+        if (n === 3 && typeof window.__applyFogOriginMode === 'function') {
+          window.__applyFogOriginMode(on);
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
@@ -2185,14 +2247,14 @@
             await DeviceMotionEvent.requestPermission();
           }
         } catch (_) {}
-        // 空間表示モード: 効果1 (サーバー同期) で分岐
-        //   OFF (= AR): 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
-        //   ON  (= VR): passthrough をスキップ、通常の 3D シーン (床 + 格子 + fog) で入室
-        //   既定値は OFF (AR) — 新規 camera クライアントもサーバーから届く effectState で上書きされる
+        // 空間表示モード: 効果1 (サーバー同期) で分岐 — 2026-10-06 ON/OFF 入れ替え
+        //   OFF (既定、恒常): VR 空間 — passthrough をスキップ、通常の 3D シーン (床 + 格子 + fog) で入室
+        //   ON               : AR passthrough — 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
+        //   新規 camera クライアントもサーバーから届く effectState で上書きされる
         _capturePassthroughDefaults();
-        const wantVR = !!(window.__effect && window.__effect[1]);
-        if (!wantVR) await enableCameraPassthrough();
-        else log('入室時モード: VR 空間 (effect1 ON)', 'ok');
+        const wantAR = !!(window.__effect && window.__effect[1]);
+        if (wantAR) await enableCameraPassthrough();
+        else log('入室時モード: VR 空間 (既定、effect1 OFF)', 'ok');
         enterAsCamera();
       });
     }
@@ -2253,7 +2315,6 @@
         if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = false;
         if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = false;
         _passthroughState.active = true;
-        if (typeof _applyFloorMode === 'function') _applyFloorMode(!!(window.__effect && window.__effect[2]));
         log('AR passthrough ON (背面カメラ + gyro)', 'ok');
         return true;
       } catch (e) {
@@ -2279,23 +2340,23 @@
         scene.fog = s.fog;
         renderer.setClearColor(s.clearColor, s.clearAlpha);
       }
-      // 床/境界を再表示 (grid/majorGrid は dummy なので無視)
+      // 床/格子/境界を再表示
       if (typeof floor      !== 'undefined' && floor)      floor.visible      = true;
+      if (typeof grid       !== 'undefined' && grid)       grid.visible       = true;
+      if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = true;
       if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = true;
       _passthroughState.active = false;
-      // 床表示を効果2 に合わせて再適用 (タイル or モノクロ格子)
-      if (typeof _applyFloorMode === 'function') _applyFloorMode(!!(window.__effect && window.__effect[2]));
       log('AR passthrough OFF (VR 空間モードへ切替)', 'ok');
     }
     // 効果1 の現在値に基づいてモードを適用 (ROLE が camera の時のみ実効)
-    //   on=true → VR, on=false → AR
-    async function applyCameraSpaceMode(wantVR) {
+    //   on=true → AR, on=false → VR (2026-10-06: ON/OFF を入れ替え、VR を既定=恒常状態に)
+    async function applyCameraSpaceMode(wantAR) {
       if (ROLE !== 'camera') return;
       if (!state.entered) return;   // 入室前は enterAsCamera 側で初期モードを決める
-      if (wantVR) {
-        if (_passthroughState.active) disableCameraPassthrough();
-      } else {
+      if (wantAR) {
         if (!_passthroughState.active) await enableCameraPassthrough();
+      } else {
+        if (_passthroughState.active) disableCameraPassthrough();
       }
     }
     window.__applyCameraSpaceMode = applyCameraSpaceMode;
@@ -2906,8 +2967,8 @@
       function applyBoxVisibility() {
         avatars.forEach((a) => {
           if (a.box) a.box.visible = boxVisibilityEnabled;
-          // 視錐台ワイヤー (apex→4 隅 + base 四辺、avatar 色) も同時にトグル
-          if (a.frustumLines) a.frustumLines.visible = boxVisibilityEnabled;
+          // 視錐台ワイヤー: master は Box トグルと独立で常時表示
+          if (a.frustumLines) a.frustumLines.visible = (ROLE === 'master') ? true : boxVisibilityEnabled;
           // 選択中の avatar edge は選択状態に合わせて再評価
           if (a.apexEdges) {
             const sel = (selectedObject === a.apexHit);
@@ -3618,8 +3679,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false };
-      [1, 2, 3].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false };
+      [1, 2, 3, 4].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
