@@ -84,7 +84,7 @@
     //   ★ 床面自体は純白 (0xffffff) なので視覚的変化なし (白+白=白)。
     //      グリッド/境界線 (濃グレー) と他クライアントのアバターだけがフェードして見える。
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
-    scene.fog = new THREE.FogExp2(0xffffff, 0.3);
+    scene.fog = new THREE.FogExp2(0xffffff, 0.1);
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -132,8 +132,8 @@
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    // ========== 床: 20m × 20m at origin (白) ==========
-    const FIELD_SIZE = 20;
+    // ========== 床: 60m × 60m at origin (白) ==========
+    const FIELD_SIZE = 60;
     const FIELD_HALF = FIELD_SIZE / 2;
 
     const floor = new THREE.Mesh(
@@ -228,7 +228,15 @@
     const cube2 = makeMovableCube('cube2', -1.5, 0.5, -0.5, 0xef4444); // 赤
     const cube3 = makeMovableCube('cube3',  1.5, 0.5,  1.5, 0x22c55e); // 緑
     const cube4 = makeMovableCube('cube4', -1.5, 0.5,  1.5, 0x3b82f6); // 青
-    const movableCubes = [cube1, cube2, cube3, cube4];
+    // 追加 7 個 (原点中心 20m × 20m エリア内に散開配置、Y=0.5 = 床置き)
+    const cube5  = makeMovableCube('cube5',   6.5, 0.5, -6.5, 0xf59e0b); // 橙
+    const cube6  = makeMovableCube('cube6',  -6.5, 0.5, -6.5, 0xa855f7); // 紫
+    const cube7  = makeMovableCube('cube7',   6.5, 0.5,  6.5, 0x14b8a6); // 青緑
+    const cube8  = makeMovableCube('cube8',  -6.5, 0.5,  6.5, 0xec4899); // ピンク
+    const cube9  = makeMovableCube('cube9',   0.5, 0.5, -9.5, 0xeab308); // 黄
+    const cube10 = makeMovableCube('cube10', -9.5, 0.5,  0.5, 0x06b6d4); // シアン
+    const cube11 = makeMovableCube('cube11',  9.5, 0.5,  0.5, 0x84cc16); // ライム
+    const movableCubes = [cube1, cube2, cube3, cube4, cube5, cube6, cube7, cube8, cube9, cube10, cube11];
 
     // selectables: raycast 対象。movable cube 全部を含める。
     const selectables = [...movableCubes];
@@ -824,20 +832,11 @@
           ' angVel=' + cube.userData.angVel.length().toFixed(2) + 'rad/s', 'ok');
     }
     function _heldTick(dt) {
-      if (!_heldCube || ROLE !== 'camera') return;
-      // 前フレーム状態を保存 (release 時の angVel 計算用。vel は spring 由来で既に保持)
-      _heldCube.userData._prevPos  = _heldCube.position.clone();
-      _heldCube.userData._prevQuat = _heldCube.quaternion.clone();
-      _heldCube.userData._prevTime = performance.now();
-      // Spring-Damper の目標位置 = アーム先端 (camera + forward · grabDist)
-      //   grabDist は grab 瞬間のアバター→cube 距離を保持 (スワイプで変更可能)
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      if (!_heldCube.userData.targetPos) _heldCube.userData.targetPos = new THREE.Vector3();
-      const dist = _heldCube.userData.grabDist || GRAB_DIST;
-      _heldCube.userData.targetPos.copy(camera.position).addScaledVector(forward, dist);
-      // 姿勢は camera に追従 (回転は spring せず rigid - MVP)
-      _heldCube.quaternion.copy(camera.quaternion);
-      _emitCubePoseThrottled(_heldCube);
+      // 旧 camera 専用の "camera 前方へ cube を固定追従" 機能は廃止。
+      //   camera (スマホ) も observer/master と同じく _pressCheck 内で
+      //   レイヒット点を targetPos に設定する方式に統一。
+      //   関数は updaters から呼ばれるため no-op として残置。
+      return;
     }
     // space3: 移動機能撤去 (選択のみ)。以下 snapAndClamp/moveSelected/emitObjectPose は
     //   関数定義は残すが呼び出しは削除済み。参照は起きないので事実上デッドコード。
@@ -887,23 +886,43 @@
     //     ・apex = 頭 (avatar 位置)、base = 視線 forward 方向に FRUSTUM_DEPTH m 先、W×H の矩形
     //     ・他ロール (camera / master) は従来の色付き球体 (直径 15cm)
     //     ・視錐台は color で塗り、fog: false で遠くでも見える
-    const FRUSTUM_DEPTH = 0.5;   // apex → base までの奥行 (m) — 描画領域を仮想スクリーンと見立てた距離
-    // self 用 base 距離 override (canvas 同期 ON 時に動的更新): null = デフォルト 0.5m
+    const FRUSTUM_DEPTH = 0.5;   // apex ↔ 矩形 の距離 (m) — depthOverride/FOV が未指定時のフォールバック
+    // self 用 apex 距離 override (FOV 由来): null = computeApexDepth を使用
     let SELF_FRUSTUM_DEPTH = null;
+    // 矩形 (W×H) が垂直/水平 FOV に収まる距離を camera.fov から算出
+    //   d = min( H/(2 tan(vfov/2)), W/(2 tan(hfov/2)) )
+    //   camera 未初期化時は FRUSTUM_DEPTH にフォールバック
+    function computeApexDepth(W, H) {
+      try {
+        const vfov = (camera.fov || 60) * Math.PI / 180;
+        const asp  = camera.aspect || (window.innerWidth / Math.max(1, window.innerHeight));
+        const hfov = 2 * Math.atan(Math.tan(vfov / 2) * asp);
+        const dV = H / (2 * Math.tan(vfov / 2));
+        const dH = W / (2 * Math.tan(hfov / 2));
+        const d = Math.min(dV, dH);
+        return (isFinite(d) && d > 0.02) ? d : FRUSTUM_DEPTH;
+      } catch (_) {
+        return FRUSTUM_DEPTH;
+      }
+    }
     function makeAvatarFrustum(color, W, H, depthOverride) {
       const c = new THREE.Color(color || '#fbbf24');
       const hw = W * 0.5, hh = H * 0.5;
-      const d  = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
-      // ローカル座標系: apex=(0,0,0)、camera forward = -Z、base 4 隅 at Z=-d
-      const bl = [-hw, -hh, -d];
-      const br = [+hw, -hh, -d];
-      const tl = [-hw, +hh, -d];
-      const tr = [+hw, +hh, -d];
+      const d  = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : computeApexDepth(W, H);
+      // ローカル座標系 (新): 矩形中心=(0,0,0)=avatar 位置、camera forward = -Z
+      //   矩形 (= Canvas 相当の長方形、アバター本体) 4 隅 at Z=0
+      //   apex = 法線 +Z 方向に d m 下がった仮想観測点 (FOV 由来)
+      //   見えている範囲 (視錐台): apex → 矩形 → 奥 (-Z 方向、forward)
+      const bl = [-hw, -hh, 0];
+      const br = [+hw, -hh, 0];
+      const tl = [-hw, +hh, 0];
+      const tr = [+hw, +hh, 0];
+      const apex = [0, 0, +d];
       const p = [];
-      // apex → 各 base 隅 (4 稜線)
-      p.push(0,0,0, ...bl);   p.push(0,0,0, ...br);
-      p.push(0,0,0, ...tl);   p.push(0,0,0, ...tr);
-      // base 矩形の 4 辺
+      // apex → 各矩形 隅 (4 稜線)
+      p.push(...apex, ...bl);   p.push(...apex, ...br);
+      p.push(...apex, ...tl);   p.push(...apex, ...tr);
+      // 矩形の 4 辺 (= Canvas 枠)
       p.push(...bl, ...br);   p.push(...br, ...tr);
       p.push(...tr, ...tl);   p.push(...tl, ...bl);
       const geom = new THREE.BufferGeometry();
@@ -1047,8 +1066,12 @@
         grp.add(g);
       }
 
-      const zBack = -frontDist - D;
-      const zMid  = -frontDist - D * 0.5;
+      // 新コード: 矩形 (= avatar 位置、Z=0 の前壁相当) から -Z (forward) 方向へ D m 延びる箱
+      //   前壁 (Z=0) = 矩形 → 透過。後壁 Z=-D、側壁は zMid = -D/2 中心。
+      //   frontDist パラメータは API 互換のため受け付けるが、新規配置では使用しない。
+      void frontDist;
+      const zBack = -D;
+      const zMid  = -D * 0.5;
 
       // 5 面 (前壁を除く)。すべて「ローカル +Z が box 内側」になるよう rotation を選択:
       //   ・後壁: rot=(0,0,0)      → +Z 内側 = +Z 世界 (=apex 側)
@@ -1098,15 +1121,15 @@
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
     function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole, omitBox) {
-      const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : FRUSTUM_DEPTH;
+      const d = (typeof depthOverride === 'number' && depthOverride > 0) ? depthOverride : computeApexDepth(W, H);
       const frustumLines = makeAvatarFrustum(color, W, H, d);
 
-      // apex hit (raycast 用透明立方体)
+      // apex hit (raycast 用透明立方体) — 新コード: avatar 位置 (= 矩形中心) から +Z (= -forward) 方向へ d
       const apexHit = new THREE.Mesh(
         new THREE.BoxGeometry(APEX_CUBE_SIZE, APEX_CUBE_SIZE, APEX_CUBE_SIZE),
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
       );
-      apexHit.position.set(0, 0, 0);
+      apexHit.position.set(0, 0, +d);
       apexHit.name = 'avatar-apex-hit';
       apexHit.userData.selectType = 'apex';
       apexHit.userData.avatarId = id;
@@ -1120,12 +1143,13 @@
       apexEdges.userData.__isAvatarEdge = true;   // Box表示トグル対象マーク
       apexHit.add(apexEdges);
 
-      // base hit (raycast 用透明平面、frustum base と同じ位置 = -Z 方向 FRUSTUM_DEPTH 先)
+      // base hit (raycast 用透明平面) — 新コード: 矩形 (= avatar 位置) と同じ Z=0
+      //   base = アバター本体 (Canvas 相当の長方形)。選択時は黄 edges で輪郭を表示。
       const baseHit = new THREE.Mesh(
         new THREE.PlaneGeometry(W, H),
         new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide })
       );
-      baseHit.position.set(0, 0, -d);
+      baseHit.position.set(0, 0, 0);
       baseHit.name = 'avatar-base-hit';
       baseHit.userData.selectType = 'base';
       baseHit.userData.avatarId = id;
@@ -1789,6 +1813,34 @@
         }
       });
 
+      // 検証用トグル (effect1..3) の全クライアント同期
+      //   ・window.__effect[n] を上書き
+      //   ・master はボタン UI を同期 (dirty なし、サーバー値が真)
+      //   ・camera + effect1 の場合は空間表示モード (AR / VR) を即時切替
+      socket.on('effectState', (data) => {
+        if (!data || typeof data !== 'object') return;
+        const n = data.effect;
+        if (n !== 1 && n !== 2 && n !== 3) return;
+        const on = !!data.on;
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false };
+        window.__effect[n] = on;
+        // master UI 同期 (ボタン見た目を on/off に合わせる)
+        if (ROLE === 'master') {
+          const btn = document.getElementById('m-effect-' + n);
+          if (btn) {
+            btn.dataset.on = on ? '1' : '0';
+            btn.textContent = '効果' + n + ': ' + (on ? 'ON' : 'OFF');
+            btn.style.background = on ? '#22c55e' : '#475569';
+            btn.style.color = on ? '#052e16' : 'white';
+          }
+        }
+        // 効果1: camera 空間表示モード切替
+        if (n === 1 && ROLE === 'camera' && typeof window.__applyCameraSpaceMode === 'function') {
+          window.__applyCameraSpaceMode(on);
+        }
+        log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
+      });
+
       socket.on('viewerEye', (data) => {
         if (!data) return;
         if (typeof data.x === 'number') viewerEye.x = data.x;
@@ -1890,11 +1942,14 @@
             await DeviceMotionEvent.requestPermission();
           }
         } catch (_) {}
-        // AR 疑似モード: 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
-        //   ・成功: body.ar-mode 付与 → CSS で #bg-video 表示 + canvas 透過
-        //           床/格子/背景色をオフにして 3D オブジェクトのみ現実空間に重畳
-        //   ・失敗 (権限拒否/端末非対応): AR モードをスキップ、従来の暗背景 3D モードで継続
-        await enableCameraPassthrough();
+        // 空間表示モード: 効果1 (サーバー同期) で分岐
+        //   OFF (= AR): 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
+        //   ON  (= VR): passthrough をスキップ、通常の 3D シーン (床 + 格子 + fog) で入室
+        //   既定値は OFF (AR) — 新規 camera クライアントもサーバーから届く effectState で上書きされる
+        _capturePassthroughDefaults();
+        const wantVR = !!(window.__effect && window.__effect[1]);
+        if (!wantVR) await enableCameraPassthrough();
+        else log('入室時モード: VR 空間 (effect1 ON)', 'ok');
         enterAsCamera();
       });
     }
@@ -1903,6 +1958,27 @@
     //   iOS Safari は WebXR immersive-ar 非対応だが、背面カメラ映像を <video> に流して
     //   その上に透過 canvas を重ねれば "見た目の AR" が実現できる。
     //   位置追跡 (SLAM) は無いので、端末を並進移動しても 3D オブジェクトは動かない (回転のみ追従)。
+    //
+    // VR 空間モードとの切り替え (効果1 トグル):
+    //   AR 側 (passthrough ON): scene.background=null, scene.fog=null, floor/grid 非表示, body.ar-mode
+    //   VR 側 (passthrough OFF): scene.background/fog を初期値に復元, floor/grid 表示, body.ar-mode 外す
+    //   enterAsCamera 時: window.__effect[1] (= 現在のサーバー状態) を見てどちらで入室するか決める
+    //   既入室中: socket.on('effectState') が effect=1 を受けたら即時切り替え
+    const _passthroughState = {
+      active: false,
+      stream: null,
+      // 元の scene 設定を保存 (初期化後に捕捉)
+      saved: null,
+    };
+    function _capturePassthroughDefaults() {
+      if (_passthroughState.saved) return;
+      _passthroughState.saved = {
+        background: scene.background,
+        fog: scene.fog,
+        clearAlpha: renderer.getClearAlpha(),
+        clearColor: renderer.getClearColor(new THREE.Color()).getHex(),
+      };
+    }
     async function enableCameraPassthrough() {
       const video = document.getElementById('bg-video');
       if (!video) { log('bg-video 要素なし', 'err'); return false; }
@@ -1910,6 +1986,7 @@
         log('getUserMedia 非対応ブラウザ', 'err');
         return false;
       }
+      _capturePassthroughDefaults();
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -1919,6 +1996,7 @@
           },
           audio: false,
         });
+        _passthroughState.stream = stream;
         video.srcObject = stream;
         await video.play();
         // 3D シーン側を透過モードに (現実映像を透かす)
@@ -1931,8 +2009,7 @@
         if (typeof grid       !== 'undefined' && grid)       grid.visible       = false;
         if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = false;
         if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = false;
-        // 環境光は AR 現実光と混ざるので明るめに (ベース照度を上げる)
-        if (typeof sceneAmbient !== 'undefined' && sceneAmbient) sceneAmbient.intensity = 1.0;
+        _passthroughState.active = true;
         log('AR passthrough ON (背面カメラ + gyro)', 'ok');
         return true;
       } catch (e) {
@@ -1940,11 +2017,49 @@
         return false;
       }
     }
+    // VR 空間モードへ戻す: カメラストリームを止めて scene 既定値を復元
+    function disableCameraPassthrough() {
+      const video = document.getElementById('bg-video');
+      try {
+        if (_passthroughState.stream) {
+          _passthroughState.stream.getTracks().forEach((t) => { try { t.stop(); } catch (_) {} });
+        }
+      } catch (_) {}
+      _passthroughState.stream = null;
+      if (video) { try { video.pause(); } catch (_) {} video.srcObject = null; }
+      document.body.classList.remove('ar-mode');
+      _capturePassthroughDefaults();
+      const s = _passthroughState.saved;
+      if (s) {
+        scene.background = s.background;
+        scene.fog = s.fog;
+        renderer.setClearColor(s.clearColor, s.clearAlpha);
+      }
+      // 床/格子/境界を再表示
+      if (typeof floor      !== 'undefined' && floor)      floor.visible      = true;
+      if (typeof grid       !== 'undefined' && grid)       grid.visible       = true;
+      if (typeof majorGrid  !== 'undefined' && majorGrid)  majorGrid.visible  = true;
+      if (typeof boundary   !== 'undefined' && boundary)   boundary.visible   = true;
+      _passthroughState.active = false;
+      log('AR passthrough OFF (VR 空間モードへ切替)', 'ok');
+    }
+    // 効果1 の現在値に基づいてモードを適用 (ROLE が camera の時のみ実効)
+    //   on=true → VR, on=false → AR
+    async function applyCameraSpaceMode(wantVR) {
+      if (ROLE !== 'camera') return;
+      if (!state.entered) return;   // 入室前は enterAsCamera 側で初期モードを決める
+      if (wantVR) {
+        if (_passthroughState.active) disableCameraPassthrough();
+      } else {
+        if (!_passthroughState.active) await enableCameraPassthrough();
+      }
+    }
+    window.__applyCameraSpaceMode = applyCameraSpaceMode;
 
     function enterAsCamera() {
       state.entered = true;
       // camera (スマホ) 専用の spawn: 目線高さ 1.7m
-      const CAM_SPAWN = { x: 0, y: 1.7, z: 0 };
+      const CAM_SPAWN = { x: 0, y: 2.0, z: 0 };
       camera.position.set(CAM_SPAWN.x, CAM_SPAWN.y, CAM_SPAWN.z);
       // 初期方向: +X (Start 押下時のスマホ方位が +X 正方向にマップされる)
       camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
@@ -2059,33 +2174,11 @@
         if (!hit) return;
         const obj = hit.object;
 
-        // 移動 Box (cube1..4)
+        // 移動 Box (cube1..4) — 全ロール共通仕様:
+        //   press で grab → drag でレイ先端 (grabDist) に向けて Spring-Damper で追従 → release で物理再開
+        //   camera (スマホ) もこの仕様に統一 (旧: スワイプ奥行き調整 + 投擲 は廃止)
         if (obj.userData && obj.userData.__movable) {
           selectObject(obj);
-          // camera (スマホ): touchstart の瞬間に grab/release トグル
-          //   さらに同じ指のタッチ継続中は上下スワイプで grabDist を調整できる状態にする
-          //   (cubeAdjust: startY と initialDist を保持し、_pressCheck で Δy から距離更新)
-          if (ROLE === 'camera') {
-            if (_heldCube === obj) {
-              releaseCube(obj);
-              return;
-            }
-            if (_heldCube) releaseCube(_heldCube);
-            grabCube(obj);
-            _dragState = {
-              type: 'cubeAdjust',
-              targetObj: obj,
-              startY: y,
-              startT: performance.now(),
-              lastY: y,
-              lastT: performance.now(),
-              swipeVel: 0,   // px/s (正 = 下向き、負 = 上向き)
-              initialDist: obj.userData.grabDist,
-            };
-            return;
-          }
-          // observer/master: mousedown で grab → mousemove で XZ 平面フリー移動 → mouseup で release
-          //   1m スナップ廃止、重力を持つ物理オブジェクトを自由に「掴んで」動かす
           if (obj.userData.held) return;
           grabCube(obj);
           // 掴んだ瞬間のマウス位置に相当する world 上の "ハンドル点" を保存
@@ -2138,25 +2231,7 @@
         if (Math.hypot(dx, dy) > slop) _tapMoved = true;
         if (!_dragState || !_tapMoved) return;
 
-        // cube distance adjust (camera スマホ): touchstart した指のΔy で grabDist を調整
-        //   ・上スワイプ (y↓) → 距離↑ (遠ざかる)、下スワイプ (y↑) → 距離↓ (近づく)
-        //   ・grabDist が変わると _heldTick が targetPos を更新 → spring で滑らかに追従
-        //   ・同時に swipeVel (px/s、EMA 平滑) を記録 → touchend で勢い投擲判定に使う
-        if (_dragState.type === 'cubeAdjust') {
-          const t = _dragState.targetObj;
-          const now = performance.now();
-          const dtLast = Math.max(0.001, (now - _dragState.lastT) / 1000);
-          const inst = (y - _dragState.lastY) / dtLast;    // px/s
-          _dragState.swipeVel = _dragState.swipeVel * 0.5 + inst * 0.5;   // EMA 0.5
-          _dragState.lastY = y;
-          _dragState.lastT = now;
-          const dy = _dragState.startY - y;
-          let next = _dragState.initialDist + dy * GRAB_DIST_SENS;
-          next = Math.max(GRAB_DIST_MIN, Math.min(GRAB_DIST_MAX, next));
-          t.userData.grabDist = next;
-          return;
-        }
-        // cube grab (observer/master): マウス位置からレイ先端 (grabDist) を計算 → targetPos
+        // cube grab (全ロール共通): マウス/タップ位置からレイ先端 (grabDist) を計算 → targetPos
         //   実際の cube 位置は Spring-Damper で targetPos に遅延追従 (慣性感)
         //   ・drag sensitivity: (rayHit - handleStart) × sens
         if (_dragState.type === 'cubeGrab') {
@@ -2218,24 +2293,7 @@
         _dragState = null;
         window.__cubeDragActive = false;
 
-        // cube distance adjust (camera スマホ) 終了:
-        //   ・|swipeVel| > SWIPE_THROW_THRESHOLD_PX_PER_S なら奥へ投げる (release + vel=forward·|speed|)
-        //   ・それ未満ならそのまま保持 (距離調整として確定)
-        if (savedDrag && savedDrag.type === 'cubeAdjust') {
-          const speed = Math.abs(savedDrag.swipeVel);
-          if (speed > SWIPE_THROW_THRESHOLD_PX_PER_S) {
-            const t = savedDrag.targetObj;
-            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-            let throwSpeed = speed * SWIPE_THROW_SCALE_M_PER_PX;
-            if (throwSpeed > SPRING_VEL_CAP) throwSpeed = SPRING_VEL_CAP;
-            t.userData.vel.copy(forward).multiplyScalar(throwSpeed);
-            releaseCube(t);
-            log('throw: ' + t.name + ' speed=' + throwSpeed.toFixed(2) + 'm/s (swipe ' + Math.round(speed) + 'px/s)', 'ok');
-          }
-          _pressAt = null;
-          return;
-        }
-        // cube grab 終了 (observer/master) → releaseCube で velocity 計算 + 物理再開
+        // cube grab 終了 (全ロール共通) → releaseCube で velocity 計算 + 物理再開
         //   drag 有無に関わらず必ず release (短クリックは vel≒0 で落下、drag ありは投げる)
         if (savedDrag && savedDrag.type === 'cubeGrab') {
           releaseCube(savedDrag.targetObj);
@@ -2273,15 +2331,14 @@
         // tap の判定
         const hit = _raycastAt(x, y);
         if (!hit) {
-          // 空 tap: camera が cube を掴んでいれば release、それ以外は選択解除
-          if (ROLE === 'camera' && _heldCube) releaseCube(_heldCube);
+          // 空 tap: 選択解除 (全ロール共通。cubeGrab は _dragState 側で既に release 済み)
           selectObject(null);
           return;
         }
         const obj = hit.object;
-        // 移動 Box (cube1..4): camera は touchstart で既にトグル済み → 何もしない
+        // 移動 Box (cube1..4): tap で選択 (grab は mousedown 時の cubeGrab 分岐が担当)
         if (obj.userData && obj.userData.__movable) {
-          if (ROLE !== 'camera') selectObject(obj);
+          selectObject(obj);
           return;
         }
         // それ以外 (apex/base/light sphere) は master のみ選択可
@@ -3279,6 +3336,26 @@
       }
       _bind('m-drag-sens-apply', 'click', _applyDragSens);
       _applyDragSens();
+
+      // ==================================================
+      // 検証用トグル (効果1〜3): 実装内容の効果 ON/OFF 確認
+      //   ・master 側ボタンクリック → socket.emit('effectState') → サーバーが全体に broadcast
+      //   ・受信側 (全ロール) で window.__effect[n] を更新 + 必要なら効果を適用
+      //     - 効果1: ON=VR 空間 / OFF=AR passthrough (camera role のみ即時切替)
+      //     - 効果2, 3: 未割当 (指示待ち)
+      //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
+      // ==================================================
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false };
+      [1, 2, 3].forEach((n) => {
+        const btn = document.getElementById('m-effect-' + n);
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+          const next = btn.dataset.on !== '1';
+          if (socket && socket.connected) {
+            socket.emit('effectState', { effect: n, on: next });
+          }
+        });
+      });
     }
 
     // ========== クライアント選択ドロップダウン ==========

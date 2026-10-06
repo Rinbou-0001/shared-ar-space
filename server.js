@@ -88,12 +88,18 @@ let viewerEye = { x: 0, y: 2.0, z: 0 };
 let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpawnRate: 0.05 };
 
 // FogExp2 密度共有パラメータ (space2 で使用、master が変更 → 全クライアントへ配信)
-//   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密 (デフォルト)
-let fogConfig = { density: 0.3 };
+//   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密、0.1 = デフォルト
+let fogConfig = { density: 0.1 };
 
 // オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
 //   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
 let moveConfig = { sensitivity: 60 };
+
+// space3 検証用トグル (master → 全クライアント配信)
+//   effect1: スマホ空間表示モード — false=AR passthrough (背面カメラ), true=VR 空間
+//   effect2, effect3: 未割当 (将来用)
+//   新規接続時にも initEffects で現在値を送る
+let effectState = { 1: false, 2: false, 3: false };
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
 //   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
@@ -167,6 +173,10 @@ io.on('connection', (socket) => {
   socket.emit('fogConfig', fogConfig);
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
+  // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
+  for (const n of [1, 2, 3]) {
+    socket.emit('effectState', { effect: n, on: !!effectState[n] });
+  }
   // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
   for (const [name, pose] of objectPoses.entries()) {
     socket.emit('objectPose', { name, x: pose.x, y: pose.y, z: pose.z });
@@ -372,6 +382,18 @@ io.on('connection', (socket) => {
       fogConfig.density = Math.max(0, Math.min(1, data.density));
     }
     io.emit('fogConfig', fogConfig);
+  });
+
+  // space3 検証用トグル (master → 全クライアント配信)
+  //   data: { effect: 1|2|3, on: boolean }
+  socket.on('effectState', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data !== 'object') return;
+    const n = data.effect;
+    if (n !== 1 && n !== 2 && n !== 3) return;
+    effectState[n] = !!data.on;
+    io.emit('effectState', { effect: n, on: effectState[n] });
   });
 
   // Master からの周回速度設定
