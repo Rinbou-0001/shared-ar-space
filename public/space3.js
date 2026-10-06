@@ -76,6 +76,14 @@
 
     // ========== Three.js セットアップ ==========
     const scene = new THREE.Scene();
+
+    // canvasBox 前面 (Base と接する +Z 面) 用の共有テクスチャ。
+    //   ・画像を全 canvasBox で使い回す (ロードは 1 回だけ)
+    //   ・残り 5 面 (背面 + 側面 4) はグレー基調
+    const _canvasBoxTex = new THREE.TextureLoader().load('/assets/canvas-front.png');
+    if ('colorSpace' in _canvasBoxTex) _canvasBoxTex.colorSpace = THREE.SRGBColorSpace;
+    else _canvasBoxTex.encoding = THREE.sRGBEncoding;
+    _canvasBoxTex.anisotropy = 4;
     // 背景 = 白。距離フェード先の色と一致させると「遠方が空気に溶ける」ように見える
     scene.background = new THREE.Color(0xffffff);
     // 指数フォグ (視点から距離 d のフラグメントの色は color との mix になる):
@@ -145,7 +153,7 @@
     const camera = new THREE.PerspectiveCamera(
       72,
       window.innerWidth / window.innerHeight,
-      0.05, 500
+      0.005, 500   // near 5mm: canvasBox (奥行 2cm、base から 2cm 前方) を近接表示可能に
     );
     // 全ロール共通: 入室座標 (0, 1, 0)、初期回転 Yaw=-90°, Pitch=0, Roll=0
     //   Euler(pitch=0, yaw=-π/2, roll=0, 'YXZ') → +X 方向を見る
@@ -645,6 +653,21 @@
       new THREE.Vector3(-0.5,-0.5,+0.5), new THREE.Vector3(+0.5,-0.5,+0.5),
       new THREE.Vector3(-0.5,+0.5,+0.5), new THREE.Vector3(+0.5,+0.5,+0.5),
     ];
+    // 任意寸法 (halfExt) に対応した 8 隅配列を再利用用に書き出す。
+    //   cube の userData.halfExt (Vector3) があればその値、無ければ (0.5,0.5,0.5)。
+    const _cornerScratch = [];
+    for (let i = 0; i < 8; i++) _cornerScratch.push(new THREE.Vector3());
+    function _getCornersFor(cube) {
+      const he = cube.userData && cube.userData.halfExt;
+      const hx = he ? he.x : 0.5;
+      const hy = he ? he.y : 0.5;
+      const hz = he ? he.z : 0.5;
+      _cornerScratch[0].set(-hx,-hy,-hz); _cornerScratch[1].set(+hx,-hy,-hz);
+      _cornerScratch[2].set(-hx,+hy,-hz); _cornerScratch[3].set(+hx,+hy,-hz);
+      _cornerScratch[4].set(-hx,-hy,+hz); _cornerScratch[5].set(+hx,-hy,+hz);
+      _cornerScratch[6].set(-hx,+hy,+hz); _cornerScratch[7].set(+hx,+hy,+hz);
+      return _cornerScratch;
+    }
     const _rotatedCorners = [];
     for (let i = 0; i < 8; i++) _rotatedCorners.push(new THREE.Vector3());
     const _phCentroid = new THREE.Vector3();
@@ -687,9 +710,15 @@
         //   (受信した位置を描画するだけ、ローカルシミュレーションしない → 競合消失)
         const owner = c.userData.ownerId;
         if (owner && owner !== myId) continue;
+        // canvasBox が Base にピン留めされている間は物理をスキップ
+        //   (位置は _canvasBoxFollowTick 側で avatar の base world transform に追従)
+        if (c.userData.__isCanvasBox && c.userData.pinned) continue;
         const v  = c.userData.vel;
         const av = c.userData.angVel;
         const mass = c.userData.mass || 1.0;
+        const _he = c.userData.halfExt;
+        const _hx = _he ? _he.x : CUBE_HALF_Y;
+        const _hz = _he ? _he.z : CUBE_HALF_Y;
         // held: Spring-Damper で targetPos へ引っ張る (アームの先端 → バネ紐 → 物体)
         //   ・v += ((k·x - d·v) / m) · dt、ただし k/m と d/m は定数化
         //   ・gravity は加え続ける (紐で吊るされてわずかに垂れる)
@@ -735,11 +764,11 @@
             c.quaternion.slerp(_phTmpQ, 0.08);
           }
           _resolveFloorContactRigid(c, dt);
-          // 壁反発
-          if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
-          if (c.position.x < -FIELD_HALF + CUBE_HALF_Y) { c.position.x = -FIELD_HALF + CUBE_HALF_Y; v.x = -v.x * 0.5; }
-          if (c.position.z >  FIELD_HALF - CUBE_HALF_Y) { c.position.z =  FIELD_HALF - CUBE_HALF_Y; v.z = -v.z * 0.5; }
-          if (c.position.z < -FIELD_HALF + CUBE_HALF_Y) { c.position.z = -FIELD_HALF + CUBE_HALF_Y; v.z = -v.z * 0.5; }
+          // 壁反発 (halfExt 対応)
+          if (c.position.x >  FIELD_HALF - _hx) { c.position.x =  FIELD_HALF - _hx; v.x = -v.x * 0.5; }
+          if (c.position.x < -FIELD_HALF + _hx) { c.position.x = -FIELD_HALF + _hx; v.x = -v.x * 0.5; }
+          if (c.position.z >  FIELD_HALF - _hz) { c.position.z =  FIELD_HALF - _hz; v.z = -v.z * 0.5; }
+          if (c.position.z < -FIELD_HALF + _hz) { c.position.z = -FIELD_HALF + _hz; v.z = -v.z * 0.5; }
           continue;
         }
         if (c.userData.sleeping) continue;   // sleep 中は tick 全スキップ
@@ -764,11 +793,11 @@
         }
         // 床接地 (簡易剛体: 最下頂点検出 + 法線反力 + Coulomb 摩擦 + トルク)
         _resolveFloorContactRigid(c, dt);
-        // 場所範囲: FIELD_HALF (10m) 壁で反発 (center ベース、簡易)
-        if (c.position.x >  FIELD_HALF - CUBE_HALF_Y) { c.position.x =  FIELD_HALF - CUBE_HALF_Y; v.x = -v.x * 0.5; }
-        if (c.position.x < -FIELD_HALF + CUBE_HALF_Y) { c.position.x = -FIELD_HALF + CUBE_HALF_Y; v.x = -v.x * 0.5; }
-        if (c.position.z >  FIELD_HALF - CUBE_HALF_Y) { c.position.z =  FIELD_HALF - CUBE_HALF_Y; v.z = -v.z * 0.5; }
-        if (c.position.z < -FIELD_HALF + CUBE_HALF_Y) { c.position.z = -FIELD_HALF + CUBE_HALF_Y; v.z = -v.z * 0.5; }
+        // 場所範囲: FIELD_HALF 壁で反発 (halfExt 対応、center ベース簡易)
+        if (c.position.x >  FIELD_HALF - _hx) { c.position.x =  FIELD_HALF - _hx; v.x = -v.x * 0.5; }
+        if (c.position.x < -FIELD_HALF + _hx) { c.position.x = -FIELD_HALF + _hx; v.x = -v.x * 0.5; }
+        if (c.position.z >  FIELD_HALF - _hz) { c.position.z =  FIELD_HALF - _hz; v.z = -v.z * 0.5; }
+        if (c.position.z < -FIELD_HALF + _hz) { c.position.z = -FIELD_HALF + _hz; v.z = -v.z * 0.5; }
         // Sleep 判定: ほぼ静止が連続した時 sleep フラグ ON → tick 全スキップ
         if (v.lengthSq() < SLEEP_LIN2 && av.lengthSq() < SLEEP_ANG2) {
           c.userData.restFrames++;
@@ -799,14 +828,18 @@
     //   ・θ ≈ 面水平 で angVel ≈ 0 の時は orientation snap で axis-aligned にスナップ
     function _resolveFloorContactRigid(cube, dt) {
       const mass = cube.userData.mass || 1.0;
-      const I = mass * CUBE_INERTIA_FACTOR;
+      const iFactor = (typeof cube.userData.inertiaFactor === 'number')
+        ? cube.userData.inertiaFactor : CUBE_INERTIA_FACTOR;
+      const I = mass * iFactor;
       const v  = cube.userData.vel;
       const av = cube.userData.angVel;
       const CONTACT_TOL = 0.01;
       // 8 頂点を world 回転適用、キャッシュに保存。最下点 minY を記録。
+      //   halfExt (userData) があれば任意サイズ、無ければ 1m 立方体 (default)
+      const CORNERS = _getCornersFor(cube);
       let minY = Infinity;
       for (let k = 0; k < 8; k++) {
-        _rotatedCorners[k].copy(_cubeCorners[k]).applyQuaternion(cube.quaternion);
+        _rotatedCorners[k].copy(CORNERS[k]).applyQuaternion(cube.quaternion);
         const worldY = cube.position.y + _rotatedCorners[k].y;
         if (worldY < minY) minY = worldY;
       }
@@ -892,6 +925,9 @@
       for (let i = 0; i < movableCubes.length; i++) {
         for (let j = i + 1; j < movableCubes.length; j++) {
           const a = movableCubes[i], b = movableCubes[j];
+          // canvasBox は非立方寸法 (W×H×0.02) のため AABB=1 を仮定した本判定から除外
+          //   他の cube とは "すり抜ける" 挙動になるが、床接地と壁反発は _physicsTick で処理される
+          if (a.userData.__isCanvasBox || b.userData.__isCanvasBox) continue;
           const dx = b.position.x - a.position.x;
           const dy = b.position.y - a.position.y;
           const dz = b.position.z - a.position.z;
@@ -972,6 +1008,23 @@
     let _heldCube = null;
     function grabCube(cube) {
       if (!cube || cube.userData.held) return;
+      // canvasBox が pinned (avatar grp の子) 状態なら detach → world transform を保持したまま scene 直下へ
+      //   以後は普通の物理オブジェクトとして振る舞う
+      if (cube.userData.__isCanvasBox && cube.userData.pinned) {
+        const wp = new THREE.Vector3();
+        const wq = new THREE.Quaternion();
+        const ws = new THREE.Vector3();
+        cube.getWorldPosition(wp);
+        cube.getWorldQuaternion(wq);
+        cube.getWorldScale(ws);
+        if (cube.parent) cube.parent.remove(cube);
+        cube.position.copy(wp);
+        cube.quaternion.copy(wq);
+        cube.scale.copy(ws);
+        scene.add(cube);
+        cube.userData.pinned = false;
+        log('canvasBox detach: ' + cube.name, 'ok');
+      }
       cube.userData.held = true;
       // Ownership を自分に設定 (他クライアントに emit で伝達 → 二重シミュを防ぐ)
       cube.userData.ownerId = myId;
@@ -1408,7 +1461,49 @@
       //   mode A では apex が avatar 位置なので従来の box 配置 (base 前方) と自然に整合する。
       //   box geometry 自体は mode に関わらず W×H×W/2 のまま (modeA でも物理サイズを維持)。
       const box = omitBox ? null : makeAvatarBox(color, W, H, L.D, !!hasHole);
-      return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box };
+
+      // Canvas Box (observer 専用、物理オブジェクト):
+      //   ・寸法: base W×H × 0.02m (奥行き 2cm)
+      //   ・Base 平面を "前面" とし -Z (= forward) 方向へ 2cm 延長 (格子つき avatarBox と同じ配置)
+      //   ・初期は pinned=true: avatar grp の子として追従 (base と同じ姿勢)
+      //   ・選択/grab されると pinned=false になり、grp から scene へ付け替え → 重力+物理+衝突
+      //   ・物理用 userData: __movable, __isCanvasBox, halfExt, inertiaFactor, 初期位置
+      //   ・base の "ローカル" 位置に対して配置 (grp の子として追加される前提)
+      let canvasBox = null;
+      if (!omitBox) {
+        // 6 面マテリアル配列: BoxGeometry のインデックスは
+        //   0=+X 右, 1=-X 左, 2=+Y 上, 3=-Y 下, 4=+Z 前 (Base と接する面), 5=-Z 後ろ
+        //   前面 (idx 4) にのみ shared texture を貼る、残り 5 面はグレー基調。
+        const _grayHex = 0x9ca3af;   // ベースカラー gray
+        const matGray = new THREE.MeshBasicMaterial({ color: _grayHex, side: THREE.DoubleSide, fog: true });
+        const matFront = new THREE.MeshBasicMaterial({ map: _canvasBoxTex, color: 0xffffff, side: THREE.DoubleSide, fog: true });
+        canvasBox = new THREE.Mesh(
+          new THREE.BoxGeometry(L.baseW, L.baseH, 0.02),
+          [matGray, matGray, matGray, matGray, matFront, matGray]
+        );
+        canvasBox.position.set(0, 0, L.baseZ - 0.01);
+        canvasBox.name = 'canvas-box_' + id;
+        canvasBox.renderOrder = 10;
+        // 物理 userData — pinned 中は _physicsTick がスキップ、grab 時に pinned=false になり物理再開
+        const hx = L.baseW * 0.5;
+        const hy = L.baseH * 0.5;
+        const hz = 0.01;
+        canvasBox.userData.__movable = true;
+        canvasBox.userData.__isCanvasBox = true;
+        canvasBox.userData.pinned = true;
+        canvasBox.userData.pinnedAvatarId = id;
+        canvasBox.userData.halfExt = new THREE.Vector3(hx, hy, hz);
+        canvasBox.userData.inertiaFactor = (hx*hx + hy*hy + hz*hz) * (2/9);
+        canvasBox.userData.vel = new THREE.Vector3();
+        canvasBox.userData.angVel = new THREE.Vector3();
+        canvasBox.userData.held = false;
+        canvasBox.userData.sleeping = false;
+        canvasBox.userData.restFrames = 0;
+        canvasBox.userData.mass = 5.0;
+        canvasBox.userData.targetPos = null;
+        canvasBox.userData.ownerId = null;
+      }
+      return { frustumLines, apexHit, apexEdges, baseHit, baseEdges, box, canvasBox };
     }
 
     const avatars = new Map();
@@ -1452,6 +1547,16 @@
         if (parts.box) {
           parts.box.visible = boxVisibilityEnabled;
           grp.add(parts.box);
+        }
+        // canvasBox (observer 専用、2cm 厚 白板 + 物理) を grp に追加
+        //   pinned 中は grp の子として base に追従。grab 時に detach して scene 直下に移動 (物理モード)。
+        if (parts.canvasBox) {
+          av.canvasBox = parts.canvasBox;
+          grp.add(parts.canvasBox);
+          selectables.push(parts.canvasBox);
+          movableCubes.push(parts.canvasBox);
+          parts.canvasBox.userData.initialPos = parts.canvasBox.position.clone();
+          parts.canvasBox.userData.initialQuat = parts.canvasBox.quaternion.clone();
         }
         // selectables 登録 (raycast 対象、master 側のみ実質的に使う)
         selectables.push(parts.apexHit);
@@ -1541,6 +1646,21 @@
         });
         a.box = null;
       }
+      // canvasBox (observer 専用、2cm 厚 白板 + 物理)
+      if (a.canvasBox) {
+        if (a.canvasBox.parent) a.canvasBox.parent.remove(a.canvasBox);
+        // selectables / movableCubes から取り除く (再構築で新しいインスタンスに置換される)
+        let si = selectables.indexOf(a.canvasBox);
+        if (si >= 0) selectables.splice(si, 1);
+        let mi = movableCubes.indexOf(a.canvasBox);
+        if (mi >= 0) movableCubes.splice(mi, 1);
+        if (a.canvasBox.geometry) a.canvasBox.geometry.dispose();
+        if (a.canvasBox.material) {
+          if (Array.isArray(a.canvasBox.material)) a.canvasBox.material.forEach((mm) => mm.dispose());
+          else a.canvasBox.material.dispose();
+        }
+        a.canvasBox = null;
+      }
     }
 
     // 既存 avatar の frustum + hit mesh を作り直し (displayConfig / tag 変化時)
@@ -1574,6 +1694,15 @@
       if (parts.box) {
         parts.box.visible = boxVisibilityEnabled;
         a.grp.add(parts.box);
+      }
+      // canvasBox (observer 専用、2cm 厚 白板 + 物理) を grp に追加 — pinned 中のみ grp 子
+      if (parts.canvasBox) {
+        a.canvasBox = parts.canvasBox;
+        a.grp.add(parts.canvasBox);
+        selectables.push(parts.canvasBox);
+        movableCubes.push(parts.canvasBox);
+        parts.canvasBox.userData.initialPos = parts.canvasBox.position.clone();
+        parts.canvasBox.userData.initialQuat = parts.canvasBox.quaternion.clone();
       }
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
