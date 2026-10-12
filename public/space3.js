@@ -157,7 +157,7 @@
     );
     // 全ロール共通: 入室座標 (0, 1, 0)、初期回転 Yaw=-90°, Pitch=0, Roll=0
     //   Euler(pitch=0, yaw=-π/2, roll=0, 'YXZ') → +X 方向を見る
-    const SPAWN_POS = { x: 0, y: 1, z: 0 };
+    const SPAWN_POS = { x: 0, y: 1.3, z: 0 };
     const INIT_YAW = -Math.PI / 2;   // -90°
     const INIT_PITCH = 0;
     const INIT_ROLL = 0;
@@ -727,24 +727,8 @@
         if (c.userData.held) {
           const t = c.userData.targetPos;
           if (t) {
-            // 効果4 (しなりモード): 2 段ばね + 低剛性 K
-            //   ・OFF: 従来通り targetPos へダイレクト Spring-Damper (K=45)
-            //   ・ON : heldAnchor が targetPos へ遅延追従 (1 段目) → heldAnchor へ Spring (2 段目、K=25)
-            //          → 手首を振るほど cube が「遅れて」ついてくる = しなり & 遠心力的な弧
-            const whippy = !!(window.__effect && window.__effect[4]);
-            let anchor = t;
-            let springK = SPRING_K_PER_KG;
-            if (whippy) {
-              springK = 25;
-              if (!c.userData.heldAnchor) c.userData.heldAnchor = c.position.clone();
-              // alpha は dt 依存: 時定数 τ ≈ 0.1s → α = 1 - exp(-dt/τ)
-              const alpha = 1 - Math.exp(-dt / 0.1);
-              c.userData.heldAnchor.lerp(t, alpha);
-              anchor = c.userData.heldAnchor;
-            } else {
-              c.userData.heldAnchor = null;
-            }
-            _phTmpV1.copy(anchor).sub(c.position).multiplyScalar(springK);     // k/m · x
+            // 直結 Spring-Damper (K=45): targetPos へ加速度 (k·x - d·v) / m
+            _phTmpV1.copy(t).sub(c.position).multiplyScalar(SPRING_K_PER_KG);  // k/m · x
             _phTmpV2.copy(v).multiplyScalar(-SPRING_DAMPING_PER_KG);           // -d/m · v
             _phTmpV1.add(_phTmpV2);                                            // 加速度 (m/s²)
             v.addScaledVector(_phTmpV1, dt);
@@ -753,16 +737,6 @@
           // 発散防止: 速度上限
           if (v.length() > SPRING_VEL_CAP) v.setLength(SPRING_VEL_CAP);
           c.position.addScaledVector(v, dt);
-          // 効果4 ON: cube の向きを速度方向へ緩やかに slerp (しなり視覚効果)
-          //   ・|v| が小さい時は追従しない (静止時のガタつき防止)
-          //   ・up = +Y 固定で lookAt 行列から quaternion を導出
-          if (window.__effect && window.__effect[4] && v.lengthSq() > 0.5) {
-            _phTmpV1.copy(v).normalize();
-            // local -Z (forward) を v 方向へ向ける → lookAt(eye=0, target=-v, up=+Y)
-            _phTmpMat.lookAt(_phZero, _phTmpV2.copy(_phTmpV1).negate(), _phUpY);
-            _phTmpQ.setFromRotationMatrix(_phTmpMat);
-            c.quaternion.slerp(_phTmpQ, 0.08);
-          }
           _resolveFloorContactRigid(c, dt);
           // 壁反発 (halfExt 対応)
           if (c.position.x >  FIELD_HALF - _hx) { c.position.x =  FIELD_HALF - _hx; v.x = -v.x * 0.5; }
@@ -1413,7 +1387,7 @@
     //   ・base hit: W×H 平面、透明 (raycast 用)、子に黄 edges を持ち選択時のみ visible
     //   ・box: W×H×(W/2) の 5 面 (前壁=frustum base を透過)
     //   ・userData: {selectType: 'apex'|'base', avatarId, avatarObj}
-    function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole, omitBox) {
+    function makeObserverFrustumMeshes(color, W, H, id, depthOverride, hasHole, omitBox, targetRole) {
       const L = _computeFrustumLayout(W, H, depthOverride);
       const frustumLines = makeAvatarFrustum(color, W, H, depthOverride);
 
@@ -1470,16 +1444,22 @@
       //   ・物理用 userData: __movable, __isCanvasBox, halfExt, inertiaFactor, 初期位置
       //   ・base の "ローカル" 位置に対して配置 (grp の子として追加される前提)
       let canvasBox = null;
-      if (!omitBox) {
+      // canvasBox は observer アバターのみ、かつ **入室時 (= 初回生成時) の effect1 ON** の場合のみ生成
+      //   ・rebuild では既存を維持する実装になっているので、ここでの判定は初回生成時のみ効く
+      //   ・master パネルで effect1 を ON にした状態で入室した observer にのみ canvasBox が付く
+      const _effect1On = !!(window.__effect && window.__effect[1]);
+      if (!omitBox && targetRole === 'observer' && _effect1On) {
         // 6 面マテリアル配列: BoxGeometry のインデックスは
-        //   0=+X 右, 1=-X 左, 2=+Y 上, 3=-Y 下, 4=+Z 前 (Base と接する面), 5=-Z 後ろ
-        //   前面 (idx 4) にのみ shared texture を貼る、残り 5 面はグレー基調。
-        const _grayHex = 0x9ca3af;   // ベースカラー gray
-        const matGray = new THREE.MeshBasicMaterial({ color: _grayHex, side: THREE.DoubleSide, fog: true });
-        const matFront = new THREE.MeshBasicMaterial({ map: _canvasBoxTex, color: 0xffffff, side: THREE.DoubleSide, fog: true });
+        //   0=+X 右, 1=-X 左, 2=+Y 上, 3=-Y 下, 4=+Z (Base と接する前面), 5=-Z (奥面)
+        //   effect2 OFF ではカメラが +Z 面と同じ平面にあり +Z 面は edge-on で見えないため、
+        //   奥面 (-Z, idx 5) にも同じテクスチャを貼る。カメラは奥面を内側から見ることで画像が full-screen で見える。
+        //   残り 4 側面 (0..3) はグレー基調 (アバター本体色の面)。
+        const _grayHex = 0x9ca3af;
+        const matGray  = new THREE.MeshBasicMaterial({ color: _grayHex, side: THREE.DoubleSide, fog: true });
+        const matImage = new THREE.MeshBasicMaterial({ map: _canvasBoxTex, color: 0xffffff, side: THREE.DoubleSide, fog: true });
         canvasBox = new THREE.Mesh(
           new THREE.BoxGeometry(L.baseW, L.baseH, 0.02),
-          [matGray, matGray, matGray, matGray, matFront, matGray]
+          [matGray, matGray, matGray, matGray, matImage, matImage]
         );
         canvasBox.position.set(0, 0, L.baseZ - 0.01);
         canvasBox.name = 'canvas-box_' + id;
@@ -1530,7 +1510,7 @@
         //   tag 受信 or displayConfig 受信で rebuildAvatarFrustum が正しい hasHole で作り直す。
         //   omitBox = 対象アバターが camera ロール (スマホ) の時 true。閲覧側の ROLE は無関係。
         const omitBox = (role === 'camera');
-        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id, null, false, omitBox);
+        const parts = makeObserverFrustumMeshes(av.color, dW, dH, id, null, false, omitBox, role);
         av.frustumLines = parts.frustumLines;
         av.apexHit  = parts.apexHit;  av.apexEdges = parts.apexEdges;
         av.baseHit  = parts.baseHit;  av.baseEdges = parts.baseEdges;
@@ -1646,21 +1626,10 @@
         });
         a.box = null;
       }
-      // canvasBox (observer 専用、2cm 厚 白板 + 物理)
-      if (a.canvasBox) {
-        if (a.canvasBox.parent) a.canvasBox.parent.remove(a.canvasBox);
-        // selectables / movableCubes から取り除く (再構築で新しいインスタンスに置換される)
-        let si = selectables.indexOf(a.canvasBox);
-        if (si >= 0) selectables.splice(si, 1);
-        let mi = movableCubes.indexOf(a.canvasBox);
-        if (mi >= 0) movableCubes.splice(mi, 1);
-        if (a.canvasBox.geometry) a.canvasBox.geometry.dispose();
-        if (a.canvasBox.material) {
-          if (Array.isArray(a.canvasBox.material)) a.canvasBox.material.forEach((mm) => mm.dispose());
-          else a.canvasBox.material.dispose();
-        }
-        a.canvasBox = null;
-      }
+      // canvasBox (observer 専用、2cm 厚 板 + 物理) — rebuild 時に破棄せず維持する
+      //   ・既に grab/detach されている可能性があるので再生成すると状態 (位置・速度) が消える
+      //   ・displayConfig の off-axis 一括切替で rebuildAvatarFrustum が走っても canvasBox は影響させない
+      //   ・最終的な avatar leave 時のみ別経路で破棄する想定
     }
 
     // 既存 avatar の frustum + hit mesh を作り直し (displayConfig / tag 変化時)
@@ -1678,7 +1647,7 @@
       _removeAvatarSelectables(a);
       _disposeAvatarSubMeshes(a);
       const omitBox = (a.role === 'camera');
-      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride, hasHole, omitBox);
+      const parts = makeObserverFrustumMeshes(a.color, dW, dH, id, depthOverride, hasHole, omitBox, a.role);
       a.frustumLines = parts.frustumLines;
       a.apexHit = parts.apexHit;  a.apexEdges = parts.apexEdges;
       a.baseHit = parts.baseHit;  a.baseEdges = parts.baseEdges;
@@ -1695,14 +1664,32 @@
         parts.box.visible = boxVisibilityEnabled;
         a.grp.add(parts.box);
       }
-      // canvasBox (observer 専用、2cm 厚 白板 + 物理) を grp に追加 — pinned 中のみ grp 子
+      // canvasBox: 既存 (a.canvasBox) があればそれを維持し、新規生成分は破棄する。
+      //   displayConfig (off-axis 切替) などで rebuild された時に canvasBox の状態 (位置・物理) をリセットしない。
+      //   既存 canvasBox が pinned 中なら、新しい base 位置に追従して local Z を更新する。
       if (parts.canvasBox) {
-        a.canvasBox = parts.canvasBox;
-        a.grp.add(parts.canvasBox);
-        selectables.push(parts.canvasBox);
-        movableCubes.push(parts.canvasBox);
-        parts.canvasBox.userData.initialPos = parts.canvasBox.position.clone();
-        parts.canvasBox.userData.initialQuat = parts.canvasBox.quaternion.clone();
+        if (a.canvasBox) {
+          // 新規分は破棄
+          if (parts.canvasBox.geometry) parts.canvasBox.geometry.dispose();
+          if (parts.canvasBox.material) {
+            if (Array.isArray(parts.canvasBox.material)) parts.canvasBox.material.forEach((mm) => mm.dispose());
+            else parts.canvasBox.material.dispose();
+          }
+          parts.canvasBox = null;
+          // 既存 pinned なら base の新位置に追従
+          if (a.canvasBox.userData.pinned && a.canvasBox.parent === a.grp) {
+            const _L = _computeFrustumLayout(dW, dH, depthOverride);
+            a.canvasBox.position.z = _L.baseZ - 0.01;
+          }
+        } else {
+          // 初回: 普通に追加
+          a.canvasBox = parts.canvasBox;
+          a.grp.add(parts.canvasBox);
+          selectables.push(parts.canvasBox);
+          movableCubes.push(parts.canvasBox);
+          parts.canvasBox.userData.initialPos = parts.canvasBox.position.clone();
+          parts.canvasBox.userData.initialQuat = parts.canvasBox.quaternion.clone();
+        }
       }
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
@@ -1925,7 +1912,7 @@
         log('display detect err: ' + e.message, 'err');
       }
     }
-    let viewerEye = { x: 0, y: 2.0, z: 0 };
+    let viewerEye = { x: 0, y: 1.3, z: 0 };
     let selectedClientId = ''; // master のみ使用
 
     function waitForIO(cb, n = 100) {
@@ -2247,10 +2234,9 @@
             btn.style.color = on ? '#052e16' : 'white';
           }
         }
-        // 効果1: camera 空間表示モード切替
-        if (n === 1 && ROLE === 'camera' && typeof window.__applyCameraSpaceMode === 'function') {
-          window.__applyCameraSpaceMode(on);
-        }
+        // 効果1: observer 入室時の canvasBox 生成ゲート (入室後の切替はなし、ゲートのみ)
+        //   既入室中の observer に対しては何もしない — 入室時の window.__effect[1] 値で決定済み
+        //   camera / master には影響なし
         // 効果2: 視錐台レイアウト切替 — 既定 (Canvas-plane) ↔ 案 A (実視点)
         //   全アバターの frustum を再構築 (makeObserverFrustumMeshes が window.__effect[2] を参照)
         if (n === 2) {
@@ -2376,14 +2362,9 @@
             await DeviceMotionEvent.requestPermission();
           }
         } catch (_) {}
-        // 空間表示モード: 効果1 (サーバー同期) で分岐 — 2026-10-06 ON/OFF 入れ替え
-        //   OFF (既定、恒常): VR 空間 — passthrough をスキップ、通常の 3D シーン (床 + 格子 + fog) で入室
-        //   ON               : AR passthrough — 背面カメラ映像を getUserMedia で取得して canvas 背景に敷く
-        //   新規 camera クライアントもサーバーから届く effectState で上書きされる
-        _capturePassthroughDefaults();
-        const wantAR = !!(window.__effect && window.__effect[1]);
-        if (wantAR) await enableCameraPassthrough();
-        else log('入室時モード: VR 空間 (既定、effect1 OFF)', 'ok');
+        // 空間表示モード: VR 空間を恒常化 (AR passthrough は廃止、効果1 の制御対象外)
+        //   効果1 は observer 入室時の canvasBox 生成ゲートに再割当済み (camera には影響しない)
+        log('入室時モード: VR 空間 (恒常)', 'ok');
         enterAsCamera();
       });
     }
@@ -3516,10 +3497,36 @@
         log('master offaxis[' + selectedClientId.substring(0, 6) + '] → ' + (newVal ? 'ON' : 'OFF'), 'ok');
       });
 
+      // 全オブザーバーに一括適用 (master / camera role は対象外)
+      //   ・ローカル状態 _allObsOffaxisOn を保持してトグル
+      //   ・現入室中の observer に即座に displayConfig を emit (即時適用)
+      //   ・後から入室する observer への自動適用はしない (必要ならもう一度押す)
+      let _allObsOffaxisOn = false;
+      function _syncAllObsOffaxisBtn() {
+        const b = _by('m-offaxis-all-toggle');
+        if (!b) return;
+        b.textContent = '全 observer: ' + (_allObsOffaxisOn ? 'ON' : 'OFF');
+        b.style.background = _allObsOffaxisOn ? '#06b6d4' : '#475569';
+        b.style.color      = _allObsOffaxisOn ? '#083344' : 'white';
+      }
+      _syncAllObsOffaxisBtn();
+      _bind('m-offaxis-all-toggle', 'click', () => {
+        _allObsOffaxisOn = !_allObsOffaxisOn;
+        _syncAllObsOffaxisBtn();
+        if (!socket || !socket.connected) return;
+        let cnt = 0;
+        avatars.forEach((a, aid) => {
+          if (!a || a.role !== 'observer') return;   // master / camera は除外
+          socket.emit('displayConfig', { targetId: aid, offaxis: _allObsOffaxisOn });
+          cnt++;
+        });
+        log('master offaxis ALL observers (' + cnt + ') → ' + (_allObsOffaxisOn ? 'ON' : 'OFF'), 'ok');
+      });
+
       // viewerEye
       function applyViewerEye() {
         const x = parseFloat((_by('ve-x') || {}).value) || 0;
-        const y = parseFloat((_by('ve-y') || {}).value) || 2;
+        const y = parseFloat((_by('ve-y') || {}).value) || 1.3;
         const z = parseFloat((_by('ve-z') || {}).value) || 0;
         if (socket && socket.connected) socket.emit('viewerEye', { x, y, z });
         _mClearDirty('ve-x','ve-y','ve-z');
@@ -3997,6 +4004,19 @@
         if (selfAv) {
           selfAv.grp.position.copy(camera.position);
           selfAv.grp.quaternion.copy(camera.quaternion);
+          // self の canvasBox: pinned 中は forward 方向にオフセットし、画面サイズに広がる距離に配置
+          //   画面を埋める距離 d = computeApexDepth(W, H) (FOV に基づき W×H がちょうど view に内接)
+          //   +Z 面 (テクスチャ面) が camera から d m 前方になるよう、中心 = -d - 0.01 にセット
+          //   detach 済み (grab 後) は world 固定なので位置を触らない。
+          if (selfAv.canvasBox && selfAv.canvasBox.userData.pinned && selfAv.canvasBox.parent === selfAv.grp) {
+            selfAv.canvasBox.visible = true;
+            const _bg = selfAv.canvasBox.geometry;
+            const _par = _bg && _bg.parameters ? _bg.parameters : null;
+            const _bw = _par ? _par.width : 0.3;
+            const _bh = _par ? _par.height : 0.2;
+            const _d  = computeApexDepth(_bw, _bh);
+            selfAv.canvasBox.position.set(0, 0, -_d - 0.01);
+          }
         }
       }
       // ステータス表示
