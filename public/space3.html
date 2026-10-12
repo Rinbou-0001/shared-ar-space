@@ -306,6 +306,7 @@
   &nbsp;|&nbsp;
   <span id="count">0</span>人 |
   自分: (<span id="my-pos">--</span>)
+  <span id="my-entry-tag" style="margin-left:8px; color:#fbbf24; font-weight:bold;"></span>
 </div>
 
 <!-- Master 制御パネル (master のみ、observer-panel と並置) -->
@@ -324,11 +325,11 @@
         </div>
         <div class="row">
           <label>X</label><input type="number" id="m-x" value="0" step="0.1">
-          <label>Y</label><input type="number" id="m-y" value="1.7" step="0.1">
+          <label>Y</label><input type="number" id="m-y" value="1.3" step="0.1">
           <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
         </div>
         <div class="row">
-          <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
+          <label>Yaw</label><input type="number" id="m-yaw" value="-90" step="5">
           <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
           <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
         </div>
@@ -391,11 +392,11 @@
         <div class="hint" style="color:#67e8f9;">px / 1m — 小=敏感、大=鈍感</div>
         <div class="row">
           <label>S</label>
-          <input type="number" id="m-move-sens" value="60" step="5" min="5" max="500" style="width:80px;">
+          <input type="number" id="m-move-sens" value="10" step="5" min="1" max="500" style="width:80px;">
           <button id="m-move-sens-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
         </div>
         <div class="hint" style="font-size:10px; opacity:0.7;">
-          現在: <span id="m-move-sens-current">60</span> px/m — 全クライアントに配信
+          現在: <span id="m-move-sens-current">10</span> px/m — 全クライアントに配信
         </div>
       </div>
     </details>
@@ -475,6 +476,24 @@
         </div>
         <div class="hint" style="font-size:10px; opacity:0.7;">
           全クライアントに配信 (light タグ PointLight とは別系統)
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- materialBox 液体演出パラメータ -->
+  <div class="m-section">
+    <details>
+      <summary>マテリアルBox 液体パラメータ</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">歪みノイズの周波数 (スケール) を調整</div>
+        <div class="row">
+          <label style="width:auto; font-size:10px; opacity:0.8;">周波数</label>
+          <input type="range" id="m-matbox-freq" min="0" max="2.0" step="0.01" value="0.25">
+          <span class="m-slider-val" id="m-matbox-freq-val">0.25</span>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          低値 = 大きなうねり、高値 = 細かい模様。ローカル表示のみ (サーバー非同期)。
         </div>
       </div>
     </details>

@@ -93,7 +93,7 @@ let fogConfig = { density: 0.1 };
 
 // オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
 //   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
-let moveConfig = { sensitivity: 60 };
+let moveConfig = { sensitivity: 10 };
 
 // space3 検証用トグル (master → 全クライアント配信)
 //   effect1: スマホ空間表示モード — false=VR 空間 (既定), true=AR passthrough
@@ -374,6 +374,16 @@ io.on('connection', (socket) => {
     if (owner && owner !== socket.id) return;   // 他人のアカウントで宣言は拒否
     cubeOwners.set(data.name, owner);
     io.emit('cubeOwnership', { name: data.name, owner });
+  });
+
+  // cubeHold: 掴み状態 (held) の全視点同期 — rope ビジュアライザー用
+  //   data = { name, heldBy } : heldBy は自分の socket.id または null (release)
+  //   自分の id 以外からの heldBy=非 null は拒否 (なりすまし防止)
+  socket.on('cubeHold', (data) => {
+    if (!data || typeof data.name !== 'string') return;
+    const heldBy = (typeof data.heldBy === 'string') ? data.heldBy : null;
+    if (heldBy && heldBy !== socket.id) return;
+    io.emit('cubeHold', { name: data.name, heldBy });
   });
 
   // Master からのオブジェクト移動感度設定 (space2 で使用)

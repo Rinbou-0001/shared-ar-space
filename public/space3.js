@@ -169,6 +169,10 @@
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(window.innerWidth, window.innerHeight);
+    // 環境光が強い時でも影 (effect4) の濃淡が残るよう HDR → LDR 圧縮 (ACES filmic tone mapping)
+    //   これなしだと ambient=1 で全てが 1.0 に飽和して影が完全に消える
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1;
     document.getElementById('stage').appendChild(renderer.domElement);
 
     // canvas レイアウト: canvas は常に window 全体を占有 (letterbox しない)。
@@ -194,6 +198,16 @@
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(10, 20, 10);
+    // シャドウカメラ設定 (castShadow は effect4 トグル時に ON にする)
+    //   FIELD_HALF (= 30) をリテラルで記述 (この行は FIELD_HALF 宣言より前にある)
+    dirLight.shadow.mapSize.set(2048, 2048);
+    dirLight.shadow.camera.left   = -30;
+    dirLight.shadow.camera.right  =  30;
+    dirLight.shadow.camera.top    =  30;
+    dirLight.shadow.camera.bottom = -30;
+    dirLight.shadow.camera.near   = 0.5;
+    dirLight.shadow.camera.far    = 120;
+    dirLight.shadow.bias = -0.0005;
     scene.add(dirLight);
 
     // ========== 床: 60m × 60m at origin (白) ==========
@@ -213,6 +227,7 @@
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(0, 0, 0);
     floor.name = 'floor';
+    floor.receiveShadow = true;   // effect4 shadow 対応
     scene.add(floor);
 
     // ===== モノクロ格子表示 (恒常) =====
@@ -257,6 +272,8 @@
       );
       c.position.set(x, y, z);
       c.name = name;
+      c.castShadow = true;   // effect4 shadow 対応
+      c.receiveShadow = true;
       scene.add(c);
       // 選択ハイライト (黄色 edges)
       const edges = new THREE.LineSegments(
@@ -290,10 +307,11 @@
       c.userData.initialPos = new THREE.Vector3(x, y, z);
       return c;
     }
-    const cube1 = makeMovableCube('cube1',  1.5, 0.5, -0.5, 0x6b7280); // 灰
-    const cube2 = makeMovableCube('cube2', -1.5, 0.5, -0.5, 0xef4444); // 赤
-    const cube3 = makeMovableCube('cube3',  1.5, 0.5,  1.5, 0x22c55e); // 緑
-    const cube4 = makeMovableCube('cube4', -1.5, 0.5,  1.5, 0x3b82f6); // 青
+    // materialBox (X=3, Z=0) と干渉しないよう cube1..4 の基準位置を -X 方向へシフト
+    const cube1 = makeMovableCube('cube1', -1.5, 0.5, -0.5, 0x6b7280); // 灰
+    const cube2 = makeMovableCube('cube2', -4.5, 0.5, -0.5, 0xef4444); // 赤
+    const cube3 = makeMovableCube('cube3', -1.5, 0.5,  1.5, 0x22c55e); // 緑
+    const cube4 = makeMovableCube('cube4', -4.5, 0.5,  1.5, 0x3b82f6); // 青
     // 追加 7 個 (原点中心 20m × 20m エリア内に散開配置、Y=0.5 = 床置き)
     const cube5  = makeMovableCube('cube5',   6.5, 0.5, -6.5, 0xf59e0b); // 橙
     const cube6  = makeMovableCube('cube6',  -6.5, 0.5, -6.5, 0xa855f7); // 紫
@@ -302,7 +320,362 @@
     const cube9  = makeMovableCube('cube9',   0.5, 0.5, -9.5, 0xeab308); // 黄
     const cube10 = makeMovableCube('cube10', -9.5, 0.5,  0.5, 0x06b6d4); // シアン
     const cube11 = makeMovableCube('cube11',  9.5, 0.5,  0.5, 0x84cc16); // ライム
-    const movableCubes = [cube1, cube2, cube3, cube4, cube5, cube6, cube7, cube8, cube9, cube10, cube11];
+
+    // ===== 移動 Sphere オブジェクト (1m 直径、cube と同じ物理挙動) =====
+    //   ・SphereGeometry(0.5) で半径 0.5m
+    //   ・halfExt は bounding box (0.5,0.5,0.5) として扱い既存の床/壁物理に乗せる
+    //   ・選択ハイライトは Wireframe 球 (黄)
+    function makeMovableSphere(name, x, y, z, colorHex) {
+      const s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.5, 32, 24),
+        new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.75, metalness: 0.0 })
+      );
+      s.position.set(x, y, z);
+      s.name = name;
+      s.castShadow = true;
+      s.receiveShadow = true;
+      scene.add(s);
+      const edges = new THREE.LineSegments(
+        new THREE.WireframeGeometry(new THREE.SphereGeometry(0.52, 16, 12)),
+        new THREE.LineBasicMaterial({
+          color: 0xfbbf24, transparent: true, opacity: 1.0,
+          depthTest: false, fog: false,
+        })
+      );
+      edges.renderOrder = 999;
+      edges.visible = false;
+      s.add(edges);
+      s.userData.__movable = true;
+      s.userData.vel      = new THREE.Vector3();
+      s.userData.angVel   = new THREE.Vector3();
+      s.userData.held     = false;
+      s.userData.mass     = 10.0;
+      s.userData.sleeping   = false;
+      s.userData.restFrames = 0;
+      s.userData.targetPos  = null;
+      s.userData.ownerId    = null;
+      s.userData.halfExt    = new THREE.Vector3(0.5, 0.5, 0.5);
+      s.userData.inertiaFactor = (2/5);   // 球の慣性: (2/5)·m·r² — scalar factor
+      s.userData.initialPos = new THREE.Vector3(x, y, z);
+      return s;
+    }
+    const sphere1 = makeMovableSphere('sphere1',  0, 0.5, -4, 0xf87171); // サンゴ
+    const sphere2 = makeMovableSphere('sphere2', -7, 0.5,  2, 0x60a5fa); // 水色
+    const sphere3 = makeMovableSphere('sphere3',  6, 0.5,  3, 0x34d399); // ミント
+    const sphere4 = makeMovableSphere('sphere4',  2, 0.5, -5, 0xfbbf24); // 山吹
+    const sphere5 = makeMovableSphere('sphere5', -3, 0.5, -5, 0xc084fc); // 藤
+
+    // ===== materialBox (液体マテリアル、X=3, Z=0) =====
+    //   案 B: ノイズテクスチャ 2 枚を異なる速度でスクロールして screen-space UV を distort、
+    //   背景 RenderTarget をオフセットサンプリングして "後ろが揺らぐ" 流体表現
+    //   ・物理挙動は他 movable cube と同じ (grab/release/床反発/壁反発)
+    //   ・6 面すべて同じ ShaderMaterial
+    //   ・レンダリングは tick 内で 2 パス: 1) materialBox 非表示で bgRT に render → 2) materialBox 表示で本番 render
+    const _matBgRT = new THREE.WebGLRenderTarget(
+      Math.max(256, Math.floor(window.innerWidth * 0.5)),
+      Math.max(256, Math.floor(window.innerHeight * 0.5)),
+      { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+    );
+    // ノイズテクスチャ: 低解像度 (32×32) で生成し Linear filter で upscale → 大きな滑らかなブロブ
+    //   高解像度の pure random だと見た目が高周波で "鏡の歪み" に見えるため、低周波化で液体感を出す
+    const _noiseSize = 32;
+    const _noiseCanvas = document.createElement('canvas');
+    _noiseCanvas.width = _noiseSize; _noiseCanvas.height = _noiseSize;
+    const _nctx = _noiseCanvas.getContext('2d');
+    const _imgData = _nctx.createImageData(_noiseSize, _noiseSize);
+    for (let i = 0; i < _imgData.data.length; i += 4) {
+      _imgData.data[i    ] = (Math.random() * 255) | 0;
+      _imgData.data[i + 1] = (Math.random() * 255) | 0;
+      _imgData.data[i + 2] = (Math.random() * 255) | 0;
+      _imgData.data[i + 3] = 255;
+    }
+    _nctx.putImageData(_imgData, 0, 0);
+    const _noiseTex = new THREE.CanvasTexture(_noiseCanvas);
+    _noiseTex.wrapS = THREE.RepeatWrapping;
+    _noiseTex.wrapT = THREE.RepeatWrapping;
+    _noiseTex.magFilter = THREE.LinearFilter;
+    _noiseTex.minFilter = THREE.LinearFilter;   // mipmap 無し、大きな blob のまま使う
+    const _matShader = new THREE.ShaderMaterial({
+      uniforms: {
+        uBackground: { value: _matBgRT.texture },
+        uNoise:      { value: _noiseTex },
+        uTime:       { value: 0 },
+        uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uFreq:       { value: 0.25 },  // 周波数倍率 (master slider で動的制御、既定 0.25)
+        uAmp:        { value: 0.03 },  // 歪み振幅 (UV オフセット、既定 ±3%)
+        uDispAmp:    { value: 0.03 },  // 頂点変位振幅 (m)、uFreq に連動 → 外周シルエット揺らぎ
+      },
+      vertexShader: `
+        uniform float uTime;
+        uniform float uFreq;
+        uniform float uDispAmp;
+        varying vec3 vNormalView;
+        varying vec3 vViewDir;
+        void main() {
+          // 頂点変位: procedural sin ノイズを法線方向にかけてシルエットを揺らす
+          //   ・uFreq に連動 (uFreq=0 で変位ゼロ、剛体に戻る)
+          //   ・3 軸の sin を平均 → 単調にならない有機的な揺れ
+          //   ・テクスチャフェッチなしで GPU 負荷軽減 (vertex shader 専用)
+          vec3 pos = position;
+          float wv = (
+            sin(pos.x * 8.0 * uFreq + uTime * 1.5) +
+            sin(pos.y * 7.0 * uFreq + uTime * 1.2) +
+            sin(pos.z * 9.0 * uFreq + uTime * 1.8)
+          ) / 3.0;
+          pos += normal * wv * uDispAmp * uFreq;
+          vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+          vNormalView = normalize(normalMatrix * normal);
+          vViewDir = normalize(-mvPos.xyz);
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uBackground;
+        uniform sampler2D uNoise;
+        uniform float uTime;
+        uniform float uFreq;
+        uniform float uAmp;
+        uniform vec2  uResolution;
+        varying vec3 vNormalView;
+        varying vec3 vViewDir;
+        void main() {
+          vec2 screenUv = gl_FragCoord.xy / uResolution;
+          vec2 n1 = texture2D(uNoise, screenUv * (1.2 * uFreq) + vec2(uTime * 0.07,  uTime * 0.04)).rg;
+          vec2 n2 = texture2D(uNoise, screenUv * (0.8 * uFreq) - vec2(uTime * 0.05, -uTime * 0.06)).rg;
+          // wave 振幅を uFreq に連動 → uFreq=0 で歪みゼロ (bgRT そのまま)
+          vec2 wave = (n1 + n2 - 1.0) * uAmp * uFreq;
+          vec4 bg = texture2D(uBackground, clamp(screenUv + wave, 0.0, 1.0));
+          // 法線を wave で摂動 → fragment-only の軽量ハイライト揺らぎ (追加テクスチャフェッチ無し)
+          vec3 N = normalize(vNormalView + vec3(wave.x, wave.y, 0.0) * 12.0);
+          vec3 V = normalize(vViewDir);
+          vec3 L = normalize(vec3(0.3, 0.8, 0.5));   // view 空間固定ライト
+          vec3 R = reflect(-L, N);
+          float spec = pow(max(dot(R, V), 0.0), 24.0);
+          // tint を無効化: 背景色をそのまま採用 (無色透明の液体)
+          vec3 base = bg.rgb;
+          gl_FragColor = vec4(base + vec3(spec) * 0.35, 1.0);
+        }
+      `,
+      side: THREE.DoubleSide,
+    });
+    // BoxGeometry を 16 分割 → 各面 17×17 頂点 = 計 ~1700 頂点 (vertex displacement 用)
+    const materialBox = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1, 16, 16, 16), _matShader);
+    materialBox.position.set(3, 0.5, 0);
+    materialBox.name = 'materialBox';
+    materialBox.castShadow = true;   // effect4 shadow 対応 (shader 側は影を受けないが落とすのは可)
+    scene.add(materialBox);
+
+    // ===== 内部オブジェクト: 一回り小さい黒立方体 (面毎に 3×3 白線格子) =====
+    //   ・materialBox と同じ位置 (兄弟配置) に 0.8m の BoxGeometry を置き、tick で transform を追従
+    //   ・pre-pass (bgRT) 時に materialBox だけを一時非表示 → innerCube は RT に残る
+    //     → materialBox shader が bgRT を distortion サンプリングして "液体越しに内部が揺れる" 絵を得る
+    //   ・テクスチャは canvas 256×256 に black fill + 2 本×2 本の白線 + border を描いて 3×3 格子に
+    const _gridC = document.createElement('canvas');
+    _gridC.width = 256; _gridC.height = 256;
+    const _gctx = _gridC.getContext('2d');
+    _gctx.fillStyle = '#9ca3af'; _gctx.fillRect(0, 0, 256, 256);   // ベース = グレー
+    _gctx.strokeStyle = '#ffffff'; _gctx.lineWidth = 4; _gctx.lineCap = 'square';
+    for (let _i = 1; _i < 3; _i++) {
+      const _p = (_i / 3) * 256;
+      _gctx.beginPath(); _gctx.moveTo(_p, 0); _gctx.lineTo(_p, 256); _gctx.stroke();
+      _gctx.beginPath(); _gctx.moveTo(0, _p); _gctx.lineTo(256, _p); _gctx.stroke();
+    }
+    _gctx.lineWidth = 6;
+    _gctx.strokeRect(3, 3, 250, 250);   // 外枠 (稜線を強調)
+    const _innerTex = new THREE.CanvasTexture(_gridC);
+    _innerTex.magFilter = THREE.LinearFilter;
+    _innerTex.minFilter = THREE.LinearMipmapLinearFilter;
+    // Lambert マテリアル: ambient + directional light に反応して面ごとに陰影が出る
+    const _innerMat = new THREE.MeshLambertMaterial({ map: _innerTex, fog: true });
+    // 0.95m 立方体: 外側 1m の中心に配置 (各面 2.5cm マージン)
+    const _innerCube = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.95, 0.95), _innerMat);
+    _innerCube.name = 'materialBox-inner';
+    _innerCube.renderOrder = 1;
+    _innerCube.castShadow = true;   // effect4 shadow 対応
+    _innerCube.receiveShadow = true;
+    scene.add(_innerCube);
+    // materialBox の transform 追従は tick 内の materialBox pre-pass 直前で実施 (window.__innerCubeFollow)
+    window.__innerCube = _innerCube;
+    // 選択ハイライト (他 cube と同じ黄 edges)
+    const _matEdges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(materialBox.geometry),
+      new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 1.0, depthTest: false, fog: false })
+    );
+    _matEdges.renderOrder = 999;
+    _matEdges.visible = false;
+    materialBox.add(_matEdges);
+    // 物理 userData (他 cube と同じ構造)
+    materialBox.userData.__movable = true;
+    materialBox.userData.vel     = new THREE.Vector3();
+    materialBox.userData.angVel  = new THREE.Vector3();
+    materialBox.userData.held    = false;
+    materialBox.userData.mass    = 10.0;
+    materialBox.userData.sleeping   = false;
+    materialBox.userData.restFrames = 0;
+    materialBox.userData.targetPos  = null;
+    materialBox.userData.ownerId    = null;
+    materialBox.userData.initialPos = new THREE.Vector3(3, 0.5, 0);
+    // uResolution と bgRT サイズを drawing buffer (renderer.getDrawingBufferSize) に合わせる
+    //   ・gl_FragCoord は drawing buffer ピクセル (DPR 倍された値)
+    //   ・以前の window.innerWidth/Height ベースだと DPR=2 で UV が 0〜2 に膨らみ、
+    //     materialBox の片側しか正しく bgRT をサンプリングできなかった
+    const _matDbSize = new THREE.Vector2();
+    function _syncMatBoxResolution() {
+      renderer.getDrawingBufferSize(_matDbSize);
+      _matShader.uniforms.uResolution.value.set(_matDbSize.x, _matDbSize.y);
+      // bgRT は half-res (負荷軽減) だが aspect は drawing buffer と一致
+      const w = Math.max(256, Math.floor(_matDbSize.x * 0.5));
+      const h = Math.max(256, Math.floor(_matDbSize.y * 0.5));
+      _matBgRT.setSize(w, h);
+    }
+    _syncMatBoxResolution();   // 初回同期
+    window.addEventListener('resize', _syncMatBoxResolution);
+    // 公開 (tick から参照する)
+    window.__materialBox   = materialBox;
+    window.__matShader     = _matShader;
+    window.__matBgRT       = _matBgRT;
+
+    const movableCubes = [
+      cube1, cube2, cube3, cube4, cube5, cube6, cube7, cube8, cube9, cube10, cube11,
+      sphere1, sphere2, sphere3, sphere4, sphere5,
+      materialBox,
+    ];
+
+    // ===== Rope ビジュアライザー (grab 中の cube とグラバーを繋ぐ "ゴムひも") =====
+    //   ・案 C: sag (重力垂れ) + bend (加速度直交方向のしなり) を合成
+    //   ・6cm 直径 (半径 3cm) の TubeGeometry、20 セグメント
+    //   ・色: グラバーのアバター色
+    //   ・フェード: 両端薄・中央濃 (sin エンベロープ)
+    //   ・全視点同期: cube.userData.ownerId を見てローカルで描画 (ownerId は cubeOwnership で既に全員同期)
+    //   ・毎フレーム TubeGeometry を再生成 (grabber ごと 1 本、十数本までは余裕)
+    const _ROPE_SEG = 20;
+    const _ROPE_RADIUS = 0.03;   // 直径 6cm
+    const _ropes = new Map();    // cube.name → { mesh, geometry, material }
+
+    const _ropeShader = {
+      vertexShader: `
+        varying vec2 vUv2;
+        void main() {
+          vUv2 = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uIsSelf;   // 1.0 = グラバー自身の視点、0.0 = 他視点
+        varying vec2 vUv2;
+        void main() {
+          float alpha;
+          if (uIsSelf > 0.5) {
+            // グラバー自身: 手前 (= vUv2.x=0) 側を完全透明へ、cube 側 (x=1) 付近のみ可視
+            //   smoothstep で ~x=0.0 から 0.7 までフェードイン、cube 端で opacity 0.7
+            alpha = smoothstep(0.0, 0.7, vUv2.x) * 0.7;
+          } else {
+            // 他視点: 両端薄・中央濃のフェード
+            float env = sin(vUv2.x * 3.14159);
+            alpha = mix(0.15, 0.85, env);
+          }
+          if (alpha < 0.01) discard;   // 完全透明領域は描画しない
+          gl_FragColor = vec4(uColor, alpha);
+        }
+      `,
+    };
+
+    function _disposeRope(name) {
+      const r = _ropes.get(name);
+      if (!r) return;
+      if (r.mesh && r.mesh.parent) r.mesh.parent.remove(r.mesh);
+      if (r.geometry) r.geometry.dispose();
+      if (r.material) r.material.dispose();
+      _ropes.delete(name);
+    }
+
+    function _updateRopes() {
+      for (const c of movableCubes) {
+        // rope は "誰かが現在掴んでいる" cube にのみ表示 (= heldBy が非 null の間だけ)
+        //   ・自分が掴んでいる: 自分の held=true、heldBy=myId (cubeHold emit 済み)
+        //   ・他クライアントが掴んでいる: 自分の held=false、heldBy=他クライアント id (cubeHold 受信)
+        //   release で heldBy=null になり、次フレームで全視点から消去
+        const heldBy = c.userData && c.userData.heldBy;
+        if (!heldBy) {
+          _disposeRope(c.name);
+          continue;
+        }
+        let gpos, gcolor;
+        if (heldBy === myId) {
+          gpos = camera.position;
+          gcolor = state.myColor || '#ffffff';
+        } else {
+          const av = avatars.get(heldBy);
+          if (!av) { _disposeRope(c.name); continue; }
+          gpos = av.grp.position;
+          gcolor = av.color || '#ffffff';
+        }
+        const cpos = c.position;
+        const dx = cpos.x - gpos.x, dy = cpos.y - gpos.y, dz = cpos.z - gpos.z;
+        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist < 0.05) { _disposeRope(c.name); continue; }
+        const dirx = dx / dist, diry = dy / dist, dirz = dz / dist;
+        // 速度の進行方向直交成分 (しなり方向)
+        const v = c.userData.vel;
+        const vDot = v.x * dirx + v.y * diry + v.z * dirz;
+        const vpx = v.x - dirx * vDot;
+        const vpy = v.y - diry * vDot;
+        const vpz = v.z - dirz * vDot;
+        const vpLen = Math.sqrt(vpx*vpx + vpy*vpy + vpz*vpz);
+        const bendAmp = Math.min(0.4, vpLen * 0.04);
+        const bNx = vpLen > 1e-4 ? vpx / vpLen : 0;
+        const bNy = vpLen > 1e-4 ? vpy / vpLen : 0;
+        const bNz = vpLen > 1e-4 ? vpz / vpLen : 0;
+        // 垂れ (重力方向、距離に比例)
+        const sagAmp = Math.min(0.3, dist * 0.035);
+        // 21 点を生成
+        const pts = [];
+        for (let i = 0; i <= _ROPE_SEG; i++) {
+          const t = i / _ROPE_SEG;
+          const px = gpos.x + dx * t;
+          const py = gpos.y + dy * t;
+          const pz = gpos.z + dz * t;
+          const env = Math.sin(t * Math.PI);
+          pts.push(new THREE.Vector3(
+            px - bNx * env * bendAmp,
+            py - env * sagAmp - bNy * env * bendAmp,
+            pz - bNz * env * bendAmp
+          ));
+        }
+        const curve = new THREE.CatmullRomCurve3(pts);
+        const newGeom = new THREE.TubeGeometry(curve, _ROPE_SEG * 2, _ROPE_RADIUS, 8, false);
+        const _isSelf = (heldBy === myId) ? 1.0 : 0.0;
+        let r = _ropes.get(c.name);
+        if (!r) {
+          const mat = new THREE.ShaderMaterial({
+            uniforms: {
+              uColor:  { value: new THREE.Color(gcolor) },
+              uIsSelf: { value: _isSelf },
+            },
+            vertexShader: _ropeShader.vertexShader,
+            fragmentShader: _ropeShader.fragmentShader,
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          const mesh = new THREE.Mesh(newGeom, mat);
+          mesh.renderOrder = 998;
+          // raycast 対象外に明示 (selectables には入れていないが、二重の安全策)
+          mesh.raycast = function () {};
+          scene.add(mesh);
+          r = { mesh, geometry: newGeom, material: mat };
+          _ropes.set(c.name, r);
+        } else {
+          if (r.geometry) r.geometry.dispose();
+          r.geometry = newGeom;
+          r.mesh.geometry = newGeom;
+          r.material.uniforms.uColor.value.set(gcolor);
+          r.material.uniforms.uIsSelf.value = _isSelf;
+        }
+      }
+    }
+    window.__updateRopes = _updateRopes;
 
     // ===== スプレー描画: 原点中心 直径 20m (半径 10m) 半球 =====
     //   ・半球は透明基材 + CanvasTexture で、塗った部分だけ色が付く
@@ -550,7 +923,7 @@
     const CUBE_STEP = 1.0;
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
     // ドラッグ移動感度 (px / 1m)。master が変更 → server 経由で全クライアントへ配信される
-    let moveSensitivity = 60;
+    let moveSensitivity = 10;
     function selectObject(obj) {
       if (selectedObject === obj) return;
       // 選択枠は子孫の LineSegments (isLineSegments===true) 全てを対象。
@@ -607,7 +980,7 @@
     //     ・前回の velocity 減衰 0.90 → 実効 μ ~0.3 相当 → 倍増して μ = 0.6
     //   ・ANGULAR_DAMP = 空気抵抗 (回転)、1 frame 毎
     const CUBE_INERTIA_FACTOR = 1 / 6;
-    const FRICTION_COEFF = 0.6;
+    const FRICTION_COEFF = 0.25;   // 球体や cube が自然に転がる/滑るよう弱めに (旧 0.6)
     const ANGULAR_DAMP = 0.995;
     // 掴み中 (held) の Spring-Damper 係数 (質量比例)
     //   ・k_eff = SPRING_K_PER_KG × mass, d_eff = SPRING_DAMPING_PER_KG × mass
@@ -1022,6 +1395,11 @@
       if (socket && socket.connected) {
         socket.emit('cubeOwnership', { name: cube.name, owner: myId });
       }
+      // rope 可視化用に "actively held by me" を全視点同期
+      cube.userData.heldBy = myId;
+      if (socket && socket.connected) {
+        socket.emit('cubeHold', { name: cube.name, heldBy: myId });
+      }
       // 掴み後の初回 pose を force emit (遅延なく位置同期)
       _emitCubePoseThrottled(cube, 0);
       log('grab: ' + cube.name + ' dist=' + cube.userData.grabDist.toFixed(2) + 'm', 'ok');
@@ -1055,6 +1433,11 @@
       cube.userData.targetPos = null;    // spring 目標解除
       _wakeCube(cube);
       _heldCube = null;
+      // rope の全視点同期: release を broadcast → 全員の heldBy をクリア → rope 消去
+      cube.userData.heldBy = null;
+      if (socket && socket.connected) {
+        socket.emit('cubeHold', { name: cube.name, heldBy: null });
+      }
       _emitCubePoseThrottled(cube, 0);
       log('release: ' + cube.name +
           ' vel=' + cube.userData.vel.length().toFixed(2) + 'm/s' +
@@ -1957,6 +2340,7 @@
         log('self preview avatar: ' + myId.substring(0,6) + ' (テスト: 自視点で自身表示)', 'ok');
 
         rebuildClientSelect();
+        if (typeof _syncMyEntryTagUI === 'function') _syncMyEntryTagUI();
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
@@ -1985,6 +2369,7 @@
         if (u.entryTag)   a.entryTag   = u.entryTag;
         if (u.customTags) a.customTags = u.customTags.slice();
         rebuildClientSelect();
+        if (u.id === myId && typeof _syncMyEntryTagUI === 'function') _syncMyEntryTagUI();
         log('join: ' + (u.entryTag ? u.entryTag + ' ' : '') + u.id.substring(0, 6) +
             (u.display ? ' display=' + u.display.width.toFixed(3) + '×' + u.display.height.toFixed(3) + 'm' : ''),
             'ok');
@@ -2001,8 +2386,17 @@
           a.entryTag = u.entryTag;
           rebuildClientSelect();
           log('entry tag: ' + a.entryTag + ' ← ' + u.id.substring(0,6), 'ok');
+          if (u.id === myId) _syncMyEntryTagUI();
         }
       });
+      // 自身の entryTag を #status の #my-entry-tag span に反映 (observer 用の "入室番号" 表示)
+      function _syncMyEntryTagUI() {
+        const el = document.getElementById('my-entry-tag');
+        if (!el) return;
+        const a = (myId && avatars.get(myId)) || null;
+        el.textContent = (a && a.entryTag) ? a.entryTag : '';
+      }
+      window.__syncMyEntryTagUI = _syncMyEntryTagUI;
 
       // カスタムタグ (hole_test 等) の付与/解除を全クライアントで反映
       socket.on('avatarTag', (data) => {
@@ -2063,6 +2457,10 @@
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(1, data.intensity));
         if (sceneAmbient) sceneAmbient.intensity = v;
+        // 背景色と fog 色を環境光輝度に連動: 強度 0 で黒、1 で白
+        //   フィールド外とフォグフェードの色が環境光と同じ暗さに揃う
+        if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
+        if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
       });
 
@@ -2112,6 +2510,15 @@
           c.userData.angVel.set(0, 0, 0);
           c.userData.sleeping = false;   // 以後 receive で描画
         }
+      });
+
+      // 掴み状態の全視点同期 (rope 可視化用) — ownership とは独立
+      //   data = { name, heldBy } : heldBy は socket id (null で release)
+      socket.on('cubeHold', (data) => {
+        if (!data || typeof data.name !== 'string') return;
+        const c = movableCubes.find((m) => m.name === data.name);
+        if (!c) return;
+        c.userData.heldBy = (typeof data.heldBy === 'string') ? data.heldBy : null;
       });
 
       // 移動 Box の質量更新 (master スライダー由来、全クライアントで共有)
@@ -2255,6 +2662,19 @@
         // 効果3: Fog 中心をフィールド原点に固定 ↔ カメラ (= アバター) に戻す
         if (n === 3 && typeof window.__applyFogOriginMode === 'function') {
           window.__applyFogOriginMode(on);
+        }
+        // 効果4: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
+        if (n === 4) {
+          renderer.shadowMap.enabled = on;
+          renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+          dirLight.castShadow = on;
+          // shadow の有効化/無効化はシェーダー path を変えるので全マテリアルを再コンパイル
+          scene.traverse((obj) => {
+            if (!obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            mats.forEach((m) => { if (m) m.needsUpdate = true; });
+          });
+          log('shadow ' + (on ? 'ON' : 'OFF') + ' (effect4)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
@@ -2474,7 +2894,7 @@
     function enterAsCamera() {
       state.entered = true;
       // camera (スマホ) 専用の spawn: 目線高さ 1.7m
-      const CAM_SPAWN = { x: 0, y: 2.0, z: 0 };
+      const CAM_SPAWN = { x: 0, y: 1.3, z: 0 };
       camera.position.set(CAM_SPAWN.x, CAM_SPAWN.y, CAM_SPAWN.z);
       // 初期方向: +X (Start 押下時のスマホ方位が +X 正方向にマップされる)
       camera.quaternion.setFromEuler(new THREE.Euler(INIT_PITCH, INIT_YAW, 0, 'YXZ'));
@@ -3808,6 +4228,25 @@
       });
 
       // ==================================================
+      // materialBox 液体パラメータ (ローカル表示のみ、サーバー同期なし)
+      // ==================================================
+      const _matFreqInput = _by('m-matbox-freq');
+      const _matFreqVal   = _by('m-matbox-freq-val');
+      function _applyMatFreq() {
+        if (!_matFreqInput) return;
+        const v = parseFloat(_matFreqInput.value);
+        if (!isFinite(v)) return;
+        if (window.__matShader && window.__matShader.uniforms && window.__matShader.uniforms.uFreq) {
+          window.__matShader.uniforms.uFreq.value = v;
+        }
+        if (_matFreqVal) _matFreqVal.textContent = v.toFixed(2);
+      }
+      if (_matFreqInput) {
+        _matFreqInput.addEventListener('input', _applyMatFreq);
+        _applyMatFreq();
+      }
+
+      // ==================================================
       // 検証用トグル (効果1〜3): 実装内容の効果 ON/OFF 確認
       //   ・master 側ボタンクリック → socket.emit('effectState') → サーバーが全体に broadcast
       //   ・受信側 (全ロール) で window.__effect[n] を更新 + 必要なら効果を適用
@@ -4027,6 +4466,29 @@
         camera.position.x.toFixed(1) + ',' +
         camera.position.y.toFixed(1) + ',' +
         camera.position.z.toFixed(1);
+
+      // ========== rope 更新 (grab 中の cube ↔ グラバーを繋ぐゴムひも) ==========
+      if (typeof window.__updateRopes === 'function') window.__updateRopes();
+
+      // ========== materialBox pre-pass: 背景を bgRT に描画 (液体 distortion 用) ==========
+      //   自身を非表示にして scene を RT へ描画 → materialBox fragment で UV distortion サンプリング
+      //   innerCube は materialBox の兄弟として scene に居るので、位置を追従させてから bgRT に残す
+      if (window.__materialBox && window.__matBgRT && window.__matShader) {
+        const _mb = window.__materialBox;
+        const _ic = window.__innerCube;
+        if (_ic) {
+          _ic.position.copy(_mb.position);
+          _ic.quaternion.copy(_mb.quaternion);
+        }
+        const _mbWasVisible = _mb.visible;
+        _mb.visible = false;
+        renderer.setRenderTarget(window.__matBgRT);
+        renderer.clear();
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(null);
+        _mb.visible = _mbWasVisible;
+        window.__matShader.uniforms.uTime.value = clock.getElapsedTime();
+      }
 
       // ========== render: myDisplay.offaxis で分岐 ==========
       if (myDisplay.offaxis) {
