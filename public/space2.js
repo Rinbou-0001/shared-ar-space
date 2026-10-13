@@ -1109,12 +1109,21 @@
       const pxR = Math.max(SPRAY_MIN_PX_R, worldR * density);
       _drawAtlasDot(uv.x, uv.y, '#' + colorHex, pxR);
       if (socket && socket.connected) {
-        socket.emit('spray2', {
+        const payload = {
           u: +uv.x.toFixed(4),
           v: +uv.y.toFixed(4),
           c: colorHex,
           r: +pxR.toFixed(1),
-        });
+        };
+        socket.emit('spray2', payload);
+        // probe で未対応と判明していたら旧 'spray' にもフォールバック emit
+        //   (space3 と履歴が混じる副作用はあるが、同期停止よりマシ。server 再起動後は probe が成功して自然に止まる)
+        if (window._space2Fallback) socket.emit('spray', payload);
+        // 初回 emit 診断ログ
+        if (!window._sprayEmitLogged) {
+          window._sprayEmitLogged = true;
+          log('spray2 emit (初回): u=' + payload.u + ' v=' + payload.v + ' r=' + payload.r, 'ok');
+        }
       }
     }
 
@@ -2655,6 +2664,26 @@
         document.getElementById('conn-pill').classList.add('ok');
         document.getElementById('conn-text').textContent = '接続 OK';
         log('socket connected: ' + socket.id, 'ok');
+        // 接続直後に probe を飛ばして server.js が spray2 対応版か確認
+        //   対応版: ACK が返る → _space2ServerOk = true (そのまま 'spray2' を使う)
+        //   未対応: タイムアウト → フォールバックとして 'spray' も emit するよう切替
+        //           (space3 と履歴が混ざるが、同期が止まるよりはマシ)
+        try {
+          socket.timeout(2500).emit('space2:probe', (err, resp) => {
+            if (err || !resp || !resp.ok) {
+              window._space2ServerOk = false;
+              window._space2Fallback = true;
+              log('⚠ サーバー spray2 未対応 (probe タイムアウト) — 旧 "spray" にフォールバックします。server.js を再起動してください。', 'err');
+            } else {
+              window._space2ServerOk = true;
+              window._space2Fallback = false;
+              log('✓ サーバー spray2 対応版: ' + (resp.version || '') + ' (ts=' + (resp.ts || 0) + ')', 'ok');
+            }
+          });
+        } catch (e) {
+          window._space2Fallback = true;
+          log('probe 送信例外: ' + e.message + ' → fallback 有効', 'err');
+        }
       });
       socket.on('disconnect', () => {
         document.getElementById('conn-pill').classList.remove('ok');
@@ -2947,6 +2976,18 @@
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
         const pxR = (typeof data.r === 'number') ? data.r : undefined;
         _drawAtlasDot(data.u, data.v, color, pxR);
+        if (!window._sprayRecvLogged) {
+          window._sprayRecvLogged = true;
+          log('spray2 受信 (初回): サーバー経由同期 OK', 'ok');
+        }
+      });
+      // フォールバック受信: サーバーが spray2 未対応時、他 space2 クライアントは 'spray' も emit する。
+      //   r フィールドが入っているものだけアトラス UV として受け取る (無印 spray は space3 発信なので無視)
+      socket.on('spray', (data) => {
+        if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+        if (typeof data.r !== 'number') return;   // space3 由来の sphere UV は無視
+        const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
+        _drawAtlasDot(data.u, data.v, color, data.r);
       });
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
