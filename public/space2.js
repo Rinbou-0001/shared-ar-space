@@ -4799,14 +4799,24 @@
         const name = _cubeSel.value;
         if (name === '__all') {
           // 全ての cube の質量が同一ならそれを、異なれば "混在" 表示
-          const masses = movableCubes.map((m) => m.userData.mass);
+          //   movableCubes が空 (移動オブジェクト削除中) の場合は '--' 表示にして toFixed を回避
+          if (movableCubes.length === 0) {
+            _cubeMass.value = '';
+            if (_cubeMassCur) _cubeMassCur.textContent = '--';
+            return;
+          }
+          const masses = movableCubes.map((m) => (m.userData && typeof m.userData.mass === 'number') ? m.userData.mass : NaN);
           const same = masses.every((v) => v === masses[0]);
-          _cubeMass.value = same ? String(masses[0]) : '';
-          if (_cubeMassCur) _cubeMassCur.textContent = same ? masses[0].toFixed(2) : '混在';
+          _cubeMass.value = (same && isFinite(masses[0])) ? String(masses[0]) : '';
+          if (_cubeMassCur) _cubeMassCur.textContent = (same && isFinite(masses[0])) ? masses[0].toFixed(2) : '混在';
           return;
         }
         const c = movableCubes.find((m) => m.name === name);
-        if (!c) return;
+        if (!c || !c.userData || typeof c.userData.mass !== 'number') {
+          _cubeMass.value = '';
+          if (_cubeMassCur) _cubeMassCur.textContent = '--';
+          return;
+        }
         _cubeMass.value = String(c.userData.mass);
         if (_cubeMassCur) _cubeMassCur.textContent = c.userData.mass.toFixed(2);
       };
