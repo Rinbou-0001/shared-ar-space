@@ -169,10 +169,11 @@
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setSize(window.innerWidth, window.innerHeight);
-    // 環境光が強い時でも影 (effect4) の濃淡が残るよう HDR → LDR 圧縮 (ACES filmic tone mapping)
-    //   これなしだと ambient=1 で全てが 1.0 に飽和して影が完全に消える
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
+    // Tone mapping は無効化 (ACES では背景色/フォグ色が灰色寄りに圧縮され、
+    //   オブジェクトは白みがかる視覚不一致が出るため)。
+    //   トレードオフ: ambient=1 では影がほぼ見えなくなる → shadow を見たい時は ambient < 0.7 を推奨
+    renderer.toneMapping = THREE.NoToneMapping;
+    renderer.toneMappingExposure = 1.0;
     document.getElementById('stage').appendChild(renderer.domElement);
 
     // canvas レイアウト: canvas は常に window 全体を占有 (letterbox しない)。
@@ -320,6 +321,57 @@
     const cube9  = makeMovableCube('cube9',   0.5, 0.5, -9.5, 0xeab308); // 黄
     const cube10 = makeMovableCube('cube10', -9.5, 0.5,  0.5, 0x06b6d4); // シアン
     const cube11 = makeMovableCube('cube11',  9.5, 0.5,  0.5, 0x84cc16); // ライム
+    // 追加 3 個 (ダークグレー #535353 + 各面にアセット画像をマッピング)
+    //   ・makeMovableCube で基本 cube を作成し、全 6 面を map 付き MeshStandardMaterial 配列で差し替え
+    //   ・テクスチャは BoxGeometry の UV に合わせてストレッチ表示 (1m 立方体なので画像が各面を埋める)
+    const cube12 = makeMovableCube('cube12',  4.5, 0.5, -2.5, 0x535353);
+    const cube13 = makeMovableCube('cube13', -4.5, 0.5, -4.5, 0x535353);
+    const cube14 = makeMovableCube('cube14',  3.5, 0.5,  4.5, 0x535353);
+    function _applyCubeTexture(cube, url) {
+      const texLoader = new THREE.TextureLoader();
+      const tex = texLoader.load(url);
+      if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace;
+      else tex.encoding = THREE.sRGBEncoding;
+      tex.anisotropy = 4;
+      // 既存の 1 material を 6 面全部 same-texture の配列に差し替え
+      const mat = new THREE.MeshStandardMaterial({
+        map: tex,
+        color: 0xffffff,     // 画像色をそのまま出すため白
+        roughness: 0.8,
+        metalness: 0.0,
+      });
+      // 旧 material を dispose してメモリリーク防止
+      if (cube.material && cube.material.dispose) cube.material.dispose();
+      cube.material = [mat, mat, mat, mat, mat, mat];
+    }
+    _applyCubeTexture(cube12, '/assets/cube-face-1.png');
+    _applyCubeTexture(cube13, '/assets/cube-face-2.png');
+    _applyCubeTexture(cube14, '/assets/cube-face-3.png');
+    // cube13 (Asset 2) = opacity タグ付与トリガー
+    // cube12 (Asset 1) = opacity タグ解除トリガー
+    //   タグはクライアント保持 (window.__opacityTagged)。タグ中は全 cube の grab 操作が
+    //   位置移動の代わりに上下スワイプで透過度調整になる。
+    cube13.userData.__opacityTagTrigger = 'on';   // grab で tag を立てる
+    cube12.userData.__opacityTagTrigger = 'off';  // grab で tag を解除
+    // 全 movable cube にて transparent 対応 (タグ中にどの cube を選んでも opacity 変化可能)
+    //   既存 cube の material を transparent-capable に (opacity=1 のまま視覚的影響なし)
+    function _makeMaterialTransparent(mat) {
+      if (!mat) return;
+      mat.transparent = true;
+      if (typeof mat.opacity !== 'number') mat.opacity = 1.0;
+      mat.needsUpdate = true;
+    }
+    // 全 movableCubes に適用 (このブロックの時点では配列未宣言のため、宣言後に走らせる)
+    //   → 直後の movableCubes = [...] の後で実行する
+    window.__opacityTagged = false;
+    window.__initCubeTransparent = function (cubes) {
+      cubes.forEach((c) => {
+        if (!c.userData) c.userData = {};
+        if (typeof c.userData.opacity !== 'number') c.userData.opacity = 1.0;
+        if (Array.isArray(c.material)) c.material.forEach(_makeMaterialTransparent);
+        else _makeMaterialTransparent(c.material);
+      });
+    };
 
     // ===== 移動 Sphere オブジェクト (1m 直径、cube と同じ物理挙動) =====
     //   ・SphereGeometry(0.5) で半径 0.5m
@@ -404,18 +456,22 @@
         uFreq:       { value: 0.25 },  // 周波数倍率 (master slider で動的制御、既定 0.25)
         uAmp:        { value: 0.03 },  // 歪み振幅 (UV オフセット、既定 ±3%)
         uDispAmp:    { value: 0.03 },  // 頂点変位振幅 (m)、uFreq に連動 → 外周シルエット揺らぎ
+        // 波紋 (ripple): 最大 3 個同時、ローカル (box local) 座標中心を保持
+        //   JS 側で 2 秒おきに新規波紋を発生、半径は elapsed * 0.04 m
+        //   寿命: 半径がボックス対角 (~1.73m) を超えたら無効化
+        uRippleCenter: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
+        uRippleStart:  { value: [-999.0, -999.0, -999.0] },
       },
       vertexShader: `
         uniform float uTime;
         uniform float uFreq;
         uniform float uDispAmp;
+        uniform vec3  uRippleCenter[3];
+        uniform float uRippleStart[3];
         varying vec3 vNormalView;
         varying vec3 vViewDir;
+        varying vec3 vLocalPos;
         void main() {
-          // 頂点変位: procedural sin ノイズを法線方向にかけてシルエットを揺らす
-          //   ・uFreq に連動 (uFreq=0 で変位ゼロ、剛体に戻る)
-          //   ・3 軸の sin を平均 → 単調にならない有機的な揺れ
-          //   ・テクスチャフェッチなしで GPU 負荷軽減 (vertex shader 専用)
           vec3 pos = position;
           float wv = (
             sin(pos.x * 8.0 * uFreq + uTime * 1.5) +
@@ -423,6 +479,7 @@
             sin(pos.z * 9.0 * uFreq + uTime * 1.8)
           ) / 3.0;
           pos += normal * wv * uDispAmp * uFreq;
+          vLocalPos = pos;
           vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
           vNormalView = normalize(normalMatrix * normal);
           vViewDir = normalize(-mvPos.xyz);
@@ -436,22 +493,22 @@
         uniform float uFreq;
         uniform float uAmp;
         uniform vec2  uResolution;
+        uniform vec3  uRippleCenter[3];
+        uniform float uRippleStart[3];
         varying vec3 vNormalView;
         varying vec3 vViewDir;
+        varying vec3 vLocalPos;
         void main() {
           vec2 screenUv = gl_FragCoord.xy / uResolution;
           vec2 n1 = texture2D(uNoise, screenUv * (1.2 * uFreq) + vec2(uTime * 0.07,  uTime * 0.04)).rg;
           vec2 n2 = texture2D(uNoise, screenUv * (0.8 * uFreq) - vec2(uTime * 0.05, -uTime * 0.06)).rg;
-          // wave 振幅を uFreq に連動 → uFreq=0 で歪みゼロ (bgRT そのまま)
           vec2 wave = (n1 + n2 - 1.0) * uAmp * uFreq;
           vec4 bg = texture2D(uBackground, clamp(screenUv + wave, 0.0, 1.0));
-          // 法線を wave で摂動 → fragment-only の軽量ハイライト揺らぎ (追加テクスチャフェッチ無し)
           vec3 N = normalize(vNormalView + vec3(wave.x, wave.y, 0.0) * 12.0);
           vec3 V = normalize(vViewDir);
-          vec3 L = normalize(vec3(0.3, 0.8, 0.5));   // view 空間固定ライト
+          vec3 L = normalize(vec3(0.3, 0.8, 0.5));
           vec3 R = reflect(-L, N);
           float spec = pow(max(dot(R, V), 0.0), 24.0);
-          // tint を無効化: 背景色をそのまま採用 (無色透明の液体)
           vec3 base = bg.rgb;
           gl_FragColor = vec4(base + vec3(spec) * 0.35, 1.0);
         }
@@ -535,11 +592,47 @@
     window.__matShader     = _matShader;
     window.__matBgRT       = _matBgRT;
 
+    // 波紋スポーナー: 2 秒おきにランダムな面上の点に新規波紋を発生
+    //   ・box は 1m 立方 → ランダム点は 6 面のうち 1 面を選び、その面上 UV (±0.5) に配置
+    //   ・ripple slot 3 個を round-robin で上書き
+    let _rippleSpawnTimer = 0;
+    let _rippleSlot = 0;
+    function _spawnRipple(nowSec) {
+      // 6 面のうち 1 つを選ぶ (face: 0..5)
+      const face = Math.floor(Math.random() * 6);
+      const u = (Math.random() - 0.5);   // -0.5..+0.5
+      const vv = (Math.random() - 0.5);
+      let p;
+      switch (face) {
+        case 0: p = new THREE.Vector3( 0.5,  vv,   u ); break; // +X
+        case 1: p = new THREE.Vector3(-0.5,  vv,   u ); break; // -X
+        case 2: p = new THREE.Vector3(   u, 0.5,  vv ); break; // +Y
+        case 3: p = new THREE.Vector3(   u,-0.5,  vv ); break; // -Y
+        case 4: p = new THREE.Vector3(   u,  vv, 0.5 ); break; // +Z
+        default:p = new THREE.Vector3(   u,  vv,-0.5 ); break; // -Z
+      }
+      _matShader.uniforms.uRippleCenter.value[_rippleSlot].copy(p);
+      _matShader.uniforms.uRippleStart.value[_rippleSlot] = nowSec;
+      _rippleSlot = (_rippleSlot + 1) % 3;
+    }
+    function _tickMatBoxRipples(dt) {
+      const nowSec = _matShader.uniforms.uTime.value;
+      _rippleSpawnTimer += dt;
+      if (_rippleSpawnTimer >= 2.0) {
+        _rippleSpawnTimer -= 2.0;
+        _spawnRipple(nowSec);
+      }
+    }
+    window.__tickMatBoxRipples = _tickMatBoxRipples;
+
     const movableCubes = [
       cube1, cube2, cube3, cube4, cube5, cube6, cube7, cube8, cube9, cube10, cube11,
+      cube12, cube13, cube14,
       sphere1, sphere2, sphere3, sphere4, sphere5,
       materialBox,
     ];
+    // 全 movable を transparent-capable に (opacity タグ中に任意の cube を opacity 制御するため)
+    if (typeof window.__initCubeTransparent === 'function') window.__initCubeTransparent(movableCubes);
 
     // ===== Rope ビジュアライザー (grab 中の cube とグラバーを繋ぐ "ゴムひも") =====
     //   ・案 C: sag (重力垂れ) + bend (加速度直交方向のしなり) を合成
@@ -987,8 +1080,8 @@
     //   ・加速度 a = (k·(target-pos) - d·v) / m = SPRING_K_PER_KG·x - SPRING_DAMPING_PER_KG·v
     //     → 質量が変わっても追従感・振り感は一定 (ω = sqrt(k/m) = sqrt(SPRING_K_PER_KG) ≈ 5.5 rad/s、周期 ~1.1s)
     //   ・ζ = SPRING_DAMPING_PER_KG / (2·sqrt(SPRING_K_PER_KG)) ≈ 0.55 (弱振動 = ほどよい振り返し)
-    const SPRING_K_PER_KG = 45;   // 22.5 × 2: 引っ張り力を 2 倍に
-    const SPRING_DAMPING_PER_KG = 6;
+    const SPRING_K_PER_KG = 120;  // 強化: 選択オブジェクトを手前へ素早く引き寄せられるよう K を増大
+    const SPRING_DAMPING_PER_KG = 10;  // ダンピングも増やして振動を抑制 (ζ = 10/(2√120) ≈ 0.46)
     const SPRING_VEL_CAP = 20;    // 速度上限 m/s (発散防止)
     const _phys_lastEmit = new Map();   // name → last emit ms
     function _emitCubePoseThrottled(cube, forceMs) {
@@ -1068,9 +1161,10 @@
     //     水平摩擦と角速度減衰で全成分が小さくなった時 sleep へ遷移。
     //   ・閾値は "重力 1 フレーム分の v.y 累積 (~0.16 m/s)" を少し超える値に設定し、
     //     resting 中は毎フレーム法線成分がゼロ化されるので余裕を持って sleep に乗る。
-    const SLEEP_LIN2 = 0.04;      // |v|² < 0.04 → |v| < 0.2 m/s
-    const SLEEP_ANG2 = 0.04;      // |ω|² < 0.04 → |ω| < 0.2 rad/s
-    const SLEEP_HOLD_FRAMES = 12; // 連続安定フレーム数
+    // 停止閾値を厳しめに (閾値以上の緩やかな減速中に突然 sleep して "ピッタリ停止" するのを防ぐ)
+    const SLEEP_LIN2 = 0.003;     // |v|² < 0.003 → |v| < 0.055 m/s
+    const SLEEP_ANG2 = 0.003;     // |ω|² < 0.003 → |ω| < 0.055 rad/s
+    const SLEEP_HOLD_FRAMES = 45; // 連続安定フレーム数 (~0.75 秒 @60fps)
     function _wakeCube(c) {
       if (c && c.userData) {
         c.userData.sleeping = false;
@@ -1218,12 +1312,13 @@
         // 法線成分ゼロ化 (重力累積キャンセル)
         _phTmpV2.copy(_phNormal).multiplyScalar(vn);
         v.sub(_phTmpV2);
-        v.multiplyScalar(0.80);
+        // held 中は水平減衰しない (Spring-Damper が target へ引き寄せる動きを殺さない)
+        if (!cube.userData.held) v.multiplyScalar(0.80);
         // 重力 couple トルク Δω = (r × F_up) / I · dt
         _phTmpV2.set(0, mass * GRAVITY, 0);
         _phTmpV4.copy(r).cross(_phTmpV2);
         av.addScaledVector(_phTmpV4, dt / I);   // ← dt 掛け忘れを修正 (以前 60× overdrive)
-        av.multiplyScalar(0.90);
+        if (!cube.userData.held) av.multiplyScalar(0.90);
         // ★ Orientation snap: contact が複数 corners (面 or 辺) で角速度ほぼ 0 の時、
         //   最寄の axis-aligned 向きへゆっくり補間 → 傾いた固定を解消
         if (contactCount >= 2 && av.lengthSq() < 0.05) {
@@ -1243,10 +1338,11 @@
       _phTmpV2.copy(r).cross(_phTmpV4);
       av.addScaledVector(_phTmpV2, 1 / I);
       // 摩擦 (tangent 方向、Coulomb)
+      //   選択/把持中 (held=true) の cube は摩擦ゼロ: Spring-Damper の目標位置へ滑らかに追従できる
       _phTmpV2.copy(_phNormal).multiplyScalar(vn);
       _phTmpV3.sub(_phTmpV2);                     // v_tangential
       const vtLen = _phTmpV3.length();
-      if (vtLen > 0.001) {
+      if (vtLen > 0.001 && !cube.userData.held) {
         _phTmpV3.divideScalar(vtLen).negate();     // tangent unit (opposing)
         _phTmpV2.copy(r).cross(_phTmpV3);
         const inertialT = _phTmpV2.dot(_phTmpV2) / I;
@@ -1527,7 +1623,8 @@
     //     ・base サイズは camera.fov と camera.aspect から導出: 2D·tan(hfov/2) × 2D·tan(vfov/2)
     //       → Canvas の縦横比に一致し、実レンダリングの視錐台と apex・形状が揃う
     function _computeFrustumLayout(W, H, depthOverride) {
-      const modeA = !!(window.__effect && window.__effect[2]);
+      // 効果2 が smartphone pointer に再割当されたため、frustum レイアウトは常に default モード (Canvas-plane)
+      const modeA = false;
       if (modeA) {
         const vfov = (camera.fov || 60) * Math.PI / 180;
         const asp  = camera.aspect || (window.innerWidth / Math.max(1, window.innerHeight));
@@ -2456,9 +2553,11 @@
       socket.on('sceneAmbient', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(1, data.intensity));
-        if (sceneAmbient) sceneAmbient.intensity = v;
-        // 背景色と fog 色を環境光輝度に連動: 強度 0 で黒、1 で白
-        //   フィールド外とフォグフェードの色が環境光と同じ暗さに揃う
+        // ambient の実効値を 0.75 で capping: linear tone mapping 下で ambient=1 だと
+        //   lit area (ambient+dirLight=1.35) も shadow area (ambient=1.0) も 1.0 に clamp され
+        //   影が完全に消える。0.75 で止めることで常に dirLight 分の輝度差を確保 → 影が残る。
+        //   背景/フォグ色はスライダー値 v をそのまま使うので「背景も最大白」の挙動は維持。
+        if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
         if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
@@ -2519,6 +2618,17 @@
         const c = movableCubes.find((m) => m.name === data.name);
         if (!c) return;
         c.userData.heldBy = (typeof data.heldBy === 'string') ? data.heldBy : null;
+      });
+
+      // Opacity 同期: data = { name, opacity (0-1) }
+      socket.on('cubeOpacity', (data) => {
+        if (!data || typeof data.name !== 'string' || typeof data.opacity !== 'number') return;
+        const c = movableCubes.find((m) => m.name === data.name);
+        if (!c) return;
+        const o = Math.max(0, Math.min(1, data.opacity));
+        c.userData.opacity = o;
+        if (Array.isArray(c.material)) c.material.forEach((m) => { m.opacity = o; });
+        else if (c.material) c.material.opacity = o;
       });
 
       // 移動 Box の質量更新 (master スライダー由来、全クライアントで共有)
@@ -2644,20 +2754,9 @@
         // 効果1: observer 入室時の canvasBox 生成ゲート (入室後の切替はなし、ゲートのみ)
         //   既入室中の observer に対しては何もしない — 入室時の window.__effect[1] 値で決定済み
         //   camera / master には影響なし
-        // 効果2: 視錐台レイアウト切替 — 既定 (Canvas-plane) ↔ 案 A (実視点)
-        //   全アバターの frustum を再構築 (makeObserverFrustumMeshes が window.__effect[2] を参照)
-        if (n === 2) {
-          avatars.forEach((a, aid) => {
-            if (!a._hasFrustum) return;
-            // self は effectiveDisplaySize + SELF_FRUSTUM_DEPTH、他は displayConfig で持っている W/H を使う
-            const isSelf = (aid === myId);
-            const disp = isSelf
-              ? effectiveDisplaySize
-              : (a.remoteDisplay || { width: 0.3, height: 0.2 });
-            const dOverride = isSelf ? SELF_FRUSTUM_DEPTH : null;
-            rebuildAvatarFrustum(aid, disp, dOverride);
-          });
-          log('frustum mode → ' + (on ? 'A (apex=実視点)' : 'default (base=avatar)'), 'ok');
+        // 効果2: スマートフォンのリモコン型ポインター + スプレーボタン切替 (ROLE=camera のみ)
+        if (n === 2 && typeof window.__applyPhonePointerMode === 'function') {
+          window.__applyPhonePointerMode(on);
         }
         // 効果3: Fog 中心をフィールド原点に固定 ↔ カメラ (= アバター) に戻す
         if (n === 3 && typeof window.__applyFogOriginMode === 'function') {
@@ -2739,6 +2838,258 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
+
+    // ========== 効果2: スマホ リモコン型ポインター + スプレーボタン ==========
+    //   ・effect2 ON + ROLE=camera の時のみ有効化
+    //   ・pointer line: camera.position から forward 10m のレーザー (赤)
+    //   ・毎フレーム raycast → movable Box ヒット中なら pointer を黄にハイライト
+    //   ・phone-spray-btn:
+    //     - press 開始時に raycast → ヒットあり: 500ms 経過で選択+grab
+    //     - ヒット無し: スプレー発射 (space1 と同様の 4 秒 hold → 10Hz emit)
+    //     - release: grab 中なら release、spray 中なら停止
+    // ポインター表示: 直径 1.5cm (半径 0.0075m) の円柱、手前側 (phone 側) をフェード
+    //   CylinderGeometry は +Y 軸方向に伸びる 1 単位長 → scale/position で動的制御
+    const _POINTER_RADIUS = 0.0075;
+    const _pointerGeom = new THREE.CylinderGeometry(_POINTER_RADIUS, _POINTER_RADIUS, 1, 16, 1, true);
+    const _pointerMat = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: new THREE.Color(0xff3333) } },
+      vertexShader: `
+        varying float vV;
+        void main() {
+          vV = uv.y;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        varying float vV;
+        void main() {
+          // v=0 が手前 (phone 側)、v=1 が奥 (ヒット側) になるよう後で向きを合わせる
+          //   手前側は smoothstep で完全透明へフェード
+          float alpha = smoothstep(0.0, 0.5, vV);
+          if (alpha < 0.01) discard;
+          gl_FragColor = vec4(uColor, alpha * 0.85);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const _pointerLine = new THREE.Mesh(_pointerGeom, _pointerMat);
+    _pointerLine.renderOrder = 1000;
+    _pointerLine.visible = false;
+    _pointerLine.frustumCulled = false;
+    scene.add(_pointerLine);
+    // 円柱の中心→終端変換用の一時変数
+    const _ptCylOrigin = new THREE.Vector3();
+    const _ptCylQuat   = new THREE.Quaternion();
+    const _ptCylUp     = new THREE.Vector3(0, 1, 0);
+    const _ptCylDir    = new THREE.Vector3();
+    // 2 点間 (from = phone 側、to = ヒット側) に円柱を配置
+    //   CylinderGeometry の UV は底 (−Y 端) で v=0、頂上 (+Y 端) で v=1
+    //   phone 側 (from) を v=0 側 (底) に配置する必要があるため、+Y 方向を from→to に向ける
+    function _ptPlaceCyl(from, to, colorHex) {
+      _ptCylDir.subVectors(to, from);
+      const len = _ptCylDir.length();
+      if (len < 1e-4) { _pointerLine.visible = false; return; }
+      _pointerLine.visible = true;
+      _ptCylOrigin.copy(from).addScaledVector(_ptCylDir, 0.5);   // 中央配置
+      _ptCylDir.multiplyScalar(1 / len);
+      _ptCylQuat.setFromUnitVectors(_ptCylUp, _ptCylDir);
+      _pointerLine.position.copy(_ptCylOrigin);
+      _pointerLine.quaternion.copy(_ptCylQuat);
+      _pointerLine.scale.set(1, len, 1);   // 長さだけスケール (半径は固定 _POINTER_RADIUS)
+      _pointerMat.uniforms.uColor.value.setHex(colorHex);
+    }
+    const _ptRay = new THREE.Raycaster();
+    const _ptFwd = new THREE.Vector3();
+    const _ptEnd = new THREE.Vector3();
+    const _ptTmp = new THREE.Vector3();
+    const _ptTarget = new THREE.Vector3();   // grab 中の目標位置 (= camera + forward · grabDist)
+    let _pointerHit = null;    // ヒット中の movable (cube) or null
+    let _ptBtnPressT = 0;      // ボタン押下開始時刻 (ms)、0=未押下
+    let _ptBtnMode  = 'idle';  // 'idle' | 'select-waiting' | 'spray' | 'grabbing'
+    let _ptGrabDist = 2;       // grab 時に記録された camera→cube 距離 (維持距離)
+    let _ptLastHitName = '';
+    let _ptLastWaitingLogT = 0;
+    function _updatePointer() {
+      if (!window.__effect || !window.__effect[2]) return;
+      if (ROLE !== 'camera') return;
+      // ポインターの照射方向 = スマホ上辺が指す方向 (= phone local +Y)
+      //   赤外線リモコン的に本体を向けた方向にレーザーを照射。
+      //   画面に映る方向 (= local -Z、背面カメラ) とは別軸。別画面 (observer/master) で
+      //   ポインターの着弾位置と cube の重なりを目視する運用。
+      _ptFwd.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      // grab 中は raycast スキップ (cube 自身を再 hit して target が cube 位置に戻るのを防ぐ)
+      //   代わりに固定距離 _ptGrabDist を用いて target = camera + forward·grabDist を維持
+      if (_ptBtnMode === 'grabbing' && _heldCube) {
+        _ptTarget.copy(camera.position).addScaledVector(_ptFwd, _ptGrabDist);
+        if (!_heldCube.userData.targetPos) _heldCube.userData.targetPos = new THREE.Vector3();
+        _heldCube.userData.targetPos.copy(_ptTarget);
+        _ptPlaceCyl(camera.position, _heldCube.position, 0xffd700);
+        return;
+      }
+      // 通常の raycast (ヒット検出)
+      //   movableCubes の matrixWorld を強制更新 (物理 tick で position は変わるが matrixWorld は
+      //   render 直前にしか更新されないため、_updatePointer での raycast は 1 フレーム古い位置になる)
+      for (let i = 0; i < movableCubes.length; i++) {
+        movableCubes[i].updateMatrixWorld(true);
+      }
+      _ptRay.set(camera.position, _ptFwd);
+      _ptRay.far = 40;
+      const hits = _ptRay.intersectObjects(movableCubes, false);
+      let hit = (hits && hits[0]) || null;
+      // 厳密 raycast が外れた場合のフォールバック: カメラ前方 60° コーン内で最も近い cube
+      //   (スマホポインターは精密狙いが難しく、cube の中心が画面端にある場合も掴めるようにする)
+      if (!hit) {
+        const minDot = Math.cos(60 * Math.PI / 180);
+        let bestCube = null;
+        let bestDist = Infinity;
+        let bestDot = -1;
+        for (let i = 0; i < movableCubes.length; i++) {
+          const c = movableCubes[i];
+          _ptTmp.subVectors(c.position, camera.position);
+          const d = _ptTmp.length();
+          if (d < 0.1 || d > 40) continue;
+          _ptTmp.multiplyScalar(1 / d);
+          const dot = _ptTmp.dot(_ptFwd);
+          if (dot >= minDot && d < bestDist) {
+            bestDist = d;
+            bestDot = dot;
+            bestCube = c;
+          }
+        }
+        if (bestCube) {
+          hit = { object: bestCube, distance: bestDist };
+        }
+      }
+      _pointerHit = hit ? hit.object : null;
+      const endDist = hit ? hit.distance : 10;
+      _ptEnd.copy(camera.position).addScaledVector(_ptFwd, endDist);
+      _ptPlaceCyl(camera.position, _ptEnd, _pointerHit ? 0xffd700 : 0xff3333);
+      // ヒット対象が変わったらログ
+      const curName = _pointerHit ? _pointerHit.name : '(none)';
+      if (curName !== _ptLastHitName) {
+        _ptLastHitName = curName;
+        log('pointer hit → ' + curName, 'ok');
+      }
+      // 'waiting' = ボタン押下中、まだ grab/spray 発動していない状態
+      //   ・held >= 500ms AND _pointerHit → grab 発動
+      //   ・held >= 4000ms AND no hit → spray 発動 (既存の 4 秒ホールド機構)
+      if (_ptBtnMode === 'waiting' && _ptBtnPressT) {
+        const held = performance.now() - _ptBtnPressT;
+        const nowMs = performance.now();
+        if (nowMs - _ptLastWaitingLogT > 500) {
+          _ptLastWaitingLogT = nowMs;
+          // より詳細な診断: 最も近い cube と視線とのなす角度
+          let bestName = 'none', bestDist = Infinity, bestDeg = 180;
+          for (let i = 0; i < movableCubes.length; i++) {
+            const c = movableCubes[i];
+            _ptTmp.subVectors(c.position, camera.position);
+            const d = _ptTmp.length();
+            if (d < 0.01) continue;
+            _ptTmp.multiplyScalar(1 / d);
+            const dot = Math.max(-1, Math.min(1, _ptTmp.dot(_ptFwd)));
+            const deg = Math.acos(dot) * 180 / Math.PI;
+            if (deg < bestDeg) { bestDeg = deg; bestName = c.name; bestDist = d; }
+          }
+          log('waiting held=' + held.toFixed(0) + 'ms hit=' + (_pointerHit ? _pointerHit.name : 'none') +
+              ' cam=(' + camera.position.x.toFixed(1) + ',' + camera.position.y.toFixed(1) + ',' + camera.position.z.toFixed(1) + ')' +
+              ' fwd=(' + _ptFwd.x.toFixed(2) + ',' + _ptFwd.y.toFixed(2) + ',' + _ptFwd.z.toFixed(2) + ')' +
+              ' nearest=' + bestName + ' @' + bestDist.toFixed(1) + 'm/' + bestDeg.toFixed(1) + '°', 'ok');
+        }
+        if (held >= 500 && _pointerHit) {
+          // 既に他クライアントが掴んでいる場合は spray へフォールバック
+          if (_pointerHit.userData.held) {
+            if (held >= 4000 && !_spraySelf.pressStartT) {
+              _spraySelf.pressStartT = performance.now();
+              _spraySelf.armed = false;
+              _spraySelf.lastEmitT = 0;
+              _ptBtnMode = 'spray';
+            }
+          } else {
+            _ptGrabDist = Math.max(0.5, hit.distance);
+            selectObject(_pointerHit);
+            // Opacity タグの ON/OFF (phone pointer 版)
+            if (_pointerHit.userData.__opacityTagTrigger === 'on') {
+              window.__opacityTagged = true;
+              log('opacity tag → ON (' + _pointerHit.name + ' ポインター選択)', 'ok');
+            } else if (_pointerHit.userData.__opacityTagTrigger === 'off') {
+              window.__opacityTagged = false;
+              log('opacity tag → OFF (' + _pointerHit.name + ' ポインター選択)', 'ok');
+            }
+            grabCube(_pointerHit);
+            _ptTarget.copy(camera.position).addScaledVector(_ptFwd, _ptGrabDist);
+            if (!_pointerHit.userData.targetPos) _pointerHit.userData.targetPos = new THREE.Vector3();
+            _pointerHit.userData.targetPos.copy(_ptTarget);
+            _ptBtnMode = 'grabbing';
+            log('phone pointer select+grab: ' + _pointerHit.name + ' @ ' + _ptGrabDist.toFixed(2) + 'm', 'ok');
+          }
+        } else if (held >= 4000 && !_spraySelf.pressStartT) {
+          _spraySelf.pressStartT = performance.now();
+          _spraySelf.armed = false;
+          _spraySelf.lastEmitT = 0;
+          _ptBtnMode = 'spray';
+          log('phone pointer → spray mode (4s hold)', 'ok');
+        }
+      }
+    }
+    updaters.push(_updatePointer);
+    function _applyPhonePointerMode(on) {
+      if (ROLE !== 'camera') { _pointerLine.visible = false; return; }
+      _pointerLine.visible = !!on;
+      // body class 'phone-pointer-on' を toggle: CSS が UI 非表示 + is-camera と合わせて spray ボタン表示
+      document.body.classList.toggle('phone-pointer-on', !!on);
+      if (!on) {
+        _ptBtnMode = 'idle';
+        _ptBtnPressT = 0;
+      }
+    }
+    window.__applyPhonePointerMode = _applyPhonePointerMode;
+    // ボタン操作: Pointer Events (touch/mouse 両対応、確実にイベント捕捉)
+    //   DOM 読み込みが遅い場合に備え setTimeout で deferred バインド
+    function _bindPhoneSprayBtn() {
+      const btn = document.getElementById('phone-spray-btn');
+      if (!btn) { log('phone-spray-btn 未検出、再試行', 'err'); setTimeout(_bindPhoneSprayBtn, 500); return; }
+      const _btnDown = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        _ptBtnPressT = performance.now();
+        _ptBtnMode = 'waiting';
+        btn.classList.add('pressing');
+        try { btn.setPointerCapture && e.pointerId != null && btn.setPointerCapture(e.pointerId); } catch (_) {}
+        log('phone btn ↓ (mode=waiting)', 'ok');
+      };
+      const _btnUp = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        log('phone btn ↑ (mode=' + _ptBtnMode + ')', 'ok');
+        if (_ptBtnMode === 'grabbing' && _heldCube) {
+          releaseCube(_heldCube);
+          selectObject(null);
+        }
+        if (_ptBtnMode === 'spray') {
+          _spraySelf.pressStartT = 0;
+          _spraySelf.armed = false;
+        }
+        _ptBtnMode = 'idle';
+        _ptBtnPressT = 0;
+        btn.classList.remove('pressing');
+      };
+      // Pointer Events が利用可能なら優先 (touch + mouse を統合)
+      if (window.PointerEvent) {
+        btn.addEventListener('pointerdown',   _btnDown, { passive: false });
+        btn.addEventListener('pointerup',     _btnUp,   { passive: false });
+        btn.addEventListener('pointercancel', _btnUp,   { passive: false });
+        btn.addEventListener('pointerleave',  (e) => { if (_ptBtnMode !== 'idle') _btnUp(e); }, { passive: false });
+      } else {
+        btn.addEventListener('touchstart', _btnDown, { passive: false });
+        btn.addEventListener('touchend',   _btnUp,   { passive: false });
+        btn.addEventListener('touchcancel',_btnUp,   { passive: false });
+        btn.addEventListener('mousedown',  _btnDown);
+        btn.addEventListener('mouseup',    _btnUp);
+      }
+      log('phone-spray-btn ハンドラ接続完了', 'ok');
+    }
+    _bindPhoneSprayBtn();
 
     // ========== ロール別: パネル表示 + セットアップ ==========
     let _obsResync = null; // observer の yaw/pitch 再同期用 (forcePose 受信後)
@@ -3021,6 +3372,14 @@
         //   camera (スマホ) もこの仕様に統一 (旧: スワイプ奥行き調整 + 投擲 は廃止)
         if (obj.userData && obj.userData.__movable) {
           selectObject(obj);
+          // Opacity タグの ON/OFF 切替: Asset2 で ON、Asset1 で OFF
+          if (obj.userData.__opacityTagTrigger === 'on') {
+            window.__opacityTagged = true;
+            log('opacity tag → ON (' + obj.name + ' 選択)', 'ok');
+          } else if (obj.userData.__opacityTagTrigger === 'off') {
+            window.__opacityTagged = false;
+            log('opacity tag → OFF (' + obj.name + ' 選択)', 'ok');
+          }
           if (obj.userData.held) return;
           grabCube(obj);
           // 掴んだ瞬間のマウス位置に相当する world 上の "ハンドル点" を保存
@@ -3040,6 +3399,8 @@
             startCubePos: obj.position.clone(),
             handleStart: handleStart,
             moved: false,
+            // opacity 制御モード用: grab 開始時点の opacity をスワイプの基準値として保持
+            startOpacity: (obj.userData && typeof obj.userData.opacity === 'number') ? obj.userData.opacity : 1,
           };
           window.__cubeDragActive = true;
           return;
@@ -3083,6 +3444,30 @@
         //   実際の cube 位置は Spring-Damper で targetPos に遅延追従 (慣性感)
         //   ・drag sensitivity: (rayHit - handleStart) × sens
         if (_dragState.type === 'cubeGrab') {
+          const tgt = _dragState.targetObj;
+          // opacity 制御モード: 位置更新を無効化し、上下スワイプ Δy で透過度を 0〜1 にスライド
+          //   アバターに opacity タグが付いている状態 (= Asset2 を選択 → Asset1 で解除まで持続)
+          //   タグ中はどの cube を grab しても opacity モード
+          //   上スワイプ (Δy<0) → opacity↑、下スワイプ (Δy>0) → opacity↓
+          if (tgt && window.__opacityTagged) {
+            const dy = y - _dragState.startY;
+            const PX_PER_FULL = 400;   // 400px 動かすと 0→1 or 1→0
+            const base = (typeof _dragState.startOpacity === 'number') ? _dragState.startOpacity : 1;
+            const newOp = Math.max(0, Math.min(1, base - dy / PX_PER_FULL));
+            tgt.userData.opacity = newOp;
+            if (Array.isArray(tgt.material)) tgt.material.forEach((m) => { m.opacity = newOp; });
+            else if (tgt.material) tgt.material.opacity = newOp;
+            // 50ms スロットルで同期
+            const nowMs = performance.now();
+            if (!_dragState._lastOpT || nowMs - _dragState._lastOpT > 50) {
+              _dragState._lastOpT = nowMs;
+              if (socket && socket.connected) {
+                socket.emit('cubeOpacity', { name: tgt.name, opacity: newOp });
+              }
+            }
+            _dragState.moved = true;
+            return;
+          }
           const rect = _canvas.getBoundingClientRect();
           _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
           _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
@@ -4469,6 +4854,7 @@
 
       // ========== rope 更新 (grab 中の cube ↔ グラバーを繋ぐゴムひも) ==========
       if (typeof window.__updateRopes === 'function') window.__updateRopes();
+
 
       // ========== materialBox pre-pass: 背景を bgRT に描画 (液体 distortion 用) ==========
       //   自身を非表示にして scene を RT へ描画 → materialBox fragment で UV distortion サンプリング

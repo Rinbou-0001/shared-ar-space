@@ -10,7 +10,7 @@
 
 window.APP_CONFIG = {
   // 同一オリジン(npm start で起動した場合)
-  socketUrl: '',
+  socketUrl: 'https://shared-ar-space.onrender.com',
 
   // 本番例:
   // socketUrl: 'https://shared-ar-space.onrender.com',

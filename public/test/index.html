@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>テストメニュー</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      max-width: 640px;
+      margin: 40px auto;
+      padding: 0 20px;
+      line-height: 1.7;
+      color: #222;
+      background: #f6f7f9;
+    }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    .lead { color: #555; font-size: 14px; margin-bottom: 24px; }
+    .card {
+      background: white;
+      padding: 18px 20px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      margin-bottom: 14px;
+    }
+    .card h2 {
+      font-size: 16px;
+      margin: 0 0 6px;
+      color: #1f2937;
+    }
+    .card p {
+      font-size: 13px;
+      color: #555;
+      margin: 4px 0 10px;
+    }
+    .btn {
+      display: inline-block;
+      padding: 8px 18px;
+      background: #2b6cb0;
+      color: white;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .badge.now { background: #4ade80; color: #064e3b; }
+    .badge.next { background: #facc15; color: #713f12; }
+    .badge.future { background: #e5e7eb; color: #4b5563; }
+  </style>
+</head>
+<body>
+  <h1>共有空間 - テストページ</h1>
+  <p class="lead">複雑化した本番ページとは独立した、段階的な動作検証用ページ群です。</p>
+
+  <div class="card">
+    <h2>01. 共有VR空間 (20m四方) <span class="badge now">いまここ</span></h2>
+    <p>マーカーやARを使わない純粋なVR空間。入室すると(0〜20m, 2m, 0〜20m)の乱数位置に15cm球がアバターとしてポップ。</p>
+    <a class="btn" href="space.html">開く</a>
+  </div>
+
+  <div class="card">
+    <h2>02. WebXR能力検出 <span class="badge next">予定</span></h2>
+    <p>デバイスのWebXR/センサー対応状況を画面に列挙するだけ。</p>
+  </div>
+
+  <div class="card">
+    <h2>03. WebXR + マーカーアンカー <span class="badge future">予定</span></h2>
+    <p>WebXRで継続的な6DoF追跡、マーカーは原点キャリブレーション専用。</p>
+  </div>
+
+  <div class="card">
+    <h2>04. 統合版 <span class="badge future">予定</span></h2>
+    <p>本番room.htmlの置き換え候補。</p>
+  </div>
+</body>
+</html>

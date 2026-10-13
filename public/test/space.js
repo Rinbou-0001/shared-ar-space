@@ -1786,13 +1786,15 @@
               const oldMats = Array.isArray(c.material) ? c.material : [c.material];
               const newMats = oldMats.map((oldMat) => {
                 if (!oldMat) return null;
-                return new THREE.MeshStandardMaterial({
+                const nm = new THREE.MeshStandardMaterial({
                   color: oldMat.color ? oldMat.color.clone() : new THREE.Color(0xffffff),
                   map: oldMat.map || null,
                   normalMap: oldMat.normalMap || null,
                   roughness: 0.8,
                   metalness: 0.0,
                 });
+                try { log('Whale mat replaced: mesh=' + (c.name || 'anon') + ' newUuid=' + nm.uuid.substr(0, 8), 'ok'); } catch (_) {}
+                return nm;
               });
               c.material = Array.isArray(c.material) ? newMats : newMats[0];
             }
@@ -1894,13 +1896,15 @@
               const oldMats = Array.isArray(c.material) ? c.material : [c.material];
               const newMats = oldMats.map((oldMat) => {
                 if (!oldMat) return null;
-                return new THREE.MeshStandardMaterial({
+                const nm = new THREE.MeshStandardMaterial({
                   color: oldMat.color ? oldMat.color.clone() : new THREE.Color(0xffffff),
                   map: oldMat.map || null,
                   normalMap: oldMat.normalMap || null,
                   roughness: 0.8,
                   metalness: 0.0,
                 });
+                try { log('Fox mat replaced: mesh=' + (c.name || 'anon') + ' newUuid=' + nm.uuid.substr(0, 8), 'ok'); } catch (_) {}
+                return nm;
               });
               c.material = Array.isArray(c.material) ? newMats : newMats[0];
             }

@@ -2,17 +2,47 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <!-- iOS: ホーム画面追加で standalone 化 (アドレスバー/ボトムバー消去) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>共有3D空間 space2 (実験)</title>
   <style>
-    html, body { margin: 0; padding: 0; overflow: hidden; background: #101018; }
+    html, body {
+      margin: 0; padding: 0; overflow: hidden; background: #101018;
+      width: 100%; height: 100%;
+      /* iOS Safari: dvh でツールバー可変を追跡 */
+      height: 100dvh;
+    }
     canvas { display: block; outline: none; }
 
-    #stage { position: fixed; inset: 0; background: #101018; }
+    /* #stage は物理ビューポート全域 (ノッチ/Dynamic Island/ホームインジケータ含む) を占有。
+       viewport-fit=cover により inset:0 がフル領域に展開される。 */
+    #stage { position: fixed; inset: 0; background: #101018; z-index: 1; }
 
-    /* ステータスバー */
+    /* AR モード用の背面カメラ映像 (camera role で getUserMedia 成功時のみ表示)。
+       CSS 上は常時 z-index 0 の下敷きとして配置。display:none 初期。 */
+    #bg-video {
+      display: none;
+      position: fixed; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+      pointer-events: none;
+      background: #000;
+    }
+    body.ar-mode #bg-video { display: block; }
+    /* AR モード中は 3D canvas と stage を透過にしてカメラ映像を透かす */
+    body.ar-mode #stage        { background: transparent !important; }
+    body.ar-mode #stage canvas { background: transparent !important; }
+
+    /* ステータスバー — セーフエリア分だけ内側へオフセット (ノッチ/Dynamic Island 避け) */
     #status {
-      position: fixed; top: 8px; left: 8px; right: 8px;
+      position: fixed;
+      top:   calc(env(safe-area-inset-top, 0px)   + 8px);
+      left:  calc(env(safe-area-inset-left, 0px)  + 8px);
+      right: calc(env(safe-area-inset-right, 0px) + 8px);
       background: rgba(0,0,0,0.65); color: white;
       padding: 10px 14px; border-radius: 8px;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -35,8 +65,14 @@
     #role-badge.master   { background: #06b6d4; color: #083344; }
 
     #log {
-      position: fixed; bottom: 8px; left: 8px; right: 56px;
-      max-height: 14vh; overflow-y: auto;
+      /* 縦幅は画面高さの 10% 固定 (PC/スマホ共通)、幅は space2 と同じ位置。
+         スクロール可能な行数は uiLog の slice(-500) で 500 行保持。
+         下辺はホームインジケータ (env(safe-area-inset-bottom)) を避ける。 */
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+      left:  calc(env(safe-area-inset-left, 0px)  + 8px);
+      right: calc(env(safe-area-inset-right, 0px) + 56px);
+      height: 10vh; overflow-y: auto;
       background: rgba(0,0,0,0.62); color: #ddd;
       padding: 6px 10px; border-radius: 6px;
       font-family: monospace; font-size: 11px;
@@ -44,13 +80,19 @@
       white-space: pre-wrap; word-break: break-all;
       pointer-events: auto;
       -webkit-overflow-scrolling: touch;
+      box-sizing: border-box;   /* padding 分で 10vh を超えないよう含める */
+    }
+    @media (max-width: 640px) {
+      #log { font-size: 10px; line-height: 1.3; padding: 4px 8px; }
     }
     #log .err { color: #ff8080; }
     #log .ok  { color: #80ff80; }
 
     /* UI 表示・非表示トグル */
     #ui-toggle {
-      position: fixed; bottom: 8px; right: 8px;
+      position: fixed;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+      right:  calc(env(safe-area-inset-right, 0px)  + 8px);
       width: 40px; height: 40px; z-index: 10001;
       background: rgba(0,0,0,0.7); color: white;
       border: 1px solid rgba(255,255,255,0.3); border-radius: 8px;
@@ -62,6 +104,13 @@
     body.ui-hidden #observer-panel,
     body.ui-hidden #master-panel,
     body.ui-hidden #log { display: none !important; }
+
+    /* ディスプレイ寸法入力群は PC のみ表示 (camera ロール = スマホでは隠す)。
+       max-width 640px でも念のため隠す (小画面 = ほぼスマホ) */
+    body.is-camera .obs-display-pc-only { display: none !important; }
+    @media (max-width: 640px) {
+      .obs-display-pc-only { display: none !important; }
+    }
 
     /* スマホ入室オーバーレイ (camera role でのみ表示)
        ・スマホ 360° ジャイロは iOS 13+ で明示的な user gesture 経由の permission が必要
@@ -76,7 +125,13 @@
       flex-direction: column;
       align-items: center; justify-content: center;
       color: white; font-family: sans-serif;
-      text-align: center; padding: 20px;
+      text-align: center;
+      /* セーフエリア分だけコンテンツを内側にオフセット */
+      padding:
+        calc(env(safe-area-inset-top, 0px)    + 20px)
+        calc(env(safe-area-inset-right, 0px)  + 20px)
+        calc(env(safe-area-inset-bottom, 0px) + 20px)
+        calc(env(safe-area-inset-left, 0px)   + 20px);
       pointer-events: auto;
     }
     body.is-camera #enter-overlay { display: flex; }
@@ -92,19 +147,7 @@
       box-shadow: 0 6px 18px rgba(0,0,0,0.5);
     }
 
-    /* フルスクリーン解除ボタン (fs-mode 時のみ表示) */
-    #fs-exit-btn {
-      position: fixed; top: 10px; right: 10px;
-      z-index: 10002; display: none;
-      padding: 10px 18px;
-      background: rgba(0,0,0,0.75); color: white;
-      border: 1px solid rgba(255,255,255,0.3); border-radius: 6px;
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      font-size: 13px; font-weight: bold;
-      cursor: pointer;
-    }
-    body.fs-mode #fs-exit-btn { display: block; }
-    /* フルスクリーン時は他 UI 一括非表示 (ui-hidden 相当) */
+    /* フルスクリーン時は全 UI 一括非表示 (fs-exit-btn は廃止、Enter キーで解除) */
     body.fs-mode #status,
     body.fs-mode #observer-panel,
     body.fs-mode #master-panel,
@@ -113,7 +156,11 @@
 
     /* Observer パネル (observer / master で表示) */
     #observer-panel {
-      position: fixed; top: 60px; right: 8px;
+      position: fixed;
+      top:   calc(env(safe-area-inset-top, 0px)   + 60px);
+      right: calc(env(safe-area-inset-right, 0px) + 8px);
+      max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 80px);
+      overflow-y: auto;
       background: rgba(0,0,0,0.7); color: white;
       padding: 12px 14px; border-radius: 8px;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -137,7 +184,11 @@
 
     /* Master パネル (master のみ表示) */
     #master-panel {
-      position: fixed; top: 60px; left: 8px;
+      position: fixed;
+      top:  calc(env(safe-area-inset-top, 0px)  + 60px);
+      left: calc(env(safe-area-inset-left, 0px) + 8px);
+      max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 80px);
+      overflow-y: auto;
       background: rgba(0,0,0,0.7); color: white;
       padding: 12px 14px; border-radius: 8px;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -160,6 +211,51 @@
     #master-panel label { display: inline-block; width: 28px; text-align: center; font-weight: bold; font-family: monospace; }
     #master-panel .m-section { border-top: 1px solid #334; margin: 8px 0; padding-top: 6px; }
     #master-panel .m-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+    /* アコーディオン */
+    #master-panel details { margin: 0; }
+    #master-panel details > summary {
+      cursor: pointer; user-select: none;
+      padding: 4px 6px; border-radius: 4px;
+      background: rgba(6,182,212,0.15); color: #67e8f9;
+      font-weight: bold; font-size: 11px;
+      list-style: none;
+    }
+    #master-panel details > summary::-webkit-details-marker { display: none; }
+    #master-panel details > summary::before {
+      content: '▸'; display: inline-block; width: 12px; transition: transform 0.15s;
+    }
+    #master-panel details[open] > summary::before { transform: rotate(90deg); }
+    #master-panel details > summary:hover { background: rgba(6,182,212,0.28); }
+    #master-panel details > .m-body { padding: 6px 4px 2px; }
+    #master-panel .m-tag-toggle {
+      background: #475569; color: white;
+      padding: 4px 10px; font-size: 11px; margin-right: 4px; margin-top: 2px;
+    }
+    #master-panel .m-tag-toggle.on { background: #22c55e; color: #052e16; }
+    /* スライダー */
+    #master-panel input[type="range"] { flex: 1; accent-color: #06b6d4; }
+    #master-panel .m-slider-val {
+      font-family: monospace; font-size: 11px; color: #67e8f9;
+      min-width: 34px; text-align: right;
+    }
+
+    /* 右クリック コンテキストメニュー (master のみ) */
+    #context-menu {
+      display: none; position: fixed; z-index: 10000;
+      background: rgba(15,23,42,0.96); color: white;
+      border: 1px solid #06b6d4; border-radius: 6px;
+      padding: 4px; min-width: 140px;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+    }
+    #context-menu button {
+      display: block; width: 100%;
+      background: transparent; color: white; border: none;
+      padding: 6px 10px; text-align: left; font-size: 12px; cursor: pointer;
+      border-radius: 4px;
+    }
+    #context-menu button:hover { background: rgba(6,182,212,0.28); }
+    #context-menu .cm-icon { display: inline-block; width: 18px; }
   </style>
 
   <script>
@@ -168,8 +264,11 @@
       window.__logs.push({ msg: String(msg), cls: cls || '' });
       const el = document.getElementById('log');
       if (el) {
-        el.innerHTML = window.__logs.slice(-14).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
-        el.scrollTop = el.scrollHeight;
+        // ユーザーが上へスクロール中 (底から 4px 以上離れている) なら auto-scroll しない。
+        // → 底近く/未スクロール時のみ最新行に追従、上へ辿っている最中は位置キープ。
+        const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 4;
+        el.innerHTML = window.__logs.slice(-500).map(l => `<div class="${l.cls}">${l.msg}</div>`).join('');
+        if (atBottom) el.scrollTop = el.scrollHeight;
       }
     };
     window.addEventListener('error', (e) => window.uiLog('[ERROR] ' + (e.message || e.error), 'err'));
@@ -191,17 +290,61 @@
 </head>
 <body>
 
+<!-- AR モード用 背面カメラ映像 (camera role, getUserMedia 成功時のみ表示) -->
+<video id="bg-video" autoplay playsinline muted></video>
 <div id="stage"></div>
 
 <!-- スマホ用入室オーバーレイ (camera role のみ表示) -->
 <div id="enter-overlay">
-  <h2>共有3D空間 space2</h2>
-  <p>
-    入室するとアバターが (0, 2, 0) にスポーンし、<br>
-    スマホを動かして 360° 見回すマジックウィンドウが始まります。
-  </p>
-  <button id="enter-btn">入室する</button>
+  <h2>space2</h2>
+  <button id="enter-btn">Start</button>
 </div>
+
+<!-- スマホ用スプレーボタン (space1 style): UI 非表示 + effect2 ON + camera role の時のみ表示
+     ・画面上部中央に大きな半透明の丸ボタン
+     ・押しながら pointer が Box に当たっていれば 500ms で選択 → 離すと release
+     ・ヒット無しで押下 → 既存の 4 秒 hold スプレー発射
+-->
+<button id="phone-spray-btn" type="button" aria-label="長押しでスプレー噴射 / Box に長押しで選択"></button>
+<style>
+  #phone-spray-btn {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 25vw;
+    height: 25vw;
+    max-width: 220px;
+    max-height: 220px;
+    min-width: 70px;
+    min-height: 70px;
+    border-radius: 50%;
+    background: rgba(245, 245, 247, 0.88);
+    border: 3px solid rgba(120, 120, 130, 0.85);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35),
+                inset 0 -3px 6px rgba(0,0,0,0.08);
+    display: none;
+    z-index: 10002;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    transition: transform 0.12s, background 0.15s, border-color 0.15s;
+    padding: 0;
+  }
+  /* ROLE=camera + UI 非表示 (フルスクリーン) で常時表示 */
+  body.is-camera.ui-hidden #phone-spray-btn { display: block; }
+  @media (min-width: 820px) {
+    #phone-spray-btn { display: none !important; }
+  }
+  #phone-spray-btn:active,
+  #phone-spray-btn.pressing {
+    background: rgba(190, 190, 200, 0.95);
+    border-color: rgba(80, 80, 90, 0.95);
+    transform: translateX(-50%) scale(0.94);
+  }
+</style>
 
 <div id="status">
   <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>
@@ -209,82 +352,244 @@
   &nbsp;|&nbsp;
   <span id="count">0</span>人 |
   自分: (<span id="my-pos">--</span>)
+  <span id="my-entry-tag" style="margin-left:8px; color:#fbbf24; font-weight:bold;"></span>
 </div>
 
 <!-- Master 制御パネル (master のみ、observer-panel と並置) -->
 <div id="master-panel">
   <h3>MASTER 制御</h3>
+
   <div class="m-section">
-    <div class="hint">クライアント一覧から選択 → 座標/角度を入力して適用</div>
-    <div class="row">
-      <select id="m-client-select" style="flex:1; padding: 4px;">
-        <option value="">-- 未選択 --</option>
-      </select>
-    </div>
-    <div class="row">
-      <label>X</label><input type="number" id="m-x" value="0" step="0.1">
-      <label>Y</label><input type="number" id="m-y" value="1.7" step="0.1">
-      <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
-    </div>
-    <div class="row">
-      <label>Yaw</label><input type="number" id="m-yaw" value="0" step="5">
-      <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
-      <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
-    </div>
-    <div class="row">
-      <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
-      <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint">オフアクシス投影 (選択中クライアント)</div>
-    <div class="row">
-      <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
-      <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint">共通視点 (viewerEye)</div>
-    <div class="row">
-      <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
-      <label>Y</label><input type="number" id="ve-y" value="2.0" step="0.05">
-      <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
-    </div>
-    <div class="row">
-      <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用</button>
-    </div>
-  </div>
-  <div class="m-section">
-    <div class="hint" style="color:#67e8f9;">オブジェクト移動感度 (px / 1m) — 小=敏感、大=鈍感</div>
-    <div class="row">
-      <label>S</label>
-      <input type="number" id="m-move-sens" value="60" step="5" min="5" max="500" style="width:80px;">
-      <button id="m-move-sens-apply" style="background: #06b6d4; color: #083344">適用</button>
-    </div>
-    <div class="hint" style="font-size:10px; opacity:0.7;">
-      現在: <span id="m-move-sens-current">60</span> px/m — 全クライアントに配信
-    </div>
+    <details open>
+      <summary>クライアント選択・強制ポーズ</summary>
+      <div class="m-body">
+        <div class="hint">入室タグ (#N) を含めて一覧から選択 → 座標/角度を入力して適用</div>
+        <div class="row">
+          <select id="m-client-select" style="flex:1; padding: 4px;">
+            <option value="">-- 未選択 --</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>X</label><input type="number" id="m-x" value="0" step="0.1">
+          <label>Y</label><input type="number" id="m-y" value="1.3" step="0.1">
+          <label>Z</label><input type="number" id="m-z" value="0" step="0.1">
+        </div>
+        <div class="row">
+          <label>Yaw</label><input type="number" id="m-yaw" value="-90" step="5">
+          <label>Pit</label><input type="number" id="m-pitch" value="0" step="5">
+          <label>Rol</label><input type="number" id="m-roll" value="0" step="5">
+        </div>
+        <div class="row">
+          <button id="m-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+          <button id="m-readcurrent" style="background: #64748b; color: white">現在値読込</button>
+        </div>
+        <!-- カスタムタグ付与 (選択中クライアントが入室タグを持つ = observer の時のみ表示) -->
+        <div class="row" id="m-avatar-tags-row" style="display:none; flex-wrap:wrap; gap:6px; margin-top:6px; border-top:1px dashed #334; padding-top:6px;">
+          <span style="font-size:10px; opacity:0.7; align-self:center; margin-right:4px;">タグ付与:</span>
+          <button class="m-tag-toggle" data-tag="hole_test">hole_test</button>
+        </div>
+        <!-- 光強度スライダー (light タグを持つシーンオブジェクトが選択されている時のみ表示) -->
+        <div class="row" id="m-light-intensity-row" style="display:none; margin-top:6px; border-top:1px dashed #334; padding-top:6px;">
+          <label style="width:auto; font-size:10px; opacity:0.8;">光強度</label>
+          <input type="range" id="m-light-intensity" min="0" max="1" step="0.01" value="0.5">
+          <span class="m-slider-val" id="m-light-intensity-val">0.50</span>
+        </div>
+      </div>
+    </details>
   </div>
 
   <div class="m-section">
-    <div class="hint" style="color:#67e8f9;">FogExp2 密度 (0 = 無し / 0.06 = ゆるめ / 0.12 = 中 / 0.3 = 濃密)</div>
-    <div class="row">
-      <label>D</label>
-      <input type="number" id="m-fog-density" value="0.3" step="0.01" min="0" max="1" style="width:80px;">
-      <button id="m-fog-apply" style="background: #06b6d4; color: #083344">適用</button>
-    </div>
-    <div class="hint" style="font-size:10px; opacity:0.7;">
-      現在: <span id="m-fog-current">0.3</span> — 全クライアントに配信
-    </div>
+    <details>
+      <summary>オフアクシス投影</summary>
+      <div class="m-body">
+        <div class="hint">選択中クライアントの off-axis 切替</div>
+        <div class="row">
+          <button id="m-offaxis-toggle" style="background: #475569; color: white">OFF</button>
+          <span id="m-display-size" style="font-size:10px; opacity:0.7;">サイズ: --</span>
+        </div>
+        <div class="hint" style="margin-top:6px; color:#67e8f9;">全オブザーバーに一括適用 (master/camera は対象外)</div>
+        <div class="row">
+          <button id="m-offaxis-all-toggle" style="background:#475569; color:white;">全 observer: OFF</button>
+        </div>
+      </div>
+    </details>
   </div>
+
+  <div class="m-section">
+    <details>
+      <summary>共通視点 (viewerEye)</summary>
+      <div class="m-body">
+        <div class="row">
+          <label>X</label><input type="number" id="ve-x" value="0" step="0.05">
+          <label>Y</label><input type="number" id="ve-y" value="1.3" step="0.05">
+          <label>Z</label><input type="number" id="ve-z" value="0" step="0.05">
+        </div>
+        <div class="row">
+          <button id="ve-apply" style="background: #06b6d4; color: #083344">視点を適用 (Enter)</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>オブジェクト移動感度</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">px / 1m — 小=敏感、大=鈍感</div>
+        <div class="row">
+          <label>S</label>
+          <input type="number" id="m-move-sens" value="10" step="5" min="1" max="500" style="width:80px;">
+          <button id="m-move-sens-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-move-sens-current">10</span> px/m — 全クライアントに配信
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>FogExp2 密度</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">0 = 無し / 0.06 = ゆるめ / 0.12 = 中 / 0.3 = 濃密</div>
+        <div class="row">
+          <label>D</label>
+          <input type="number" id="m-fog-density" value="0.1" step="0.01" min="0" max="1" style="width:80px;">
+          <button id="m-fog-apply" style="background: #06b6d4; color: #083344">適用 (Enter)</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-fog-current">0.1</span> — 全クライアントに配信
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>ドラッグ感度</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">
+          オブジェクト選択・移動時のドラッグ移動感度。1.0 = 標準、>1 で敏感、<1 で鈍感。
+        </div>
+        <div class="row">
+          <label style="width:auto;">S</label>
+          <input type="number" id="m-drag-sens" value="1.0" step="0.1" min="0.1" max="10" style="width:80px;">
+          <button id="m-drag-sens-apply" style="background:#06b6d4; color:#083344;">適用 (Enter)</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-drag-sens-current">1.00</span> ×
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>移動 Box 質量</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">
+          cube と質量 (kg) を選択・入力 → Enter で即時適用。
+          軽い (小さい値) → 落下がゆっくり (羽のよう)、重い → 早い直下。
+        </div>
+        <div class="row">
+          <select id="m-cube-select" style="flex:1; padding: 4px;">
+            <option value="__all">全て (all)</option>
+            <option value="cube1">cube1 (灰)</option>
+            <option value="cube2">cube2 (赤)</option>
+            <option value="cube3">cube3 (緑)</option>
+            <option value="cube4">cube4 (青)</option>
+          </select>
+          <input type="number" id="m-cube-mass" value="10.0" step="1" min="0.01" max="1000" style="width:80px;">
+          <button id="m-cube-mass-apply" style="background:#06b6d4; color:#083344;">適用 (Enter)</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          現在: <span id="m-cube-mass-current">--</span> kg (全クライアント配信)
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="m-section">
+    <details>
+      <summary>space2 環境光</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">空間全体を照らす AmbientLight 強度 (0 - 1.0)</div>
+        <div class="row">
+          <label style="width:auto; font-size:10px; opacity:0.8;">強度</label>
+          <input type="range" id="m-scene-ambient" min="0" max="1" step="0.01" value="0.85">
+          <span class="m-slider-val" id="m-scene-ambient-val">0.85</span>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          全クライアントに配信 (light タグ PointLight とは別系統)
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- materialBox 液体演出パラメータ -->
+  <div class="m-section">
+    <details>
+      <summary>マテリアルBox 液体パラメータ</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">歪みノイズの周波数 (スケール) を調整</div>
+        <div class="row">
+          <label style="width:auto; font-size:10px; opacity:0.8;">周波数</label>
+          <input type="range" id="m-matbox-freq" min="0" max="2.0" step="0.01" value="0.25">
+          <span class="m-slider-val" id="m-matbox-freq-val">0.25</span>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          低値 = 大きなうねり、高値 = 細かい模様。ローカル表示のみ (サーバー非同期)。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- リセット: 塗り + Boxオブジェクト位置を全クライアントで一括初期化 -->
+  <div class="m-section">
+    <details>
+      <summary>リセット</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">塗り & Box 位置を初期状態へ復元 (全視点に適用)</div>
+        <div class="row" style="gap:6px; flex-wrap:wrap;">
+          <button id="m-reset-space" style="background:#ef4444; color:white; padding:8px 14px;">塗り + Box 位置リセット</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          dome 上の塗料と cube1..11 の位置を全視点で同時リセット。元に戻せません。
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- 検証用トグル: 実装内容の効果確認。各ボタンに紐づく実装はユーザー指示で後付け -->
+  <div class="m-section">
+    <details>
+      <summary>検証</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">実装内容の効果を切り替えて確認するためのトグル</div>
+        <div class="row" style="gap:6px; flex-wrap:wrap;">
+          <button id="m-effect-1" class="m-effect-btn" data-effect="1" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果1: OFF</button>
+          <button id="m-effect-2" class="m-effect-btn" data-effect="2" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果2: OFF</button>
+          <button id="m-effect-3" class="m-effect-btn" data-effect="3" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果3: OFF</button>
+          <button id="m-effect-4" class="m-effect-btn" data-effect="4" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果4: OFF</button>
+        </div>
+        <div class="hint" style="font-size:10px; opacity:0.7;">
+          各ボタンに割り当てる実装は未設定 (指示待ち)。ON 時は <code>window.__effect[1..3]</code> が true になる。
+        </div>
+      </div>
+    </details>
+  </div>
+
+</div>
+
+<!-- Master 右クリックメニュー (master のみ有効化) -->
+<div id="context-menu">
+  <button data-action="light"><span class="cm-icon">💡</span> light</button>
 </div>
 
 <!-- Observer パネル (observer / master 両方で表示) -->
 <div id="observer-panel">
   <h3>OBSERVER MODE</h3>
-  <div class="hint">
-    左ドラッグ: 視点回転 / WASD: 移動 / QE: 上下 / Shift: 速い
-  </div>
   <div class="row">
     <label>X</label><input type="number" id="obs-x" value="0" step="0.5">
     <label>Y</label><input type="number" id="obs-y" value="1" step="0.5">
@@ -303,47 +608,49 @@
   <div class="row">
     <button id="obs-fullscreen" style="background: #8b5cf6; color: white">フルスクリーン</button>
   </div>
-
-  <div style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
-    <div style="font-weight: bold; color:#fbbf24; font-size: 11px; margin-bottom: 4px;">
-      オブジェクト選択・移動 (1m グリッド)
-    </div>
-    <div class="hint" style="line-height: 1.5;">
-      クリック/タップで選択 (黄色枠) → <b>ドラッグ/スワイプ</b>で XZ 平面移動 (1m スナップ)<br>
-      キーでも移動可: ← → : X ± / ↑ ↓ : Z ± / PgUp PgDn : Y ± / Esc: 解除<br>
-      選択中: <b id="obs-sel-info" style="color:#fbbf24;">--</b>
-    </div>
-  </div>
+  <!-- obs-sel-info は selection hint 用に残置 (updateSelectionHint が参照) -->
+  <span id="obs-sel-info" style="display:none;">--</span>
   <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
     <label>Off-Axis</label>
     <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+    <label style="margin-left:12px;">Canvas同期</label>
+    <button id="obs-canvasync-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+    <label style="margin-left:12px;">Box表示</label>
+    <button id="obs-box-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
   </div>
-  <div class="hint" style="font-size:10px; opacity:0.7;">
-    Off-Axis の display 姿勢は上の Y/P/R (カメラ姿勢) × 180°Y flip で自動決定<br>
-    viewerEye が真上 (0,2,0) の時は Y=0, P=90, R=0 → 移動 で成立
+  <div class="row" style="margin-top: 6px;">
+    <label>FOV(°)</label>
+    <input type="number" id="obs-fov" value="60" step="1" min="10" max="170" style="width:70px;">
   </div>
-  <div class="row">
+  <!-- ディスプレイ実寸 (推定結果表示、直接編集も可) -->
+  <div class="row obs-display-pc-only">
     <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.001" min="0.05" max="3.0">
     <label>H(m)</label><input type="number" id="obs-display-h" value="0.20" step="0.001" min="0.05" max="3.0">
-    <button id="obs-display-auto" style="background:#94a3b8; color:#1e293b; font-size:11px;">自動再取得</button>
   </div>
-  <div class="row" style="margin-top:6px;">
-    <label style="width: auto;">対角(inch)</label>
+  <!-- 対角インチ + ネイティブ解像度 W × H → 再計算 -->
+  <div class="row obs-display-pc-only" style="margin-top:6px;">
+    <label style="width: auto;">対角(in)</label>
     <input type="number" id="obs-display-diag" placeholder="例: 14" step="0.1" min="3" max="100" style="width:70px;">
-    <button id="obs-display-diag-apply" style="background:#06b6d4; color:#083344; font-size:11px;">適用</button>
-    <button id="obs-display-diag-clear" style="background:#64748b; color:white; font-size:11px;">解除</button>
   </div>
-  <div class="hint" style="font-size:10px; opacity:0.7;">
-    起動時 / URL 更新 / 画面回転 で自動推定 (UA + 解像度 + DPR)。<br>
-    Windows など機種テーブル未対応の場合は <b>対角インチ</b> を入力すると精度が上がります (保存: 次回自動継承)
+  <div class="row obs-display-pc-only" style="margin-top:2px;">
+    <label style="width: auto;">解像度</label>
+    <input type="number" id="obs-display-res-w" placeholder="例: 3024" step="1" min="200" style="width:78px;">
+    <span style="opacity:0.7; align-self:center;">×</span>
+    <input type="number" id="obs-display-res-h" placeholder="例: 1964" step="1" min="200" style="width:78px;">
+  </div>
+  <div class="row obs-display-pc-only" style="margin-top:2px;">
+    <button id="obs-display-calc" style="background:#06b6d4; color:#083344; font-size:11px;">再計算 (Enter)</button>
+  </div>
+  <div class="hint obs-display-pc-only" style="font-size:10px; opacity:0.7;">
+    入室時に 1 度自動推定 (UA + DPR)。以降は<b>対角インチ + 実解像度</b>を入力 → Enter で精密に再計算。<br>
+    (PPI = √(rw² + rh²) / diag、W = rw / PPI × 25.4mm)
   </div>
 </div>
 
 <div id="log"></div>
 <button id="ui-toggle" title="UI 表示切替">UI</button>
 
-<!-- フルスクリーン中のみ表示、解除用 -->
-<button id="fs-exit-btn">✕ フルスクリーン解除</button>
+<!-- フルスクリーン解除は Enter キーで行う (専用ボタンは廃止) -->
 
 <script src="space2.js"></script>
 </body>

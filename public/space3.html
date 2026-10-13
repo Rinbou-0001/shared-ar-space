@@ -300,6 +300,52 @@
   <button id="enter-btn">Start</button>
 </div>
 
+<!-- スマホ用スプレーボタン (space1 style): UI 非表示 + effect2 ON + camera role の時のみ表示
+     ・画面上部中央に大きな半透明の丸ボタン
+     ・押しながら pointer が Box に当たっていれば 500ms で選択 → 離すと release
+     ・ヒット無しで押下 → 既存の 4 秒 hold スプレー発射
+-->
+<button id="phone-spray-btn" type="button" aria-label="長押しでスプレー噴射 / Box に長押しで選択"></button>
+<style>
+  #phone-spray-btn {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 25vw;
+    height: 25vw;
+    max-width: 220px;
+    max-height: 220px;
+    min-width: 70px;
+    min-height: 70px;
+    border-radius: 50%;
+    background: rgba(245, 245, 247, 0.88);
+    border: 3px solid rgba(120, 120, 130, 0.85);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.35),
+                inset 0 -3px 6px rgba(0,0,0,0.08);
+    display: none;
+    z-index: 10002;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    transition: transform 0.12s, background 0.15s, border-color 0.15s;
+    padding: 0;
+  }
+  /* effect2 ON + ROLE=camera + UI 非表示 の 3 条件が揃った時だけ表示 */
+  body.is-camera.ui-hidden.phone-pointer-on #phone-spray-btn { display: block; }
+  @media (min-width: 820px) {
+    body.phone-pointer-on #phone-spray-btn { display: none !important; }
+  }
+  #phone-spray-btn:active,
+  #phone-spray-btn.pressing {
+    background: rgba(190, 190, 200, 0.95);
+    border-color: rgba(80, 80, 90, 0.95);
+    transform: translateX(-50%) scale(0.94);
+  }
+</style>
+
 <div id="status">
   <span class="pill" id="conn-pill"></span><span id="conn-text">接続中</span>
   <span id="role-badge"></span>

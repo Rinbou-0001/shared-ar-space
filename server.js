@@ -69,6 +69,8 @@ const cubeMasses = new Map();
 //   オーナー以外からの objectPose は broadcast 時に無視され、競合を防ぐ。
 //   disconnect 時に該当オーナーの cube はすべて owner=null に戻す。
 const cubeOwners = new Map();
+// 移動 Box の透過度 (name → 0..1)。opacity タグ cube (cube13) 用
+const cubeOpacities = new Map();
 // space3 のグローバル環境光 (AmbientLight 強度、master スライダーから制御)。
 //   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
 let sceneAmbientConfig = { intensity: 0.85 };
@@ -108,6 +110,7 @@ let effectState = { 1: false, 2: false, 3: false, 4: false };
 //   SPRAY_HISTORY_CAP を超えた分は古い順に捨てる (リングバッファ的に運用)
 const SPRAY_HISTORY_CAP = 20000;
 let sprayHistory = [];
+let sprayHistory2 = [];   // space2 専用アトラス UV 履歴
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
 //   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
@@ -192,6 +195,13 @@ io.on('connection', (socket) => {
       socket.emit('sprayBatch', sprayHistory.slice(i, i + CHUNK));
     }
   }
+  // space2 専用スプレー履歴配信 (space3 クライアントは 'sprayBatch2' を購読しないので無害)
+  if (sprayHistory2.length > 0) {
+    const CHUNK = 1000;
+    for (let i = 0; i < sprayHistory2.length; i += CHUNK) {
+      socket.emit('sprayBatch2', sprayHistory2.slice(i, i + CHUNK));
+    }
+  }
   // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
   for (const [name, pose] of objectPoses.entries()) {
     socket.emit('objectPose', { name, x: pose.x, y: pose.y, z: pose.z });
@@ -209,6 +219,10 @@ io.on('connection', (socket) => {
   // 既存の cube ownership を配信 (非 null のみ)
   for (const [name, owner] of cubeOwners.entries()) {
     if (owner) socket.emit('cubeOwnership', { name, owner });
+  }
+  // 既存の cube opacity を配信
+  for (const [name, opacity] of cubeOpacities.entries()) {
+    socket.emit('cubeOpacity', { name, opacity });
   }
 
   socket.on('orb', (data) => {
@@ -386,6 +400,14 @@ io.on('connection', (socket) => {
     io.emit('cubeHold', { name: data.name, heldBy });
   });
 
+  // cubeOpacity: cube の透過度 (0-1) 全視点同期
+  socket.on('cubeOpacity', (data) => {
+    if (!data || typeof data.name !== 'string' || typeof data.opacity !== 'number') return;
+    const o = Math.max(0, Math.min(1, data.opacity));
+    cubeOpacities.set(data.name, o);
+    io.emit('cubeOpacity', { name: data.name, opacity: o });
+  });
+
   // Master からのオブジェクト移動感度設定 (space2 で使用)
   socket.on('moveConfig', (data) => {
     const sender = users.get(socket.id);
@@ -422,6 +444,26 @@ io.on('connection', (socket) => {
       sprayHistory.splice(0, sprayHistory.length - SPRAY_HISTORY_CAP);
     }
     socket.broadcast.emit('spray', rec);
+  });
+
+  // space2 専用スプレー (アトラス UV; space3 と履歴を分離するため別イベント名)
+  //   data: { u, v, c, r? } — r はピクセル半径 (space1 準拠の距離依存ブラシ)
+  socket.on('spray2', (data) => {
+    if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+    if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return;
+    const c = (typeof data.c === 'string') ? data.c.slice(0, 6) : 'ffffff';
+    const rec = { u: data.u, v: data.v, c };
+    if (typeof data.r === 'number' && data.r > 0 && data.r < 1000) rec.r = data.r;
+    sprayHistory2.push(rec);
+    if (sprayHistory2.length > SPRAY_HISTORY_CAP) {
+      sprayHistory2.splice(0, sprayHistory2.length - SPRAY_HISTORY_CAP);
+    }
+    socket.broadcast.emit('spray2', rec);
+  });
+  // space2 専用リセット (アトラスのみ)
+  socket.on('resetAtlas2', () => {
+    sprayHistory2 = [];
+    io.emit('resetAtlas2', { t: Date.now() });
   });
 
   // space3 リセット (master 専用: 塗り + cube 位置を全クライアントで一括リセット)
