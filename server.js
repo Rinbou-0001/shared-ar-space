@@ -446,12 +446,6 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('spray', rec);
   });
 
-  // space2 サポート確認 probe (クライアントが接続後に送る、ACK コールバックで応答)
-  //   クライアント側はこれで "server.js が spray2 対応版か" を自動判定できる
-  socket.on('space2:probe', (cb) => {
-    if (typeof cb === 'function') cb({ ok: true, version: 'spray2', ts: Date.now() });
-  });
-
   // space2 専用スプレー (space3 と履歴を分離するため別イベント名)
   //   data: { tgt, u, v, c, r?, s? }
   //     tgt = ペイント対象のメッシュ名 ('wall-N' | 'wall-S' | 'wall-E' | 'wall-W' | 'floor-paint' | 'ceiling' 等)
