@@ -959,17 +959,23 @@
     function _drawAtlasDot() {}
     function _clearAtlas() { _clearAllPaintables(); }
 
-    // 不透明ペイント素材: 白ベース + paint RT を alpha ブレンド合成した結果を OPAQUE で出力。
-    //   メッシュごとに固有の RT を持ち、uv remap なしで PlaneGeometry 標準 UV を使う。
+    // ペイント合成素材:
+    //   paint RT の格納形式は premultiplied alpha (= RGB は alpha で前乗算済み)。
+    //   paint shader の blend 式 (blendSrc=SrcAlpha + blendDst=OneMinusSrcAlpha + 非 premult 出力) により
+    //   RT に書き込まれた時点でピクセルは `(color*alpha, alpha)` 形式に正規化されるため、合成側は
+    //   `uBase * (1 - paint.a) + paint.rgb` という premultiplied OVER 合成を使う。
+    //   mode='opaque' : OPAQUE 出力、uBase (= 白) をバックに塗料をレイヤーする (壁/天井向け)
+    //   mode='transparent' : 塗料部分だけ出力し、塗っていない所は完全透明 (床向け: 下の床+グリッドを見せる)
     const _opaqueAtlasMaterials = new Set();
-    function _makeOpaqueAtlasMaterial(baseColor, paintTexture) {
+    function _makePaintCompositeMaterial(baseColor, paintTexture, mode) {
       const col = new THREE.Color(baseColor);
+      const isTransparent = (mode === 'transparent');
       const mat = new THREE.ShaderMaterial({
         uniforms: {
           uPaint: { value: paintTexture },
           uBase:  { value: new THREE.Vector3(col.r, col.g, col.b) },
-          fogColor:   { value: scene.fog ? scene.fog.color : new THREE.Color(0xffffff) },
-          fogDensity: { value: scene.fog ? scene.fog.density : 0.0 },
+          uFogColor:   { value: scene.fog ? scene.fog.color : new THREE.Color(0xffffff) },
+          uFogDensity: { value: scene.fog ? scene.fog.density : 0.0 },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -985,37 +991,58 @@
           precision highp float;
           uniform sampler2D uPaint;
           uniform vec3 uBase;
-          uniform vec3 fogColor;
-          uniform float fogDensity;
+          uniform vec3 uFogColor;
+          uniform float uFogDensity;
           varying vec2 vUv;
           varying float vFogDepth;
           void main() {
             vec4 paint = texture2D(uPaint, vUv);
-            vec3 col = mix(uBase, paint.rgb, paint.a);
-            float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
-            col = mix(col, fogColor, clamp(fogFactor, 0.0, 1.0));
-            gl_FragColor = vec4(col, 1.0);
+            ${isTransparent ? `
+              if (paint.a < 0.001) discard;
+              // premultiplied color を unmul せずそのまま出力し、premultiplied blend で正しく合成
+              gl_FragColor = vec4(paint.rgb, paint.a);
+            ` : `
+              // premultiplied OVER: base と塗料を合成した不透明 RGB を出力
+              vec3 col = uBase * (1.0 - paint.a) + paint.rgb;
+              float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * vFogDepth * vFogDepth);
+              col = mix(col, uFogColor, clamp(fogFactor, 0.0, 1.0));
+              gl_FragColor = vec4(col, 1.0);
+            `}
           }
         `,
         side: THREE.DoubleSide,
+        transparent: isTransparent,
+        depthWrite: !isTransparent,
       });
+      if (isTransparent) {
+        mat.blending = THREE.CustomBlending;
+        mat.blendEquation = THREE.AddEquation;
+        mat.blendSrc = THREE.OneFactor;
+        mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+        mat.blendEquationAlpha = THREE.AddEquation;
+        mat.blendSrcAlpha = THREE.OneFactor;
+        mat.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+      }
       _opaqueAtlasMaterials.add(mat);
       return mat;
     }
+    // 旧名互換
+    const _makeOpaqueAtlasMaterial = (c, t) => _makePaintCompositeMaterial(c, t, 'opaque');
     window.__syncOpaqueAtlasFog = function () {
       if (!scene.fog) return;
       _opaqueAtlasMaterials.forEach((m) => {
-        if (m.uniforms && m.uniforms.fogDensity) m.uniforms.fogDensity.value = scene.fog.density;
-        if (m.uniforms && m.uniforms.fogColor) m.uniforms.fogColor.value.copy(scene.fog.color);
+        if (m.uniforms && m.uniforms.uFogDensity) m.uniforms.uFogDensity.value = scene.fog.density;
+        if (m.uniforms && m.uniforms.uFogColor) m.uniforms.uFogColor.value.copy(scene.fog.color);
       });
     };
-    // paintable 化ヘルパ: 既存メッシュに paintRT を割り当て、material を opaque atlas shader に差し替える
+    // paintable 化ヘルパ: 既存メッシュに paintRT を割り当て、material を合成 shader に差し替える
     //   worldSpanM: ブラシの uvR 計算用の "この面全体に対応する world 幅 (m)"
-    function _makePaintable(mesh, baseColor, worldSpanM, res) {
+    //   mode: 'opaque'(壁/天井 既定) | 'transparent'(床 — 下の grid を見せたい)
+    function _makePaintable(mesh, baseColor, worldSpanM, res, mode) {
       const rt = _makePaintableRT(res || 512);
       mesh.userData.paintRT     = rt;
       mesh.userData.worldSpanM  = worldSpanM;
-      mesh.material = _makeOpaqueAtlasMaterial(baseColor, rt.texture);
+      mesh.material = _makePaintCompositeMaterial(baseColor, rt.texture, mode || 'opaque');
       if (mesh.name) _paintables.set(mesh.name, mesh);
       _sprayables.push(mesh);
       return mesh;
@@ -1035,7 +1062,7 @@
       wall.position.copy(position);
       wall.rotation.y = rotYDeg * Math.PI / 180;
       wall.name = id;
-      wall.receiveShadow = true;
+      wall.receiveShadow = false;   // 独自 ShaderMaterial はシャドウ非対応 (receive 無効)
       scene.add(wall);
       // worldSpanM: 幅 40m を基準 (brush uvR = worldR/40)
       _makePaintable(wall, 0xffffff, WALL_SIDE, 512);
@@ -1079,7 +1106,8 @@
       floorPaint.name = 'floor-paint';
       floorPaint.renderOrder = 11;
       scene.add(floorPaint);
-      _makePaintable(floorPaint, 0xffffff, 2 * WALL_HALF, 512);
+      // 床は透明モード: 塗った部分だけ色が出て、塗っていない所は下の床本体 + グリッドが透けて見える
+      _makePaintable(floorPaint, 0xffffff, 2 * WALL_HALF, 512, 'transparent');
     }
 
     // ===== 天面 (天井) 40m × 40m, 高さ WALL_H_M =====
@@ -1093,7 +1121,7 @@
       ceiling.rotation.x = Math.PI / 2;   // 床と逆の向き (法線 -Y = 下向きに内側)
       ceiling.position.set(0, WALL_H_M, 0);
       ceiling.name = 'ceiling';
-      ceiling.receiveShadow = true;
+      ceiling.receiveShadow = false;
       scene.add(ceiling);
       _makePaintable(ceiling, 0xffffff, 2 * WALL_HALF, 512);
 
