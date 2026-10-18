@@ -1008,8 +1008,9 @@
       );
       _remapMeshUV(overlay, id);
       overlay.userData.sprayRegionId = id;   // ブラシ密度参照用
+      // 壁の内側 5cm 手前にオーバーレイを配置 (z-fighting 回避 + raycast 確実化)
       const inward = new THREE.Vector3(0, 0, 1).applyEuler(wall.rotation);
-      overlay.position.copy(position).add(inward.multiplyScalar(0.01));
+      overlay.position.copy(position).add(inward.multiplyScalar(0.05));
       overlay.rotation.copy(wall.rotation);
       overlay.name = id + '-paint';
       overlay.renderOrder = 10;
@@ -1162,6 +1163,13 @@
       if (hits.length === 0 || !hits[0].uv) return;
       const hit = hits[0];
       const uv = hit.uv;   // ← メッシュの UV は remap 済みなので、そのままアトラス UV
+      // 診断: 新しい対象をヒットしたら 1 回だけログを出す (壁に当たっているか切り分け用)
+      if (!window.__sprayHitSeen) window.__sprayHitSeen = new Set();
+      const hitName = (hit.object && hit.object.name) || '?';
+      if (!window.__sprayHitSeen.has(hitName)) {
+        window.__sprayHitSeen.add(hitName);
+        log('spray hit → ' + hitName + ' @ ' + hit.distance.toFixed(2) + 'm', 'ok');
+      }
       const colorHex = (state.myColor || '#ffffff').replace('#', '');
       // space1 準拠: 円錐 half-angle から世界半径 → MAX クランプ → アトラス UV radius に変換
       const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
@@ -2754,6 +2762,11 @@
       socket.on('init', (data) => {
         myId = data.id;
         if (data.self && data.self.color) state.myColor = data.self.color;
+        // space2: スプレー色は入室時に 3 色からランダムに上書き (サーバー配色を無視)
+        //   #029ecc (青) / #ffce18 (黄) / #df2c1e (赤) のいずれか
+        const _space2Palette = ['#029ecc', '#ffce18', '#df2c1e'];
+        state.myColor = _space2Palette[Math.floor(Math.random() * _space2Palette.length)];
+        log('spray color (random): ' + state.myColor, 'ok');
         // 既存ユーザー
         for (const id in data.users) {
           const u = data.users[id];
