@@ -3424,14 +3424,24 @@
         }
 
         // base drag → apex 軸で Yaw/Pitch 回転
+        //   ・ドラッグ方向を上下左右反転 (左ドラッグ → 面が右向き、上ドラッグ → 面が下向き)
+        //   ・5° 単位にスナップ (クリックストップ感)
         if (_dragState.type !== 'base') return;
         const degPerPx = 15 / Math.max(5, moveSensitivity);
-        const dYaw   = -dx * degPerPx * (Math.PI / 180);   // 右ドラッグ = -yaw
-        const dPitch = -dy * degPerPx * (Math.PI / 180);   // 下ドラッグ = -pitch (下を見る)
+        const SNAP_DEG = 5;
         _tmpEuler.setFromQuaternion(_dragState.startQuat, 'YXZ');
-        const PL = Math.PI/2 - 0.02;
-        const newPitch = Math.max(-PL, Math.min(PL, _tmpEuler.x + dPitch));
-        const newYaw   = _tmpEuler.y + dYaw;
+        const startPitchDeg = THREE.MathUtils.radToDeg(_tmpEuler.x);
+        const startYawDeg   = THREE.MathUtils.radToDeg(_tmpEuler.y);
+        // 反転: +dx (右へ) → -yaw、+dy (下へ) → -pitch を廃止し、符号を逆向きに
+        const dYawDeg   =  dx * degPerPx;
+        const dPitchDeg =  dy * degPerPx;
+        // 5° スナップ (開始角度 + ドラッグ量 の合計を 5° 単位に丸め)
+        const PL_DEG = 90 - 1.5;
+        const snappedPitchDeg = Math.max(-PL_DEG, Math.min(PL_DEG,
+          Math.round((startPitchDeg + dPitchDeg) / SNAP_DEG) * SNAP_DEG));
+        const snappedYawDeg   = Math.round((startYawDeg + dYawDeg) / SNAP_DEG) * SNAP_DEG;
+        const newPitch = THREE.MathUtils.degToRad(snappedPitchDeg);
+        const newYaw   = THREE.MathUtils.degToRad(snappedYawDeg);
         const newRoll  = _tmpEuler.z;   // roll は据え置き
         _tmpEuler.set(newPitch, newYaw, newRoll, 'YXZ');
         _tmpQuat.setFromEuler(_tmpEuler);
