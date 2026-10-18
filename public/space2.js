@@ -823,19 +823,6 @@
     //   旧: CanvasTexture (Canvas 2D API で描画→毎回 GPU 再アップロード)
     //   新: WebGLRenderTarget に ShaderMaterial で直接 GPU 描画
     //       → ドットごとの CPU→GPU 転送が消滅、フレームレート劣化が構造的に発生しない
-    const ATLAS_W = 1024;
-    const ATLAS_H = 1024;   // 1024×1024: 床 + 天井 + 4 壁 + cube を均等密度 (12.8 px/m) で収容
-    const _atlasRT = new THREE.WebGLRenderTarget(ATLAS_W, ATLAS_H, {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      generateMipmaps: false,
-      depthBuffer: false,
-      stencilBuffer: false,
-    });
-    _atlasRT.texture.wrapS = THREE.ClampToEdgeWrapping;
-    _atlasRT.texture.wrapT = THREE.ClampToEdgeWrapping;
     // ペイント shader: 粒状感 + 標準 (非 premultiplied) alpha で RT に層状蓄積
     //   non-premultiplied にすることで overlay 側は三者標準の NormalBlending のまま
     //   読み出せる (alpha の二重乗算が起きない)。
@@ -897,120 +884,89 @@
     const _paintCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const _paintQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _paintShaderMat);
     _paintScene.add(_paintQuad);
-    // 外部メッシュ参照互換用 (旧コードが _atlasTex を直接参照していた箇所に備える)
-    const _atlasTex = _atlasRT.texture;
 
-    // アトラス領域 (UV 0..1 座標): [uMin, vMin, uMax, vMax] — 1024×1024 全体で均等 12.8 px/m
-    //   ・床 40×40m → (0..0.5, 0.5..1.0) 512×512 (12.8 px/m 等方)
-    //   ・天井 40×40m → (0.5..1.0, 0.5..1.0) 512×512 (12.8 px/m 等方)
-    //   ・壁 40×20m × 4 → (0..1.0, 0.25..0.5) 2×2 split = 512×256 (12.8 px/m 等方)
-    //   ・Cube 用 → (0..1.0, 0..0.25) 8×1 split = 128×256 (ほぼ未使用)
-    const ATLAS_REGIONS = {
-      'floor-paint':   [0.00, 0.50, 0.50, 1.00],
-      'ceiling-paint': [0.50, 0.50, 1.00, 1.00],
-      'wall-N':        [0.00, 0.375, 0.50, 0.50],
-      'wall-S':        [0.50, 0.375, 1.00, 0.50],
-      'wall-E':        [0.00, 0.25, 0.50, 0.375],
-      'wall-W':        [0.50, 0.25, 1.00, 0.375],
-    };
-    const CUBE_COLS = 8, CUBE_ROWS = 1;   // 8×1 = 8 セル、1 セル 128×256 px (使用機会は少ない)
-    for (let rr = 0; rr < CUBE_ROWS; rr++) {
-      for (let cc = 0; cc < CUBE_COLS; cc++) {
-        const idx = rr * CUBE_COLS + cc;
-        const uMin = cc / CUBE_COLS;
-        const uMax = (cc + 1) / CUBE_COLS;
-        const vMin = (CUBE_ROWS - 1 - rr) * 0.5 / CUBE_ROWS;
-        const vMax = (CUBE_ROWS - rr)     * 0.5 / CUBE_ROWS;
-        ATLAS_REGIONS['cube-slot-' + idx] = [uMin, vMin, uMax, vMax];
-      }
-    }
-    // 面ごとの UV radius per meter (horizontal axis で揃える; shader 内でのペイント円は
-    //   アトラス UV 空間で等方なので、面の縦横比が 1:1 でない場合は横方向を基準にする)
-    //   floor: 0.5 UV / 40m = 0.0125 UV/m   (縦も 0.0125 — world 1:1 なので円)
-    //   wall : 0.25 UV / 40m = 0.00625 UV/m 水平、0.25 UV / 20m = 0.0125 UV/m 垂直
-    //          → shader radius に 0.00625 を使うと水平 1m / 垂直 0.5m の楕円 (space1 と同挙動)
-    //   cube : 0.125 UV / 1m = 0.125 UV/m   (縦は 0.25 UV / 1m = 0.25 UV/m)
-    const REGION_UV_PER_M = {
-      'floor-paint':   0.0125,
-      'ceiling-paint': 0.0125,
-      'wall-N': 0.0125, 'wall-S': 0.0125, 'wall-E': 0.0125, 'wall-W': 0.0125,
-    };
-    for (let i = 0; i < CUBE_COLS * CUBE_ROWS; i++) {
-      REGION_UV_PER_M['cube-slot-' + i] = 0.125;
-    }
     // space1 準拠のブラシ寸法パラメータ
     const SPRAY_HALF_ANGLE  = Math.PI / 9;    // 20° (円錐半角)
     const SPRAY_MAX_WORLD_R = 1.0;            // 最大世界半径 1.0m (= 直径 2m)
     const SPRAY_MIN_UV_R    = 0.003;          // 下限 UV radius (space1 と同じ SPRAY_MIN_UVR)
-    //   flipU/flipV で左右・上下を反転できる (PlaneGeometry の UV は +Z 面基準で定義されるため、
-    //   背面方向から見る面 (wall-S, wall-W, ceiling) では見かけ上の左右・前後が反転する)
-    function _remapMeshUV(mesh, regionId, flipU, flipV) {
-      const r = ATLAS_REGIONS[regionId]; if (!r) return;
-      const uv = mesh.geometry.attributes.uv; if (!uv) return;
-      const [uMin, vMin, uMax, vMax] = r;
-      for (let i = 0; i < uv.count; i++) {
-        let u = uv.getX(i), v = uv.getY(i);
-        if (flipU) u = 1 - u;
-        if (flipV) v = 1 - v;
-        uv.setXY(i, uMin + u * (uMax - uMin), vMin + v * (vMax - vMin));
-      }
-      uv.needsUpdate = true;
+
+    // ===== メッシュごとに独立したペイント RT を割り当てる (space1 と同じ分離アプローチ) =====
+    //   旧: 1 枚のアトラスを複数メッシュで領域分割していたが、ブラシ半径が領域境界を跨ぐと
+    //       隣接する別メッシュ領域に塗料が漏れ、他のメッシュで誤った位置に paint が描かれる
+    //       原因になっていた (= 「別の地点にペイントされる」症状)。
+    //   新: 各メッシュが自分だけの WebGLRenderTarget を持ち、他メッシュと一切共有しない。
+    //       UV 変換も不要 (PlaneGeometry 標準の [0,1] × [0,1] をそのまま使う)。
+    //       raycast の hit.uv はそのまま paint shader の u_uvCenter に渡せる。
+    //       送受信は { tgt: mesh.name, u, v, c, r (uvR), s (seed) }。
+    const _paintables = new Map();   // mesh.name → mesh (sprayable 対象の lookup)
+    function _makePaintableRT(res) {
+      res = res || 512;
+      const rt = new THREE.WebGLRenderTarget(res, res, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        generateMipmaps: false,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+      rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+      rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+      // 透明初期化
+      const prev = renderer.getRenderTarget();
+      const oc = new THREE.Color(); renderer.getClearColor(oc);
+      const oa = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(rt);
+      renderer.clear();
+      renderer.setRenderTarget(prev);
+      renderer.setClearColor(oc, oa);
+      return rt;
     }
-    // GPU 側で 1 ドット描画 (space1 方式): shader quad を atlasRT に重ね描き。
-    //   第 4 引数は UV radius (0..1 のアトラス UV 単位)。未指定は 0.01 を既定とする。
-    //   seed はノイズ用の乱数。未指定時は現在時刻から生成。
-    function _drawAtlasDot(uvX, uvY, colorStr, uvR, seed) {
-      const r = (typeof uvR === 'number' && uvR > 0) ? uvR : 0.01;
+    // ペイント書き込み (任意の RT に shader pass)
+    function _applyPaintTo(rt, uvX, uvY, uvR, colorStr, seed) {
+      if (!rt) return;
       _paintShaderMat.uniforms.u_uvCenter.value.set(uvX, uvY);
-      _paintShaderMat.uniforms.u_radius.value = r;
+      _paintShaderMat.uniforms.u_radius.value = (typeof uvR === 'number' && uvR > 0) ? uvR : 0.01;
       _paintShaderMat.uniforms.u_color.value.set(colorStr);
       const seedN = (typeof seed === 'number') ? seed : Date.now();
-      const seedSmall = ((seedN >>> 0) % 100000) * 0.01;
-      _paintShaderMat.uniforms.u_seed.value = seedSmall;
+      _paintShaderMat.uniforms.u_seed.value = ((seedN >>> 0) % 100000) * 0.01;
       const prevTarget = renderer.getRenderTarget();
       const oldAutoClear = renderer.autoClear;
       renderer.autoClear = false;
-      renderer.setRenderTarget(_atlasRT);
+      renderer.setRenderTarget(rt);
       renderer.render(_paintScene, _paintCamera);
       renderer.setRenderTarget(prevTarget);
       renderer.autoClear = oldAutoClear;
     }
-    function _clearAtlas() {
-      const prevTarget = renderer.getRenderTarget();
-      const oldClear = new THREE.Color();
-      renderer.getClearColor(oldClear);
-      const oldAlpha = renderer.getClearAlpha();
-      renderer.setClearColor(0x000000, 0);
-      renderer.setRenderTarget(_atlasRT);
-      renderer.clear();
-      renderer.setRenderTarget(prevTarget);
-      renderer.setClearColor(oldClear, oldAlpha);
-    }
-    // CanvasTexture 方式で必要だったフレーム末尾フラッシュは不要 (shader paint は即時 GPU 反映)
-    window.__flushAtlasUpload = function () {};
-    // 初回に atlasRT を透明クリア (未初期化メモリによるノイズ描画を防止)
-    _clearAtlas();
-    // ペイントオーバーレイ用の共有マテリアル生成関数:
-    //   paint shader は非 premultiplied alpha で atlas RT に書き込むので、
-    //   こちらは標準の NormalBlending の transparent material で OK。
-    function _makeAtlasOverlayMaterial() {
-      return new THREE.MeshBasicMaterial({
-        map: _atlasTex,
-        transparent: true,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        fog: true,
+    function _clearAllPaintables() {
+      _paintables.forEach((m) => {
+        const rt = m.userData && m.userData.paintRT;
+        if (!rt) return;
+        const prev = renderer.getRenderTarget();
+        const oc = new THREE.Color(); renderer.getClearColor(oc);
+        const oa = renderer.getClearAlpha();
+        renderer.setClearColor(0x000000, 0);
+        renderer.setRenderTarget(rt);
+        renderer.clear();
+        renderer.setRenderTarget(prev);
+        renderer.setClearColor(oc, oa);
       });
     }
-    // 不透明ペイント素材: 白ベース + atlas 塗料を alpha ブレンド合成した結果を OPAQUE で出力。
-    //   オーバーレイ方式では overlay が wall solid の前で透明ソートが壊れる可能性があるため、
-    //   wall 自体の material をこれに差し替えて "塗料で色を変えるが、常に不透明な面" を実現する。
-    const _opaqueAtlasMaterials = new Set();   // fog 更新を伝播するための登録
-    function _makeOpaqueAtlasMaterial(baseColor) {
+    window.__flushAtlasUpload = function () {};   // 互換 no-op
+    // 互換ダミー (削除予定の旧 _atlasTex 参照を安全化)
+    const _atlasTex = null;
+    function _drawAtlasDot() {}
+    function _clearAtlas() { _clearAllPaintables(); }
+
+    // 不透明ペイント素材: 白ベース + paint RT を alpha ブレンド合成した結果を OPAQUE で出力。
+    //   メッシュごとに固有の RT を持ち、uv remap なしで PlaneGeometry 標準 UV を使う。
+    const _opaqueAtlasMaterials = new Set();
+    function _makeOpaqueAtlasMaterial(baseColor, paintTexture) {
       const col = new THREE.Color(baseColor);
       const mat = new THREE.ShaderMaterial({
         uniforms: {
-          uAtlas: { value: _atlasTex },
+          uPaint: { value: paintTexture },
           uBase:  { value: new THREE.Vector3(col.r, col.g, col.b) },
           fogColor:   { value: scene.fog ? scene.fog.color : new THREE.Color(0xffffff) },
           fogDensity: { value: scene.fog ? scene.fog.density : 0.0 },
@@ -1027,16 +983,15 @@
         `,
         fragmentShader: `
           precision highp float;
-          uniform sampler2D uAtlas;
+          uniform sampler2D uPaint;
           uniform vec3 uBase;
           uniform vec3 fogColor;
           uniform float fogDensity;
           varying vec2 vUv;
           varying float vFogDepth;
           void main() {
-            vec4 paint = texture2D(uAtlas, vUv);
+            vec4 paint = texture2D(uPaint, vUv);
             vec3 col = mix(uBase, paint.rgb, paint.a);
-            // FogExp2
             float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
             col = mix(col, fogColor, clamp(fogFactor, 0.0, 1.0));
             gl_FragColor = vec4(col, 1.0);
@@ -1047,7 +1002,6 @@
       _opaqueAtlasMaterials.add(mat);
       return mat;
     }
-    // fog 変更時に opaque atlas material 群へ伝播
     window.__syncOpaqueAtlasFog = function () {
       if (!scene.fog) return;
       _opaqueAtlasMaterials.forEach((m) => {
@@ -1055,27 +1009,36 @@
         if (m.uniforms && m.uniforms.fogColor) m.uniforms.fogColor.value.copy(scene.fog.color);
       });
     };
+    // paintable 化ヘルパ: 既存メッシュに paintRT を割り当て、material を opaque atlas shader に差し替える
+    //   worldSpanM: ブラシの uvR 計算用の "この面全体に対応する world 幅 (m)"
+    function _makePaintable(mesh, baseColor, worldSpanM, res) {
+      const rt = _makePaintableRT(res || 512);
+      mesh.userData.paintRT     = rt;
+      mesh.userData.worldSpanM  = worldSpanM;
+      mesh.material = _makeOpaqueAtlasMaterial(baseColor, rt.texture);
+      if (mesh.name) _paintables.set(mesh.name, mesh);
+      _sprayables.push(mesh);
+      return mesh;
+    }
 
     // ===== 外壁: 40m × 40m エリアを囲む高さ 20m の 4 面 =====
     const WALL_HALF = 20;
     const WALL_H_M  = 20;
     const WALL_SIDE = 40;
     function _makeWall(id, position, rotYDeg) {
-      // 壁 = 白ベース + atlas 塗料合成の OPAQUE 1 枚メッシュ (overlay 方式を廃止)
-      //   paint は shader 内で alpha ブレンドして最終 RGB を決める → 透明ソートの罠を回避
+      // 壁 = 白ベース + 自分専用 paint RT 合成の OPAQUE 1 枚メッシュ
+      //   UV remap なし (PlaneGeometry 標準 UV)、他メッシュと paint 共有せず
       const wall = new THREE.Mesh(
         new THREE.PlaneGeometry(WALL_SIDE, WALL_H_M),
-        _makeOpaqueAtlasMaterial(0xffffff)
+        new THREE.MeshBasicMaterial({ color: 0xffffff })   // 一時 material (後で _makePaintable が差替)
       );
       wall.position.copy(position);
       wall.rotation.y = rotYDeg * Math.PI / 180;
       wall.name = id;
       wall.receiveShadow = true;
-      // 壁は観測者から見て UV u 軸が反転するので flipU=true で修正 (左右逆転の矯正)
-      _remapMeshUV(wall, id, true, false);
-      wall.userData.sprayRegionId = id;
       scene.add(wall);
-      _sprayables.push(wall);
+      // worldSpanM: 幅 40m を基準 (brush uvR = worldR/40)
+      _makePaintable(wall, 0xffffff, WALL_SIDE, 512);
 
       // 1m グリッド (内側に薄グレー)
       //   PlaneGeometry は中心が原点なので local y 範囲 = -WALL_H_M/2 .. +WALL_H_M/2
@@ -1104,20 +1067,19 @@
     _makeWall('wall-E', new THREE.Vector3( WALL_HALF, WALL_H_M / 2, 0), -90);
     _makeWall('wall-W', new THREE.Vector3(-WALL_HALF, WALL_H_M / 2, 0),  90);
 
-    // ===== 床ペイントオーバーレイ (40m × 40m, y=0.03 で既存グリッドの直上) =====
+    // ===== 床ペイントメッシュ (40m × 40m, y=0.03 で既存グリッドの直上) =====
+    //   paint RT を自分で持つ opaque メッシュ (アトラス共有なし → 塗料漏れゼロ)
     {
-      const floorOverlay = new THREE.Mesh(
+      const floorPaint = new THREE.Mesh(
         new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
-        _makeAtlasOverlayMaterial()
+        new THREE.MeshBasicMaterial({ color: 0xffffff })   // 後で差替
       );
-      _remapMeshUV(floorOverlay, 'floor-paint');
-      floorOverlay.userData.sprayRegionId = 'floor-paint';
-      floorOverlay.rotation.x = -Math.PI / 2;
-      floorOverlay.position.set(0, 0.03, 0);
-      floorOverlay.name = 'floor-paint';
-      floorOverlay.renderOrder = 11;
-      scene.add(floorOverlay);
-      _sprayables.push(floorOverlay);
+      floorPaint.rotation.x = -Math.PI / 2;
+      floorPaint.position.set(0, 0.03, 0);
+      floorPaint.name = 'floor-paint';
+      floorPaint.renderOrder = 11;
+      scene.add(floorPaint);
+      _makePaintable(floorPaint, 0xffffff, 2 * WALL_HALF, 512);
     }
 
     // ===== 天面 (天井) 40m × 40m, 高さ WALL_H_M =====
@@ -1126,17 +1088,14 @@
     {
       const ceiling = new THREE.Mesh(
         new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
-        _makeOpaqueAtlasMaterial(0xffffff)
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
       );
       ceiling.rotation.x = Math.PI / 2;   // 床と逆の向き (法線 -Y = 下向きに内側)
       ceiling.position.set(0, WALL_H_M, 0);
       ceiling.name = 'ceiling';
       ceiling.receiveShadow = true;
-      // 天井は床と向きが逆なので UV v を反転 (前後軸の反転矯正)
-      _remapMeshUV(ceiling, 'ceiling-paint', false, true);
-      ceiling.userData.sprayRegionId = 'ceiling-paint';
       scene.add(ceiling);
-      _sprayables.push(ceiling);
+      _makePaintable(ceiling, 0xffffff, 2 * WALL_HALF, 512);
 
       // 1m グリッド (ceiling の下面に薄グレー) — 床と同じ密度 (41 + 41 本)
       const _cLines = [];
@@ -1156,37 +1115,9 @@
       scene.add(_cGrid);
     }
 
-    // ===== 可動 Cube/Box: 共有アトラスのスロットに UV remap + 材質共有 =====
-    //   ・各 Cube は 16 スロット (4×4) のいずれかを占有 (背景色を事前塗布)
-    //   ・BoxGeometry 標準 UV は 6 面共有なので、1 面に塗ると全面反映 (従前と同じ簡易方式)
-    //   ・材質は _atlasTex を map に持つ MeshStandardMaterial で統一 → 1 枚テクスチャで全描画
-    {
-      let slotIdx = 0;
-      for (const c of movableCubes) {
-        if (!c || !c.material) continue;
-        if (Array.isArray(c.material)) continue;
-        if (c.material.isShaderMaterial || c.material.isRawShaderMaterial) continue;
-        if (!c.geometry || c.geometry.type !== 'BoxGeometry') continue;
-        if (slotIdx >= CUBE_COLS * CUBE_ROWS) break;
-        const slotId = 'cube-slot-' + slotIdx;
-        // 旧 CanvasTexture 方式の背景色プレフィル処理は撤去 (shader paint 方式では
-        //   アトラスは透明のまま保ち、塗った部分だけが現れる = オーバーレイ思想に統一)
-        void ATLAS_REGIONS[slotId];
-        _remapMeshUV(c, slotId);
-        const oldMat = c.material;
-        c.material = new THREE.MeshStandardMaterial({
-          map: _atlasTex, color: 0xffffff,
-          roughness: oldMat.roughness != null ? oldMat.roughness : 0.8,
-          metalness: oldMat.metalness != null ? oldMat.metalness : 0.1,
-          transparent: !!oldMat.transparent,
-          opacity: oldMat.opacity != null ? oldMat.opacity : 1,
-        });
-        c.userData.atlasSlot = slotId;
-        c.userData.sprayRegionId = slotId;
-        slotIdx++;
-        _sprayables.push(c);
-      }
-    }
+    // 可動 Cube/Box: 現状 movableCubes は空のため何もしない (将来再有効化する場合は
+    //   _makePaintable(cube, baseColor, worldSpanM=1, 128) で各 cube に独立 paint RT を割り当て)
+    void movableCubes;
 
     // キャンバスにブラシ 1 発描く (u,v は 0..1、color は #rrggbb or 数値)
     function _drawSprayDot(u, v, colorStr) {
@@ -1255,24 +1186,28 @@
       const hits = _sprayRay.intersectObjects(_sprayables, false);
       if (hits.length === 0 || !hits[0].uv) return;
       const hit = hits[0];
-      const uv = hit.uv;   // ← メッシュの UV は remap 済みなので、そのままアトラス UV
-      // 診断: 新しい対象をヒットしたら 1 回だけログを出す (壁に当たっているか切り分け用)
+      const uv = hit.uv;
+      const target = hit.object;
+      const tgtName = (target && target.name) || '';
+      const rt = target && target.userData && target.userData.paintRT;
+      if (!rt) return;
+      // 診断: 新しい対象をヒットしたら 1 回だけログ
       if (!window.__sprayHitSeen) window.__sprayHitSeen = new Set();
-      const hitName = (hit.object && hit.object.name) || '?';
-      if (!window.__sprayHitSeen.has(hitName)) {
-        window.__sprayHitSeen.add(hitName);
-        log('spray hit → ' + hitName + ' @ ' + hit.distance.toFixed(2) + 'm', 'ok');
+      if (!window.__sprayHitSeen.has(tgtName)) {
+        window.__sprayHitSeen.add(tgtName);
+        log('spray hit → ' + tgtName + ' @ ' + hit.distance.toFixed(2) + 'm', 'ok');
       }
       const colorHex = (state.myColor || '#ffffff').replace('#', '');
-      // space1 準拠: 円錐 half-angle から世界半径 → MAX クランプ → アトラス UV radius に変換
+      // space1 準拠: 世界半径 → この面の worldSpan で UV 半径に変換 (self-contained RT なので
+      //   領域境界を跨ぐ心配はなく、他メッシュへの漏れは発生しない)
       const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
-      const regionId = hit.object && hit.object.userData && hit.object.userData.sprayRegionId;
-      const uvPerM = (regionId && REGION_UV_PER_M[regionId]) || 0.0125;
-      const uvR = Math.max(SPRAY_MIN_UV_R, worldR * uvPerM);
+      const worldSpan = (target.userData.worldSpanM) || 1.0;
+      const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
-      _drawAtlasDot(uv.x, uv.y, '#' + colorHex, uvR, seed);
+      _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
       if (socket && socket.connected) {
         const payload = {
+          tgt: tgtName,
           u: +uv.x.toFixed(4),
           v: +uv.y.toFixed(4),
           c: colorHex,
@@ -1283,7 +1218,7 @@
         if (window._space2Fallback) socket.emit('spray', payload);
         if (!window._sprayEmitLogged) {
           window._sprayEmitLogged = true;
-          log('spray2 emit (初回): u=' + payload.u + ' v=' + payload.v + ' uvR=' + payload.r, 'ok');
+          log('spray2 emit (初回): tgt=' + tgtName + ' u=' + payload.u + ' v=' + payload.v + ' uvR=' + payload.r, 'ok');
         }
       }
     }
@@ -3131,30 +3066,30 @@
       });
 
       // space2 専用スプレー受信: space3 の 'spray' / 'sprayBatch' は購読せず相互影響を遮断
-      socket.on('spray2', (data) => {
+      function _applyRemoteSpray(data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+        if (!data.tgt) return;
+        const mesh = _paintables.get(data.tgt);
+        if (!mesh) return;
+        const rt = mesh.userData.paintRT; if (!rt) return;
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
-        const uvR = (typeof data.r === 'number') ? data.r : undefined;
-        _drawAtlasDot(data.u, data.v, color, uvR, data.s);
+        const uvR = (typeof data.r === 'number') ? data.r : 0.01;
+        _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
+      }
+      socket.on('spray2', (data) => {
+        _applyRemoteSpray(data);
         if (!window._sprayRecvLogged) {
           window._sprayRecvLogged = true;
           log('spray2 受信 (初回): サーバー経由同期 OK', 'ok');
         }
       });
       socket.on('spray', (data) => {
-        if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
-        if (typeof data.r !== 'number') return;   // space3 由来は無視
-        const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
-        _drawAtlasDot(data.u, data.v, color, data.r, data.s);
+        if (!data || typeof data.r !== 'number') return;   // space3 由来は無視
+        _applyRemoteSpray(data);
       });
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) {
-          if (!d || typeof d.u !== 'number' || typeof d.v !== 'number') continue;
-          const color = (typeof d.c === 'string') ? ('#' + d.c) : '#ffffff';
-          const uvR = (typeof d.r === 'number') ? d.r : undefined;
-          _drawAtlasDot(d.u, d.v, color, uvR, d.s);
-        }
+        for (const d of list) _applyRemoteSpray(d);
         log('sprayBatch2 recv: ' + list.length + ' pts', 'ok');
       });
       // space2 専用アトラスリセット
