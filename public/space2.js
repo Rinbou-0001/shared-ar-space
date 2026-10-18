@@ -157,7 +157,7 @@
     );
     // 全ロール共通: 入室座標 (0, 1, 0)、初期回転 Yaw=-90°, Pitch=0, Roll=0
     //   Euler(pitch=0, yaw=-π/2, roll=0, 'YXZ') → +X 方向を見る
-    const SPAWN_POS = { x: 0, y: 1.3, z: 0 };
+    const SPAWN_POS = { x: 0, y: 1.5, z: 0 };
     const INIT_YAW = -Math.PI / 2;   // -90°
     const INIT_PITCH = 0;
     const INIT_ROLL = 0;
@@ -1195,19 +1195,39 @@
       camera.getWorldPosition(_sprayOrigin);
       camera.getWorldDirection(_sprayDir);
       _sprayRay.set(_sprayOrigin, _sprayDir);
+      // 診断: 初回スプレー時に _sprayables の中身を一度だけ列挙
+      if (!window.__sprayablesListed) {
+        window.__sprayablesListed = true;
+        const names = _sprayables.map((m) => m.name || '(anon)' + (m.visible === false ? '[hidden]' : ''));
+        log('_sprayables: ' + names.join(', '), 'ok');
+      }
+      // 診断: カメラ方向を 10 発ごとにログ
+      if (!window.__sprayDirCount) window.__sprayDirCount = 0;
+      window.__sprayDirCount++;
+      if (window.__sprayDirCount % 10 === 1) {
+        log('cam fwd=(' + _sprayDir.x.toFixed(2) + ',' + _sprayDir.y.toFixed(2) + ',' + _sprayDir.z.toFixed(2) +
+            ') pos=(' + _sprayOrigin.x.toFixed(1) + ',' + _sprayOrigin.y.toFixed(1) + ',' + _sprayOrigin.z.toFixed(1) + ')', 'ok');
+      }
       const hits = _sprayRay.intersectObjects(_sprayables, false);
-      if (hits.length === 0 || !hits[0].uv) return;
+      if (hits.length === 0 || !hits[0].uv) {
+        if (window.__sprayDirCount % 10 === 1) log('no hit', 'err');
+        return;
+      }
       const hit = hits[0];
       const uv = hit.uv;
       const target = hit.object;
       const tgtName = (target && target.name) || '';
       const rt = target && target.userData && target.userData.paintRT;
-      if (!rt) return;
+      if (!rt) {
+        log('hit=' + tgtName + ' だが paintRT 無し (スキップ)', 'err');
+        return;
+      }
       // 診断: 新しい対象をヒットしたら 1 回だけログ
       if (!window.__sprayHitSeen) window.__sprayHitSeen = new Set();
       if (!window.__sprayHitSeen.has(tgtName)) {
         window.__sprayHitSeen.add(tgtName);
-        log('spray hit → ' + tgtName + ' @ ' + hit.distance.toFixed(2) + 'm', 'ok');
+        log('spray hit → ' + tgtName + ' @ ' + hit.distance.toFixed(2) + 'm uv=(' +
+            uv.x.toFixed(3) + ',' + uv.y.toFixed(3) + ')', 'ok');
       }
       const colorHex = (state.myColor || '#ffffff').replace('#', '');
       // space1 準拠: 世界半径 → この面の worldSpan で UV 半径に変換 (self-contained RT なので
