@@ -452,15 +452,18 @@ io.on('connection', (socket) => {
     if (typeof cb === 'function') cb({ ok: true, version: 'spray2', ts: Date.now() });
   });
 
-  // space2 専用スプレー (アトラス UV; space3 と履歴を分離するため別イベント名)
-  //   data: { u, v, c, r?, s? }
-  //     r = アトラス UV radius (0..1 の小数)
-  //     s = ノイズ seed (整数、全クライアントで同じ粒パターンを再現するため)
+  // space2 専用スプレー (space3 と履歴を分離するため別イベント名)
+  //   data: { tgt, u, v, c, r?, s? }
+  //     tgt = ペイント対象のメッシュ名 ('wall-N' | 'wall-S' | 'wall-E' | 'wall-W' | 'floor-paint' | 'ceiling' 等)
+  //     u, v = 対象メッシュ標準 UV (0..1)
+  //     r = UV radius (0..1 の小数)
+  //     s = ノイズ seed
   socket.on('spray2', (data) => {
     if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
     if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return;
     const c = (typeof data.c === 'string') ? data.c.slice(0, 6) : 'ffffff';
     const rec = { u: data.u, v: data.v, c };
+    if (typeof data.tgt === 'string' && data.tgt.length > 0 && data.tgt.length < 64) rec.tgt = data.tgt;
     if (typeof data.r === 'number' && data.r > 0 && data.r < 1)   rec.r = data.r;
     if (typeof data.s === 'number' && isFinite(data.s))           rec.s = data.s >>> 0;
     sprayHistory2.push(rec);
