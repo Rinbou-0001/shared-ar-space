@@ -1210,11 +1210,38 @@
       _tcRotate.setSize(1.1);
       _tcRotate.setSpace('local');
       scene.add(_tcRotate);
-      const onDrag = (e) => { window.__tcDragging = !!e.value; };
-      _tcTranslate.addEventListener('dragging-changed', onDrag);
-      _tcRotate.addEventListener('dragging-changed', onDrag);
-      _tcTranslate.addEventListener('objectChange', _emitSelectedPose);
-      _tcRotate.addEventListener('objectChange', _emitSelectedPose);
+      // 感度を 1/3 に抑制: ドラッグ開始時の pos/quat を保存し、
+      //   objectChange で TC が設定した "期待値" から 1/3 の変化だけ採用
+      const GIZMO_GAIN = 1 / 3;
+      let _tDragStart = null;   // translate 開始時の position
+      let _rDragStart = null;   // rotate 開始時の quaternion
+      _tcTranslate.addEventListener('dragging-changed', (e) => {
+        window.__tcDragging = !!e.value;
+        _tDragStart = (e.value && _tcTranslate.object) ? _tcTranslate.object.position.clone() : null;
+      });
+      _tcRotate.addEventListener('dragging-changed', (e) => {
+        window.__tcDragging = !!e.value;
+        _rDragStart = (e.value && _tcRotate.object) ? _tcRotate.object.quaternion.clone() : null;
+      });
+      _tcTranslate.addEventListener('objectChange', () => {
+        if (_tDragStart && _tcTranslate.object) {
+          // 現在 TC が設定した位置 → start + full_offset
+          //   scaled = start + full_offset * GAIN
+          const obj = _tcTranslate.object;
+          const _delta = obj.position.clone().sub(_tDragStart);
+          obj.position.copy(_tDragStart).addScaledVector(_delta, GIZMO_GAIN);
+        }
+        _emitSelectedPose();
+      });
+      _tcRotate.addEventListener('objectChange', () => {
+        if (_rDragStart && _tcRotate.object) {
+          // 現在 quat (= start * full rotation) に向かって start から GAIN だけ slerp
+          const obj = _tcRotate.object;
+          const _qFull = obj.quaternion.clone();
+          obj.quaternion.copy(_rDragStart).slerp(_qFull, GIZMO_GAIN);
+        }
+        _emitSelectedPose();
+      });
     }
     function _attachGizmosTo(obj) {
       if (!_tcTranslate) return;
@@ -3700,7 +3727,31 @@
         if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
         keys.add(e.code);
       });
-      window.addEventListener('keyup', (e) => keys.delete(e.code));
+      // 観測者 avatar の WASD 移動は "終了時のみ同期" にするため、保留状態を保持
+      let _wasdAvatarPending = null;   // { avatarId, grp } | null
+      function _flushAvatarPending() {
+        if (!_wasdAvatarPending) return;
+        const p = _wasdAvatarPending;
+        if (socket && socket.connected && p.grp) {
+          const q = p.grp.quaternion;
+          socket.emit('controlPose', {
+            targetId: p.avatarId,
+            x: p.grp.position.x, y: p.grp.position.y, z: p.grp.position.z,
+            qx: q.x, qy: q.y, qz: q.z, qw: q.w,
+          });
+        }
+        _wasdAvatarPending = null;
+      }
+      window.addEventListener('keyup', (e) => {
+        keys.delete(e.code);
+        // WASDQE いずれかの keyup → すべて離されたら avatar の最終位置を送信
+        if (['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE'].indexOf(e.code) >= 0) {
+          const anyDown = ['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE'].some((k) => keys.has(k));
+          if (!anyDown) _flushAvatarPending();
+        }
+      });
+      // 選択解除/フォーカスロスでも flush
+      window.addEventListener('blur', _flushAvatarPending);
 
       const moveTmp = new THREE.Vector3();
       let _sceneObjSentAt = 0;
@@ -3734,24 +3785,20 @@
             target.position.x = Math.max(-HL2, Math.min(HL2, target.position.x));
             target.position.z = Math.max(-HL2, Math.min(HL2, target.position.z));
             target.position.y = Math.max(0.05, Math.min(50, target.position.y));
-            const now = performance.now();
-            if (now - _sceneObjSentAt > 40) {
-              _sceneObjSentAt = now;
-              if (socket && socket.connected) {
-                if (u.sceneObjectId) {
+            // observer avatar は "終了時のみ送信" (= WASD 全キー離した時に _flushAvatarPending で emit)
+            if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
+              _wasdAvatarPending = { avatarId: u.avatarId, grp: target };
+            } else if (u.sceneObjectId) {
+              const now = performance.now();
+              if (now - _sceneObjSentAt > 40) {
+                _sceneObjSentAt = now;
+                if (socket && socket.connected) {
                   window.__selfMovingObjId = u.sceneObjectId;
                   clearTimeout(window.__selfMovingObjTimer);
                   window.__selfMovingObjTimer = setTimeout(() => { window.__selfMovingObjId = null; }, 200);
                   socket.emit('sceneObjectPose', {
                     id: u.sceneObjectId,
                     x: target.position.x, y: target.position.y, z: target.position.z,
-                  });
-                } else if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
-                  const q = target.quaternion;
-                  socket.emit('controlPose', {
-                    targetId: u.avatarId,
-                    x: target.position.x, y: target.position.y, z: target.position.z,
-                    qx: q.x, qy: q.y, qz: q.z, qw: q.w,
                   });
                 }
               }
