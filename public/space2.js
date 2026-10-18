@@ -942,12 +942,16 @@
     const SPRAY_HALF_ANGLE  = Math.PI / 9;    // 20° (円錐半角)
     const SPRAY_MAX_WORLD_R = 1.0;            // 最大世界半径 1.0m (= 直径 2m)
     const SPRAY_MIN_UV_R    = 0.003;          // 下限 UV radius (space1 と同じ SPRAY_MIN_UVR)
-    function _remapMeshUV(mesh, regionId) {
+    //   flipU/flipV で左右・上下を反転できる (PlaneGeometry の UV は +Z 面基準で定義されるため、
+    //   背面方向から見る面 (wall-S, wall-W, ceiling) では見かけ上の左右・前後が反転する)
+    function _remapMeshUV(mesh, regionId, flipU, flipV) {
       const r = ATLAS_REGIONS[regionId]; if (!r) return;
       const uv = mesh.geometry.attributes.uv; if (!uv) return;
       const [uMin, vMin, uMax, vMax] = r;
       for (let i = 0; i < uv.count; i++) {
-        const u = uv.getX(i), v = uv.getY(i);
+        let u = uv.getX(i), v = uv.getY(i);
+        if (flipU) u = 1 - u;
+        if (flipV) v = 1 - v;
         uv.setXY(i, uMin + u * (uMax - uMin), vMin + v * (vMax - vMin));
       }
       uv.needsUpdate = true;
@@ -1067,7 +1071,8 @@
       wall.rotation.y = rotYDeg * Math.PI / 180;
       wall.name = id;
       wall.receiveShadow = true;
-      _remapMeshUV(wall, id);
+      // 壁は観測者から見て UV u 軸が反転するので flipU=true で修正 (左右逆転の矯正)
+      _remapMeshUV(wall, id, true, false);
       wall.userData.sprayRegionId = id;
       scene.add(wall);
       _sprayables.push(wall);
@@ -1127,7 +1132,8 @@
       ceiling.position.set(0, WALL_H_M, 0);
       ceiling.name = 'ceiling';
       ceiling.receiveShadow = true;
-      _remapMeshUV(ceiling, 'ceiling-paint');
+      // 天井は床と向きが逆なので UV v を反転 (前後軸の反転矯正)
+      _remapMeshUV(ceiling, 'ceiling-paint', false, true);
       ceiling.userData.sprayRegionId = 'ceiling-paint';
       scene.add(ceiling);
       _sprayables.push(ceiling);
@@ -2443,16 +2449,9 @@
         );
         grp.add(av.mesh);
       }
-      // ---- スマホ (camera role): 姿勢センサー由来の 3D レイ ----
-      //   ・camera.quaternion は setupDeviceOrientation により phone の実姿勢を反映
-      //   ・grp.quaternion は毎フレーム camera pose と同期 (tick 内)
-      //   ・スマホの「上方向」(端末の top edge = local +Y) を基準に、
-      //     avatar 位置 (apex, grp 原点) から +Y 方向へ 5m の Line を伸ばす
-      if (role === 'camera') {
-        const ray = makeAvatarPointerRay(av.color);
-        av.pointer = ray;
-        grp.add(ray);
-      }
+      // ---- スマホ (camera role): 画面上部から伸びるポインター線は廃止 ----
+      //   旧仕様では avatar 原点から +Y 方向へ 5m のラインを描画していたが、
+      //   ユーザー指示により削除。avatar は視錐台のみで表現する。
       scene.add(grp);
       // 効果3 (fog 原点固定) が ON の場合、新規マテリアルも patch
       if (typeof _patchSceneFog === 'function') _patchSceneFog();
