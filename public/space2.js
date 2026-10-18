@@ -824,7 +824,7 @@
     //   新: WebGLRenderTarget に ShaderMaterial で直接 GPU 描画
     //       → ドットごとの CPU→GPU 転送が消滅、フレームレート劣化が構造的に発生しない
     const ATLAS_W = 1024;
-    const ATLAS_H = 512;
+    const ATLAS_H = 1024;   // 1024×1024: 床 + 天井 + 4 壁 + cube を均等密度 (12.8 px/m) で収容
     const _atlasRT = new THREE.WebGLRenderTarget(ATLAS_W, ATLAS_H, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -836,7 +836,9 @@
     });
     _atlasRT.texture.wrapS = THREE.ClampToEdgeWrapping;
     _atlasRT.texture.wrapT = THREE.ClampToEdgeWrapping;
-    // ペイント shader (space1 からの移植: 粒状感 + OVER ブレンドで層状蓄積)
+    // ペイント shader: 粒状感 + 標準 (非 premultiplied) alpha で RT に層状蓄積
+    //   non-premultiplied にすることで overlay 側は三者標準の NormalBlending のまま
+    //   読み出せる (alpha の二重乗算が起きない)。
     const _paintShaderMat = new THREE.ShaderMaterial({
       uniforms: {
         u_uvCenter: { value: new THREE.Vector2(0.5, 0.5) },
@@ -876,7 +878,8 @@
           float threshold = 1.0 - falloff * u_density;
           if (n < threshold) discard;
           float alpha = clamp(falloff * 0.6 + 0.25, 0.0, 1.0);
-          gl_FragColor = vec4(u_color * alpha, alpha);
+          // 非 premultiplied alpha で出力 (overlay 側は NormalBlending)
+          gl_FragColor = vec4(u_color, alpha);
         }
       `,
       transparent: true,
@@ -884,7 +887,7 @@
       depthWrite: false,
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
-      blendSrc: THREE.OneFactor,
+      blendSrc: THREE.SrcAlphaFactor,
       blendDst: THREE.OneMinusSrcAlphaFactor,
       blendEquationAlpha: THREE.AddEquation,
       blendSrcAlpha: THREE.OneFactor,
@@ -897,19 +900,20 @@
     // 外部メッシュ参照互換用 (旧コードが _atlasTex を直接参照していた箇所に備える)
     const _atlasTex = _atlasRT.texture;
 
-    // アトラス領域 (UV 0..1 座標): [uMin, vMin, uMax, vMax]
-    //   各面で縦横の px/m 密度を等方にして「真円のブラシ」が描けるように配分する
-    //   ・床 40×40m → 512×512 (12.8 px/m 等方)
-    //   ・壁 40×20m → 256×128 × 4 (6.4 px/m 等方)
-    //   ・Cube 1×1m  → 128×128 × 16 (128 px/m 等方)  (8×2 グリッド)
+    // アトラス領域 (UV 0..1 座標): [uMin, vMin, uMax, vMax] — 1024×1024 全体で均等 12.8 px/m
+    //   ・床 40×40m → (0..0.5, 0.5..1.0) 512×512 (12.8 px/m 等方)
+    //   ・天井 40×40m → (0.5..1.0, 0.5..1.0) 512×512 (12.8 px/m 等方)
+    //   ・壁 40×20m × 4 → (0..1.0, 0.25..0.5) 2×2 split = 512×256 (12.8 px/m 等方)
+    //   ・Cube 用 → (0..1.0, 0..0.25) 8×1 split = 128×256 (ほぼ未使用)
     const ATLAS_REGIONS = {
-      'floor-paint': [0.00, 0.50, 0.50, 1.00],   // 512×512
-      'wall-N':      [0.50, 0.75, 0.75, 1.00],   // 256×128
-      'wall-S':      [0.75, 0.75, 1.00, 1.00],
-      'wall-E':      [0.50, 0.50, 0.75, 0.75],
-      'wall-W':      [0.75, 0.50, 1.00, 0.75],
+      'floor-paint':   [0.00, 0.50, 0.50, 1.00],
+      'ceiling-paint': [0.50, 0.50, 1.00, 1.00],
+      'wall-N':        [0.00, 0.375, 0.50, 0.50],
+      'wall-S':        [0.50, 0.375, 1.00, 0.50],
+      'wall-E':        [0.00, 0.25, 0.50, 0.375],
+      'wall-W':        [0.50, 0.25, 1.00, 0.375],
     };
-    const CUBE_COLS = 8, CUBE_ROWS = 2;   // 8×2 = 16 セル、1 セル 128×128 px、128 px/m 等方
+    const CUBE_COLS = 8, CUBE_ROWS = 1;   // 8×1 = 8 セル、1 セル 128×256 px (使用機会は少ない)
     for (let rr = 0; rr < CUBE_ROWS; rr++) {
       for (let cc = 0; cc < CUBE_COLS; cc++) {
         const idx = rr * CUBE_COLS + cc;
@@ -927,8 +931,9 @@
     //          → shader radius に 0.00625 を使うと水平 1m / 垂直 0.5m の楕円 (space1 と同挙動)
     //   cube : 0.125 UV / 1m = 0.125 UV/m   (縦は 0.25 UV / 1m = 0.25 UV/m)
     const REGION_UV_PER_M = {
-      'floor-paint': 0.0125,
-      'wall-N': 0.00625, 'wall-S': 0.00625, 'wall-E': 0.00625, 'wall-W': 0.00625,
+      'floor-paint':   0.0125,
+      'ceiling-paint': 0.0125,
+      'wall-N': 0.0125, 'wall-S': 0.0125, 'wall-E': 0.0125, 'wall-W': 0.0125,
     };
     for (let i = 0; i < CUBE_COLS * CUBE_ROWS; i++) {
       REGION_UV_PER_M['cube-slot-' + i] = 0.125;
@@ -982,9 +987,8 @@
     // 初回に atlasRT を透明クリア (未初期化メモリによるノイズ描画を防止)
     _clearAtlas();
     // ペイントオーバーレイ用の共有マテリアル生成関数:
-    //   paint shader は OVER の premultiplied alpha で atlas に書き込む (RGB は alpha で前乗算済み) ため、
-    //   オーバーレイ側も CustomBlending (OneFactor, OneMinusSrcAlphaFactor) で描画しないと alpha が二重に
-    //   乗って見えなくなる (= 「スプレーが壁に届いていないように見える」原因)。
+    //   paint shader は非 premultiplied alpha で atlas RT に書き込むので、
+    //   こちらは標準の NormalBlending の transparent material で OK。
     function _makeAtlasOverlayMaterial() {
       return new THREE.MeshBasicMaterial({
         map: _atlasTex,
@@ -992,48 +996,81 @@
         side: THREE.DoubleSide,
         depthWrite: false,
         fog: true,
-        blending: THREE.CustomBlending,
-        blendEquation: THREE.AddEquation,
-        blendSrc: THREE.OneFactor,
-        blendDst: THREE.OneMinusSrcAlphaFactor,
-        blendEquationAlpha: THREE.AddEquation,
-        blendSrcAlpha: THREE.OneFactor,
-        blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
       });
     }
+    // 不透明ペイント素材: 白ベース + atlas 塗料を alpha ブレンド合成した結果を OPAQUE で出力。
+    //   オーバーレイ方式では overlay が wall solid の前で透明ソートが壊れる可能性があるため、
+    //   wall 自体の material をこれに差し替えて "塗料で色を変えるが、常に不透明な面" を実現する。
+    const _opaqueAtlasMaterials = new Set();   // fog 更新を伝播するための登録
+    function _makeOpaqueAtlasMaterial(baseColor) {
+      const col = new THREE.Color(baseColor);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uAtlas: { value: _atlasTex },
+          uBase:  { value: new THREE.Vector3(col.r, col.g, col.b) },
+          fogColor:   { value: scene.fog ? scene.fog.color : new THREE.Color(0xffffff) },
+          fogDensity: { value: scene.fog ? scene.fog.density : 0.0 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying float vFogDepth;
+          void main() {
+            vUv = uv;
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            vFogDepth = -mvPos.z;
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          precision highp float;
+          uniform sampler2D uAtlas;
+          uniform vec3 uBase;
+          uniform vec3 fogColor;
+          uniform float fogDensity;
+          varying vec2 vUv;
+          varying float vFogDepth;
+          void main() {
+            vec4 paint = texture2D(uAtlas, vUv);
+            vec3 col = mix(uBase, paint.rgb, paint.a);
+            // FogExp2
+            float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);
+            col = mix(col, fogColor, clamp(fogFactor, 0.0, 1.0));
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `,
+        side: THREE.DoubleSide,
+      });
+      _opaqueAtlasMaterials.add(mat);
+      return mat;
+    }
+    // fog 変更時に opaque atlas material 群へ伝播
+    window.__syncOpaqueAtlasFog = function () {
+      if (!scene.fog) return;
+      _opaqueAtlasMaterials.forEach((m) => {
+        if (m.uniforms && m.uniforms.fogDensity) m.uniforms.fogDensity.value = scene.fog.density;
+        if (m.uniforms && m.uniforms.fogColor) m.uniforms.fogColor.value.copy(scene.fog.color);
+      });
+    };
 
     // ===== 外壁: 40m × 40m エリアを囲む高さ 20m の 4 面 =====
     const WALL_HALF = 20;
     const WALL_H_M  = 20;
     const WALL_SIDE = 40;
     function _makeWall(id, position, rotYDeg) {
-      // ソリッド壁 (白、内側向き)
+      // 壁 = 白ベース + atlas 塗料合成の OPAQUE 1 枚メッシュ (overlay 方式を廃止)
+      //   paint は shader 内で alpha ブレンドして最終 RGB を決める → 透明ソートの罠を回避
       const wall = new THREE.Mesh(
         new THREE.PlaneGeometry(WALL_SIDE, WALL_H_M),
-        new THREE.MeshStandardMaterial({
-          color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
-        })
+        _makeOpaqueAtlasMaterial(0xffffff)
       );
       wall.position.copy(position);
       wall.rotation.y = rotYDeg * Math.PI / 180;
       wall.name = id;
       wall.receiveShadow = true;
+      _remapMeshUV(wall, id);
+      wall.userData.sprayRegionId = id;
       scene.add(wall);
-
-      // ペイントオーバーレイ (壁の内側 0.05m 手前、アトラス共有)
-      const overlay = new THREE.Mesh(
-        new THREE.PlaneGeometry(WALL_SIDE, WALL_H_M),
-        _makeAtlasOverlayMaterial()
-      );
-      _remapMeshUV(overlay, id);
-      overlay.userData.sprayRegionId = id;   // ブラシ密度参照用
-      // 壁の内側 5cm 手前にオーバーレイを配置 (z-fighting 回避 + raycast 確実化)
-      const inward = new THREE.Vector3(0, 0, 1).applyEuler(wall.rotation);
-      overlay.position.copy(position).add(inward.multiplyScalar(0.05));
-      overlay.rotation.copy(wall.rotation);
-      overlay.name = id + '-paint';
-      overlay.renderOrder = 10;
-      scene.add(overlay);
+      _sprayables.push(wall);
 
       // 1m グリッド (内側に薄グレー)
       //   PlaneGeometry は中心が原点なので local y 範囲 = -WALL_H_M/2 .. +WALL_H_M/2
@@ -1055,7 +1092,6 @@
       gridLines.rotation.copy(wall.rotation);
       scene.add(gridLines);
 
-      _sprayables.push(overlay);
       return wall;
     }
     _makeWall('wall-N', new THREE.Vector3(0, WALL_H_M / 2, -WALL_HALF),   0);
@@ -1081,20 +1117,20 @@
 
     // ===== 天面 (天井) 40m × 40m, 高さ WALL_H_M =====
     //   ・床と同じ形状を天高に配置し、内側 (下向き) 向きにする
-    //   ・床と同じく 1m グリッドを下面に貼る
-    //   ・現状スプレーは当たらない (ceiling 専用のアトラス領域は未割当だが、将来追加可能)
+    //   ・スプレー可能 (ceiling-paint アトラス領域使用)、下面に 1m グリッド
     {
       const ceiling = new THREE.Mesh(
         new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
-        new THREE.MeshStandardMaterial({
-          color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
-        })
+        _makeOpaqueAtlasMaterial(0xffffff)
       );
       ceiling.rotation.x = Math.PI / 2;   // 床と逆の向き (法線 -Y = 下向きに内側)
       ceiling.position.set(0, WALL_H_M, 0);
       ceiling.name = 'ceiling';
       ceiling.receiveShadow = true;
+      _remapMeshUV(ceiling, 'ceiling-paint');
+      ceiling.userData.sprayRegionId = 'ceiling-paint';
       scene.add(ceiling);
+      _sprayables.push(ceiling);
 
       // 1m グリッド (ceiling の下面に薄グレー) — 床と同じ密度 (41 + 41 本)
       const _cLines = [];
@@ -3084,6 +3120,7 @@
         if (!data || !scene.fog) return;
         if (typeof data.density === 'number' && isFinite(data.density)) {
           scene.fog.density = Math.max(0, Math.min(1, data.density));
+          if (typeof window.__syncOpaqueAtlasFog === 'function') window.__syncOpaqueAtlasFog();
           // master パネルの入力欄と現在値表示を同期 (dirty 中は上書きしない)
           const inp = document.getElementById('m-fog-density');
           const dirty = window.__mIsDirty || (() => false);
