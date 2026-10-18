@@ -819,22 +819,83 @@
     //   属性を自領域に remap することで独立に塗り分けられる。1 ドットの GPU 再アップロードは
     //   常にアトラス 1 回のみ (space1 と同じコスト構造)。raycaster の hits[0].uv は remap 後なので
     //   そのままアトラス UV として draw に使える。送受信は { u, v, c } 形式 (アトラス UV)。
-    //   ・サイズは space1 と同じ 1024×512 (2 MB/dot) に揃える
-    //   ・minFilter=Linear + generateMipmaps=false で mip 再生成コストを除去 (mobile で致命的)
-    //   ・anisotropy は非設定 (mip 連動のため不要)
+    //   【B 案: space1 方式の shader paint + WebGLRenderTarget に置換】
+    //   旧: CanvasTexture (Canvas 2D API で描画→毎回 GPU 再アップロード)
+    //   新: WebGLRenderTarget に ShaderMaterial で直接 GPU 描画
+    //       → ドットごとの CPU→GPU 転送が消滅、フレームレート劣化が構造的に発生しない
     const ATLAS_W = 1024;
     const ATLAS_H = 512;
-    const _atlasCanvas = document.createElement('canvas');
-    _atlasCanvas.width  = ATLAS_W;
-    _atlasCanvas.height = ATLAS_H;
-    const _atlasCtx = _atlasCanvas.getContext('2d');
-    _atlasCtx.clearRect(0, 0, ATLAS_W, ATLAS_H);
-    const _atlasTex = new THREE.CanvasTexture(_atlasCanvas);
-    _atlasTex.wrapS = THREE.ClampToEdgeWrapping;
-    _atlasTex.wrapT = THREE.ClampToEdgeWrapping;
-    _atlasTex.minFilter = THREE.LinearFilter;
-    _atlasTex.magFilter = THREE.LinearFilter;
-    _atlasTex.generateMipmaps = false;
+    const _atlasRT = new THREE.WebGLRenderTarget(ATLAS_W, ATLAS_H, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      generateMipmaps: false,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    _atlasRT.texture.wrapS = THREE.ClampToEdgeWrapping;
+    _atlasRT.texture.wrapT = THREE.ClampToEdgeWrapping;
+    // ペイント shader (space1 からの移植: 粒状感 + OVER ブレンドで層状蓄積)
+    const _paintShaderMat = new THREE.ShaderMaterial({
+      uniforms: {
+        u_uvCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        u_radius:   { value: 0.02 },
+        u_color:    { value: new THREE.Color(1, 1, 1) },
+        u_seed:     { value: 0 },
+        u_density:  { value: 0.95 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2 vUv;
+        uniform vec2  u_uvCenter;
+        uniform float u_radius;
+        uniform vec3  u_color;
+        uniform float u_seed;
+        uniform float u_density;
+        float hash(vec2 p) {
+          p = mod(p, vec2(997.0));
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+        void main() {
+          vec2 d = vUv - u_uvCenter;
+          float r = length(d);
+          if (r > u_radius) discard;
+          float falloff = 1.0 - smoothstep(0.0, u_radius, r);
+          falloff = pow(falloff, 0.85);
+          float n = hash(vUv * 600.0 + vec2(u_seed, u_seed * 1.37));
+          float threshold = 1.0 - falloff * u_density;
+          if (n < threshold) discard;
+          float alpha = clamp(falloff * 0.6 + 0.25, 0.0, 1.0);
+          gl_FragColor = vec4(u_color * alpha, alpha);
+        }
+      `,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+    });
+    const _paintScene = new THREE.Scene();
+    const _paintCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const _paintQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _paintShaderMat);
+    _paintScene.add(_paintQuad);
+    // 外部メッシュ参照互換用 (旧コードが _atlasTex を直接参照していた箇所に備える)
+    const _atlasTex = _atlasRT.texture;
 
     // アトラス領域 (UV 0..1 座標): [uMin, vMin, uMax, vMax]
     //   各面で縦横の px/m 密度を等方にして「真円のブラシ」が描けるように配分する
@@ -859,19 +920,23 @@
         ATLAS_REGIONS['cube-slot-' + idx] = [uMin, vMin, uMax, vMax];
       }
     }
-    // 面ごとの px/m 密度 (ブラシ半径を世界半径からピクセルへ変換するのに使う)
-    const REGION_DENSITY_PX_PER_M = {
-      'floor-paint': 12.8,   // 512 px / 40 m
-      'wall-N': 6.4,  'wall-S': 6.4,  'wall-E': 6.4,  'wall-W': 6.4,  // 128 px / 20 m, 256/40
-      // cube-slot-* は 128 px / 1 m = 128 (後で統一セット)
+    // 面ごとの UV radius per meter (horizontal axis で揃える; shader 内でのペイント円は
+    //   アトラス UV 空間で等方なので、面の縦横比が 1:1 でない場合は横方向を基準にする)
+    //   floor: 0.5 UV / 40m = 0.0125 UV/m   (縦も 0.0125 — world 1:1 なので円)
+    //   wall : 0.25 UV / 40m = 0.00625 UV/m 水平、0.25 UV / 20m = 0.0125 UV/m 垂直
+    //          → shader radius に 0.00625 を使うと水平 1m / 垂直 0.5m の楕円 (space1 と同挙動)
+    //   cube : 0.125 UV / 1m = 0.125 UV/m   (縦は 0.25 UV / 1m = 0.25 UV/m)
+    const REGION_UV_PER_M = {
+      'floor-paint': 0.0125,
+      'wall-N': 0.00625, 'wall-S': 0.00625, 'wall-E': 0.00625, 'wall-W': 0.00625,
     };
     for (let i = 0; i < CUBE_COLS * CUBE_ROWS; i++) {
-      REGION_DENSITY_PX_PER_M['cube-slot-' + i] = 128;
+      REGION_UV_PER_M['cube-slot-' + i] = 0.125;
     }
     // space1 準拠のブラシ寸法パラメータ
-    const SPRAY_HALF_ANGLE = Math.PI / 9;     // 20° (円錐半角)
+    const SPRAY_HALF_ANGLE  = Math.PI / 9;    // 20° (円錐半角)
     const SPRAY_MAX_WORLD_R = 1.0;            // 最大世界半径 1.0m (= 直径 2m)
-    const SPRAY_MIN_PX_R    = 2;              // ピクセル半径下限 (消失防止)
+    const SPRAY_MIN_UV_R    = 0.003;          // 下限 UV radius (space1 と同じ SPRAY_MIN_UVR)
     function _remapMeshUV(mesh, regionId) {
       const r = ATLAS_REGIONS[regionId]; if (!r) return;
       const uv = mesh.geometry.attributes.uv; if (!uv) return;
@@ -882,35 +947,38 @@
       }
       uv.needsUpdate = true;
     }
-    // アトラス UV (u,v) 位置に 1 ドット描画。pxR が渡されたらそのピクセル半径で、
-    // 未指定なら従来互換の固定半径 (SPRAY_BRUSH_R) で描画する。
-    //   GPU 再アップロードはフレーム単位でまとめる (`_atlasDirty`)。1 フレーム内に
-    //   複数ドット (自己 + 受信) 描画しても再アップロードは最後に 1 回のみ。
-    let _atlasDirty = false;
-    function _drawAtlasDot(u, v, colorStr, pxR) {
-      const x = u * ATLAS_W;
-      const y = (1 - v) * ATLAS_H;
-      const r = (typeof pxR === 'number' && pxR > 0) ? pxR : SPRAY_BRUSH_R;
-      const g = _atlasCtx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0.0, _sprayAlphaStr(colorStr, SPRAY_BRUSH_ALPHA));
-      g.addColorStop(1.0, _sprayAlphaStr(colorStr, 0));
-      _atlasCtx.fillStyle = g;
-      _atlasCtx.beginPath();
-      _atlasCtx.arc(x, y, r, 0, Math.PI * 2);
-      _atlasCtx.fill();
-      _atlasDirty = true;
+    // GPU 側で 1 ドット描画 (space1 方式): shader quad を atlasRT に重ね描き。
+    //   第 4 引数は UV radius (0..1 のアトラス UV 単位)。未指定は 0.01 を既定とする。
+    //   seed はノイズ用の乱数。未指定時は現在時刻から生成。
+    function _drawAtlasDot(uvX, uvY, colorStr, uvR, seed) {
+      const r = (typeof uvR === 'number' && uvR > 0) ? uvR : 0.01;
+      _paintShaderMat.uniforms.u_uvCenter.value.set(uvX, uvY);
+      _paintShaderMat.uniforms.u_radius.value = r;
+      _paintShaderMat.uniforms.u_color.value.set(colorStr);
+      const seedN = (typeof seed === 'number') ? seed : Date.now();
+      const seedSmall = ((seedN >>> 0) % 100000) * 0.01;
+      _paintShaderMat.uniforms.u_seed.value = seedSmall;
+      const prevTarget = renderer.getRenderTarget();
+      const oldAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.setRenderTarget(_atlasRT);
+      renderer.render(_paintScene, _paintCamera);
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = oldAutoClear;
     }
     function _clearAtlas() {
-      _atlasCtx.clearRect(0, 0, ATLAS_W, ATLAS_H);
-      _atlasDirty = true;
+      const prevTarget = renderer.getRenderTarget();
+      const oldClear = new THREE.Color();
+      renderer.getClearColor(oldClear);
+      const oldAlpha = renderer.getClearAlpha();
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(_atlasRT);
+      renderer.clear();
+      renderer.setRenderTarget(prevTarget);
+      renderer.setClearColor(oldClear, oldAlpha);
     }
-    // 毎フレーム 1 回だけ needsUpdate を立てて GPU 再アップロード
-    function _flushAtlasUpload() {
-      if (!_atlasDirty) return;
-      _atlasTex.needsUpdate = true;
-      _atlasDirty = false;
-    }
-    window.__flushAtlasUpload = _flushAtlasUpload;
+    // CanvasTexture 方式で必要だったフレーム末尾フラッシュは不要 (shader paint は即時 GPU 反映)
+    window.__flushAtlasUpload = function () {};
 
     // ===== 外壁: 40m × 40m エリアを囲む高さ 20m の 4 面 =====
     const WALL_HALF = 20;
@@ -1007,15 +1075,9 @@
         if (!c.geometry || c.geometry.type !== 'BoxGeometry') continue;
         if (slotIdx >= CUBE_COLS * CUBE_ROWS) break;
         const slotId = 'cube-slot-' + slotIdx;
-        // 背景色をアトラス領域に事前塗布
-        const r = ATLAS_REGIONS[slotId];
-        const pxX = r[0] * ATLAS_W;
-        const pxY = (1 - r[3]) * ATLAS_H;
-        const pxW = (r[2] - r[0]) * ATLAS_W;
-        const pxH = (r[3] - r[1]) * ATLAS_H;
-        const col = c.material.color ? c.material.color : new THREE.Color(0xffffff);
-        _atlasCtx.fillStyle = '#' + col.getHexString();
-        _atlasCtx.fillRect(pxX, pxY, pxW, pxH);
+        // 旧 CanvasTexture 方式の背景色プレフィル処理は撤去 (shader paint 方式では
+        //   アトラスは透明のまま保ち、塗った部分だけが現れる = オーバーレイ思想に統一)
+        void ATLAS_REGIONS[slotId];
         _remapMeshUV(c, slotId);
         const oldMat = c.material;
         c.material = new THREE.MeshStandardMaterial({
@@ -1030,7 +1092,6 @@
         slotIdx++;
         _sprayables.push(c);
       }
-      _atlasTex.needsUpdate = true;
     }
 
     // キャンバスにブラシ 1 発描く (u,v は 0..1、color は #rrggbb or 数値)
@@ -1102,27 +1163,26 @@
       const hit = hits[0];
       const uv = hit.uv;   // ← メッシュの UV は remap 済みなので、そのままアトラス UV
       const colorHex = (state.myColor || '#ffffff').replace('#', '');
-      // space1 準拠: 円錐 half-angle から世界半径を算出 → MAX でクランプ → 面密度でピクセル半径化
+      // space1 準拠: 円錐 half-angle から世界半径 → MAX クランプ → アトラス UV radius に変換
       const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
       const regionId = hit.object && hit.object.userData && hit.object.userData.sprayRegionId;
-      const density = (regionId && REGION_DENSITY_PX_PER_M[regionId]) || 12.8;
-      const pxR = Math.max(SPRAY_MIN_PX_R, worldR * density);
-      _drawAtlasDot(uv.x, uv.y, '#' + colorHex, pxR);
+      const uvPerM = (regionId && REGION_UV_PER_M[regionId]) || 0.0125;
+      const uvR = Math.max(SPRAY_MIN_UV_R, worldR * uvPerM);
+      const seed = (Date.now() & 0xFFFFF);
+      _drawAtlasDot(uv.x, uv.y, '#' + colorHex, uvR, seed);
       if (socket && socket.connected) {
         const payload = {
           u: +uv.x.toFixed(4),
           v: +uv.y.toFixed(4),
           c: colorHex,
-          r: +pxR.toFixed(1),
+          r: +uvR.toFixed(4),
+          s: seed,
         };
         socket.emit('spray2', payload);
-        // probe で未対応と判明していたら旧 'spray' にもフォールバック emit
-        //   (space3 と履歴が混じる副作用はあるが、同期停止よりマシ。server 再起動後は probe が成功して自然に止まる)
         if (window._space2Fallback) socket.emit('spray', payload);
-        // 初回 emit 診断ログ
         if (!window._sprayEmitLogged) {
           window._sprayEmitLogged = true;
-          log('spray2 emit (初回): u=' + payload.u + ' v=' + payload.v + ' r=' + payload.r, 'ok');
+          log('spray2 emit (初回): u=' + payload.u + ' v=' + payload.v + ' uvR=' + payload.r, 'ok');
         }
       }
     }
@@ -2974,28 +3034,26 @@
       socket.on('spray2', (data) => {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
-        const pxR = (typeof data.r === 'number') ? data.r : undefined;
-        _drawAtlasDot(data.u, data.v, color, pxR);
+        const uvR = (typeof data.r === 'number') ? data.r : undefined;
+        _drawAtlasDot(data.u, data.v, color, uvR, data.s);
         if (!window._sprayRecvLogged) {
           window._sprayRecvLogged = true;
           log('spray2 受信 (初回): サーバー経由同期 OK', 'ok');
         }
       });
-      // フォールバック受信: サーバーが spray2 未対応時、他 space2 クライアントは 'spray' も emit する。
-      //   r フィールドが入っているものだけアトラス UV として受け取る (無印 spray は space3 発信なので無視)
       socket.on('spray', (data) => {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
-        if (typeof data.r !== 'number') return;   // space3 由来の sphere UV は無視
+        if (typeof data.r !== 'number') return;   // space3 由来は無視
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
-        _drawAtlasDot(data.u, data.v, color, data.r);
+        _drawAtlasDot(data.u, data.v, color, data.r, data.s);
       });
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
         for (const d of list) {
           if (!d || typeof d.u !== 'number' || typeof d.v !== 'number') continue;
           const color = (typeof d.c === 'string') ? ('#' + d.c) : '#ffffff';
-          const pxR = (typeof d.r === 'number') ? d.r : undefined;
-          _drawAtlasDot(d.u, d.v, color, pxR);
+          const uvR = (typeof d.r === 'number') ? d.r : undefined;
+          _drawAtlasDot(d.u, d.v, color, uvR, d.s);
         }
         log('sprayBatch2 recv: ' + list.length + ' pts', 'ok');
       });

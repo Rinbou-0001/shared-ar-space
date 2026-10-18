@@ -453,13 +453,16 @@ io.on('connection', (socket) => {
   });
 
   // space2 専用スプレー (アトラス UV; space3 と履歴を分離するため別イベント名)
-  //   data: { u, v, c, r? } — r はピクセル半径 (space1 準拠の距離依存ブラシ)
+  //   data: { u, v, c, r?, s? }
+  //     r = アトラス UV radius (0..1 の小数)
+  //     s = ノイズ seed (整数、全クライアントで同じ粒パターンを再現するため)
   socket.on('spray2', (data) => {
     if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
     if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return;
     const c = (typeof data.c === 'string') ? data.c.slice(0, 6) : 'ffffff';
     const rec = { u: data.u, v: data.v, c };
-    if (typeof data.r === 'number' && data.r > 0 && data.r < 1000) rec.r = data.r;
+    if (typeof data.r === 'number' && data.r > 0 && data.r < 1)   rec.r = data.r;
+    if (typeof data.s === 'number' && isFinite(data.s))           rec.s = data.s >>> 0;
     sprayHistory2.push(rec);
     if (sprayHistory2.length > SPRAY_HISTORY_CAP) {
       sprayHistory2.splice(0, sprayHistory2.length - SPRAY_HISTORY_CAP);
