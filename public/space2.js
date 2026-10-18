@@ -644,179 +644,12 @@
     //   → ユーザー指示により削除。_updateRopes は空の no-op を公開。
     window.__updateRopes = function () {};
     const _ropes = new Map();   // 互換性のため残置 (常に空)
-    /* ===== 旧 rope コードブロック削除済み
 
-    const _ropeShader = {
-      vertexShader: `
-        varying vec2 vUv2;
-        void main() {
-          vUv2 = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        uniform float uIsSelf;   // 1.0 = グラバー自身の視点、0.0 = 他視点
-        varying vec2 vUv2;
-        void main() {
-          float alpha;
-          if (uIsSelf > 0.5) {
-            // グラバー自身: 手前 (= vUv2.x=0) 側を完全透明へ、cube 側 (x=1) 付近のみ可視
-            //   smoothstep で ~x=0.0 から 0.7 までフェードイン、cube 端で opacity 0.7
-            alpha = smoothstep(0.0, 0.7, vUv2.x) * 0.7;
-          } else {
-            // 他視点: 両端薄・中央濃のフェード
-            float env = sin(vUv2.x * 3.14159);
-            alpha = mix(0.15, 0.85, env);
-          }
-          if (alpha < 0.01) discard;   // 完全透明領域は描画しない
-          gl_FragColor = vec4(uColor, alpha);
-        }
-      `,
-    };
-
-    function _disposeRope(name) {
-      const r = _ropes.get(name);
-      if (!r) return;
-      if (r.mesh && r.mesh.parent) r.mesh.parent.remove(r.mesh);
-      if (r.geometry) r.geometry.dispose();
-      if (r.material) r.material.dispose();
-      _ropes.delete(name);
-    }
-
-    function _updateRopes() {
-      for (const c of movableCubes) {
-        // rope は "誰かが現在掴んでいる" cube にのみ表示 (= heldBy が非 null の間だけ)
-        //   ・自分が掴んでいる: 自分の held=true、heldBy=myId (cubeHold emit 済み)
-        //   ・他クライアントが掴んでいる: 自分の held=false、heldBy=他クライアント id (cubeHold 受信)
-        //   release で heldBy=null になり、次フレームで全視点から消去
-        const heldBy = c.userData && c.userData.heldBy;
-        if (!heldBy) {
-          _disposeRope(c.name);
-          continue;
-        }
-        let gpos, gcolor;
-        if (heldBy === myId) {
-          gpos = camera.position;
-          gcolor = state.myColor || '#ffffff';
-        } else {
-          const av = avatars.get(heldBy);
-          if (!av) { _disposeRope(c.name); continue; }
-          gpos = av.grp.position;
-          gcolor = av.color || '#ffffff';
-        }
-        const cpos = c.position;
-        const dx = cpos.x - gpos.x, dy = cpos.y - gpos.y, dz = cpos.z - gpos.z;
-        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (dist < 0.05) { _disposeRope(c.name); continue; }
-        const dirx = dx / dist, diry = dy / dist, dirz = dz / dist;
-        // 速度の進行方向直交成分 (しなり方向)
-        const v = c.userData.vel;
-        const vDot = v.x * dirx + v.y * diry + v.z * dirz;
-        const vpx = v.x - dirx * vDot;
-        const vpy = v.y - diry * vDot;
-        const vpz = v.z - dirz * vDot;
-        const vpLen = Math.sqrt(vpx*vpx + vpy*vpy + vpz*vpz);
-        const bendAmp = Math.min(0.4, vpLen * 0.04);
-        const bNx = vpLen > 1e-4 ? vpx / vpLen : 0;
-        const bNy = vpLen > 1e-4 ? vpy / vpLen : 0;
-        const bNz = vpLen > 1e-4 ? vpz / vpLen : 0;
-        // 垂れ (重力方向、距離に比例)
-        const sagAmp = Math.min(0.3, dist * 0.035);
-        // 21 点を生成
-        const pts = [];
-        for (let i = 0; i <= _ROPE_SEG; i++) {
-          const t = i / _ROPE_SEG;
-          const px = gpos.x + dx * t;
-          const py = gpos.y + dy * t;
-          const pz = gpos.z + dz * t;
-          const env = Math.sin(t * Math.PI);
-          pts.push(new THREE.Vector3(
-            px - bNx * env * bendAmp,
-            py - env * sagAmp - bNy * env * bendAmp,
-            pz - bNz * env * bendAmp
-          ));
-        }
-        const curve = new THREE.CatmullRomCurve3(pts);
-        const newGeom = new THREE.TubeGeometry(curve, _ROPE_SEG * 2, _ROPE_RADIUS, 8, false);
-        const _isSelf = (heldBy === myId) ? 1.0 : 0.0;
-        let r = _ropes.get(c.name);
-        if (!r) {
-          const mat = new THREE.ShaderMaterial({
-            uniforms: {
-              uColor:  { value: new THREE.Color(gcolor) },
-              uIsSelf: { value: _isSelf },
-            },
-            vertexShader: _ropeShader.vertexShader,
-            fragmentShader: _ropeShader.fragmentShader,
-            transparent: true,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-          });
-          const mesh = new THREE.Mesh(newGeom, mat);
-          mesh.renderOrder = 998;
-          // raycast 対象外に明示 (selectables には入れていないが、二重の安全策)
-          mesh.raycast = function () {};
-          scene.add(mesh);
-          r = { mesh, geometry: newGeom, material: mat };
-          _ropes.set(c.name, r);
-        } else {
-          if (r.geometry) r.geometry.dispose();
-          r.geometry = newGeom;
-          r.mesh.geometry = newGeom;
-          r.material.uniforms.uColor.value.set(gcolor);
-          r.material.uniforms.uIsSelf.value = _isSelf;
-        }
-      }
-    }
-    // 旧 _updateRopes 代入は削除。window.__updateRopes は上で no-op をセット済み。
-    ===== 旧 rope コードブロック終わり ===== */
-
-    // ===== スプレー描画: 原点中心 直径 20m (半径 10m) 半球 =====
-    //   ・半球は透明基材 + CanvasTexture で、塗った部分だけ色が付く
-    //   ・空の空間を 4 秒長押しで発射開始 → 離すと停止
-    //   ・色はアバター color (state.myColor)
-    //   ・入力はカメラ前方の 1 本レイで、半球にヒットした UV に円形ブラシを塗る
-    //   ・送信は 10 Hz スロットル + サーバー履歴に蓄積 → 新規接続時に再生で同期
-    const SPRAY_RADIUS_M = 10;
-    const SPRAY_CANVAS_W = 1024;
-    const SPRAY_CANVAS_H = 512;
-    const SPRAY_HOLD_MS  = 4000;   // 4 秒
-    const SPRAY_EMIT_HZ  = 40;     // 送信頻度 (space1 と同じ 40Hz) — スムーズな塗り跡
-    const SPRAY_BRUSH_R  = 22;     // canvas 上のブラシ半径 (px) — ~1.4m 実寸相当
-    const SPRAY_BRUSH_ALPHA = 0.35;
-
-    const _sprayCanvas = document.createElement('canvas');
-    _sprayCanvas.width  = SPRAY_CANVAS_W;
-    _sprayCanvas.height = SPRAY_CANVAS_H;
-    const _sprayCtx = _sprayCanvas.getContext('2d');
-    _sprayCtx.clearRect(0, 0, SPRAY_CANVAS_W, SPRAY_CANVAS_H);
-    const _sprayTex = new THREE.CanvasTexture(_sprayCanvas);
-    _sprayTex.wrapS = THREE.RepeatWrapping;   // phi 方向 (継ぎ目を環状にする)
-    _sprayTex.wrapT = THREE.ClampToEdgeWrapping;
-    _sprayTex.anisotropy = 4;
-    const _sprayMat = new THREE.MeshBasicMaterial({
-      map: _sprayTex,
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      alphaTest: 0.01,
-      fog: false,
-    });
-    // 上半球 (theta ∈ [0, π/2])。UV は SphereGeometry 標準。
-    const _sprayGeom = new THREE.SphereGeometry(SPRAY_RADIUS_M, 64, 32, 0, Math.PI * 2, 0, Math.PI / 2);
-    const sprayDome = new THREE.Mesh(_sprayGeom, _sprayMat);
-    sprayDome.name = 'spray-dome';
-    sprayDome.renderOrder = 500;   // 他オブジェクトより後に描画 (ブレンドが正しく出るように)
-    scene.add(sprayDome);
-    // raycast 専用リスト (selectables とは分離 — 選択ロジックに影響させない)
-    //   旧 sprayDome も残す (後方互換、空のまま。デフォルト target として使う)
-    //   three.js r150 の raycaster は visible=false のメッシュも hit するため、
-    //   旧 sprayDome は _sprayables に入れずに完全除外する (以前は visible=false で
-    //   安全と考えていたがそれは誤りで、半径 10m のドーム球が camera から 9m 付近で
-    //   常に先に raycast ヒットし、壁/天井/床への到達を全て塞いでいた)
+    // ===== スプレー基礎パラメータ =====
+    const SPRAY_HOLD_MS = 4000;   // 長押し発射までの猶予 (ms)
+    const SPRAY_EMIT_HZ = 40;     // 送信頻度 (space1 と同じ 40Hz)
+    // raycast 対象リスト (_makePaintable 経由で壁/床/天井が push される)
     const _sprayables = [];
-    sprayDome.visible = false;
 
     // ===== 統合アトラス方式ペイント基盤 (space1 同等コスト、1 枚テクスチャ共有) =====
     //   床・4 壁・各 Cube は 1 枚の CanvasTexture (アトラス) を共有し、各メッシュの UV
@@ -957,19 +790,12 @@
         renderer.setClearColor(oc, oa);
       });
     }
-    window.__flushAtlasUpload = function () {};   // 互換 no-op
-    // 互換ダミー (削除予定の旧 _atlasTex 参照を安全化)
-    const _atlasTex = null;
-    function _drawAtlasDot() {}
-    function _clearAtlas() { _clearAllPaintables(); }
-
     // ===== space1 方式: onBeforeCompile で標準マテリアルにペイント合成コードを注入 =====
     //   既存マテリアル (MeshStandardMaterial 等) をそのまま使い、fragment の最終出力直後に
     //   paint RT を OVER 合成する 2 行を挿入する。カスタム ShaderMaterial を一切使わないので
     //   ・three.js の fog / shadow / 照明処理と自然に協調
     //   ・uniform 名の衝突や shadow pass 失敗が起きない
     //   ・per-material customProgramCacheKey で program 共有事故を回避
-    window.__syncOpaqueAtlasFog = function () {};   // 旧 API no-op
     function _makePaintable(mesh, worldSpanM, res) {
       if (!mesh || !mesh.material) return mesh;
       if (mesh.userData.paintRT) return mesh;   // 二重注入防止
@@ -1135,44 +961,6 @@
     //   _makePaintable(cube, baseColor, worldSpanM=1, 128) で各 cube に独立 paint RT を割り当て)
     void movableCubes;
 
-    // キャンバスにブラシ 1 発描く (u,v は 0..1、color は #rrggbb or 数値)
-    function _drawSprayDot(u, v, colorStr) {
-      const x = u * SPRAY_CANVAS_W;
-      const y = (1 - v) * SPRAY_CANVAS_H;   // three.js UV は左下原点、canvas は左上原点
-      const r = SPRAY_BRUSH_R;
-      const g = _sprayCtx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0.0, _sprayAlphaStr(colorStr, SPRAY_BRUSH_ALPHA));
-      g.addColorStop(1.0, _sprayAlphaStr(colorStr, 0));
-      _sprayCtx.fillStyle = g;
-      _sprayCtx.beginPath();
-      _sprayCtx.arc(x, y, r, 0, Math.PI * 2);
-      _sprayCtx.fill();
-      // 継ぎ目 (u ≒ 0 / 1) 対応: 近縁側にもミラー描画
-      if (x < r)                       _sprayDotRaw(x + SPRAY_CANVAS_W, y, r, colorStr);
-      else if (x > SPRAY_CANVAS_W - r) _sprayDotRaw(x - SPRAY_CANVAS_W, y, r, colorStr);
-      _sprayTex.needsUpdate = true;
-    }
-    function _sprayDotRaw(x, y, r, colorStr) {
-      const g = _sprayCtx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0.0, _sprayAlphaStr(colorStr, SPRAY_BRUSH_ALPHA));
-      g.addColorStop(1.0, _sprayAlphaStr(colorStr, 0));
-      _sprayCtx.fillStyle = g;
-      _sprayCtx.beginPath();
-      _sprayCtx.arc(x, y, r, 0, Math.PI * 2);
-      _sprayCtx.fill();
-    }
-    // #rrggbb / 0xRRGGBB → rgba(r,g,b,a) 文字列
-    function _sprayAlphaStr(c, alpha) {
-      let hex;
-      if (typeof c === 'number') hex = c;
-      else if (typeof c === 'string') {
-        hex = parseInt(c.replace('#', ''), 16);
-      } else return 'rgba(255,255,255,' + alpha + ')';
-      const r = (hex >> 16) & 0xff;
-      const g = (hex >> 8) & 0xff;
-      const b = hex & 0xff;
-      return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
-    }
     // スプレー状態 (self): press-and-hold で発射開始、release で停止
     const _spraySelf = {
       pressStartT: 0,          // press 開始時刻 (ms)、0 = press 中でない
@@ -1195,23 +983,10 @@
       // 送信スロットル
       if (now - _spraySelf.lastEmitT < 1000 / SPRAY_EMIT_HZ) return;
       _spraySelf.lastEmitT = now;
-      // カメラ前方レイで半球にヒット → UV 取得 → 塗る + emit
+      // カメラ前方レイで paintable 対象にヒット → UV 取得 → 塗る + emit
       camera.getWorldPosition(_sprayOrigin);
       camera.getWorldDirection(_sprayDir);
       _sprayRay.set(_sprayOrigin, _sprayDir);
-      // 診断: 初回スプレー時に _sprayables の中身を一度だけ列挙
-      if (!window.__sprayablesListed) {
-        window.__sprayablesListed = true;
-        const names = _sprayables.map((m) => m.name || '(anon)' + (m.visible === false ? '[hidden]' : ''));
-        log('_sprayables: ' + names.join(', '), 'ok');
-      }
-      // 診断: カメラ方向を 10 発ごとにログ
-      if (!window.__sprayDirCount) window.__sprayDirCount = 0;
-      window.__sprayDirCount++;
-      if (window.__sprayDirCount % 10 === 1) {
-        log('cam fwd=(' + _sprayDir.x.toFixed(2) + ',' + _sprayDir.y.toFixed(2) + ',' + _sprayDir.z.toFixed(2) +
-            ') pos=(' + _sprayOrigin.x.toFixed(1) + ',' + _sprayOrigin.y.toFixed(1) + ',' + _sprayOrigin.z.toFixed(1) + ')', 'ok');
-      }
       const hits = _sprayRay.intersectObjects(_sprayables, false);
       // paintRT を持つ最初のヒットを採用 (非 paintable は skip)
       let hit = null;
@@ -1221,44 +996,27 @@
           break;
         }
       }
-      if (!hit) {
-        if (window.__sprayDirCount % 10 === 1) log('no paintable hit (' + hits.length + ' candidates)', 'err');
-        return;
-      }
+      if (!hit) return;
       const uv = hit.uv;
       const target = hit.object;
       const tgtName = (target && target.name) || '';
       const rt = target.userData.paintRT;
-      // 診断: 新しい対象をヒットしたら 1 回だけログ
-      if (!window.__sprayHitSeen) window.__sprayHitSeen = new Set();
-      if (!window.__sprayHitSeen.has(tgtName)) {
-        window.__sprayHitSeen.add(tgtName);
-        log('spray hit → ' + tgtName + ' @ ' + hit.distance.toFixed(2) + 'm uv=(' +
-            uv.x.toFixed(3) + ',' + uv.y.toFixed(3) + ')', 'ok');
-      }
       const colorHex = (state.myColor || '#ffffff').replace('#', '');
-      // space1 準拠: 世界半径 → この面の worldSpan で UV 半径に変換 (self-contained RT なので
-      //   領域境界を跨ぐ心配はなく、他メッシュへの漏れは発生しない)
+      // 世界半径 → この面の worldSpan で UV 半径に変換
       const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
       const worldSpan = (target.userData.worldSpanM) || 1.0;
       const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
       _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
       if (socket && socket.connected) {
-        const payload = {
+        socket.emit('spray2', {
           tgt: tgtName,
           u: +uv.x.toFixed(4),
           v: +uv.y.toFixed(4),
           c: colorHex,
           r: +uvR.toFixed(4),
           s: seed,
-        };
-        socket.emit('spray2', payload);
-        if (window._space2Fallback) socket.emit('spray', payload);
-        if (!window._sprayEmitLogged) {
-          window._sprayEmitLogged = true;
-          log('spray2 emit (初回): tgt=' + tgtName + ' u=' + payload.u + ' v=' + payload.v + ' uvR=' + payload.r, 'ok');
-        }
+        });
       }
     }
 
@@ -2792,26 +2550,6 @@
         document.getElementById('conn-pill').classList.add('ok');
         document.getElementById('conn-text').textContent = '接続 OK';
         log('socket connected: ' + socket.id, 'ok');
-        // 接続直後に probe を飛ばして server.js が spray2 対応版か確認
-        //   対応版: ACK が返る → _space2ServerOk = true (そのまま 'spray2' を使う)
-        //   未対応: タイムアウト → フォールバックとして 'spray' も emit するよう切替
-        //           (space3 と履歴が混ざるが、同期が止まるよりはマシ)
-        try {
-          socket.timeout(2500).emit('space2:probe', (err, resp) => {
-            if (err || !resp || !resp.ok) {
-              window._space2ServerOk = false;
-              window._space2Fallback = true;
-              log('⚠ サーバー spray2 未対応 (probe タイムアウト) — 旧 "spray" にフォールバックします。server.js を再起動してください。', 'err');
-            } else {
-              window._space2ServerOk = true;
-              window._space2Fallback = false;
-              log('✓ サーバー spray2 対応版: ' + (resp.version || '') + ' (ts=' + (resp.ts || 0) + ')', 'ok');
-            }
-          });
-        } catch (e) {
-          window._space2Fallback = true;
-          log('probe 送信例外: ' + e.message + ' → fallback 有効', 'err');
-        }
       });
       socket.on('disconnect', () => {
         document.getElementById('conn-pill').classList.remove('ok');
@@ -3093,7 +2831,6 @@
         if (!data || !scene.fog) return;
         if (typeof data.density === 'number' && isFinite(data.density)) {
           scene.fog.density = Math.max(0, Math.min(1, data.density));
-          if (typeof window.__syncOpaqueAtlasFog === 'function') window.__syncOpaqueAtlasFog();
           // master パネルの入力欄と現在値表示を同期 (dirty 中は上書きしない)
           const inp = document.getElementById('m-fog-density');
           const dirty = window.__mIsDirty || (() => false);
@@ -3115,25 +2852,14 @@
         const uvR = (typeof data.r === 'number') ? data.r : 0.01;
         _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
       }
-      socket.on('spray2', (data) => {
-        _applyRemoteSpray(data);
-        if (!window._sprayRecvLogged) {
-          window._sprayRecvLogged = true;
-          log('spray2 受信 (初回): サーバー経由同期 OK', 'ok');
-        }
-      });
-      socket.on('spray', (data) => {
-        if (!data || typeof data.r !== 'number') return;   // space3 由来は無視
-        _applyRemoteSpray(data);
-      });
+      socket.on('spray2', _applyRemoteSpray);
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
         for (const d of list) _applyRemoteSpray(d);
-        log('sprayBatch2 recv: ' + list.length + ' pts', 'ok');
       });
       // space2 専用アトラスリセット
       socket.on('resetAtlas2', () => {
-        _clearAtlas();
+        _clearAllPaintables();
         log('atlas cleared (space2)', 'ok');
       });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
@@ -3294,248 +3020,6 @@
     // 旧ポインター関連の window 関数 (effect2 で参照されていた) は no-op に
     window.__applyPhonePointerMode = function () {};
     const _POINTER_RADIUS_UNUSED = 0.0075; void _POINTER_RADIUS_UNUSED;
-    /* ===== 旧ポインター機能ブロック削除済み (effect2 廃止) =====
-    const _pointerGeom = new THREE.CylinderGeometry(_POINTER_RADIUS, _POINTER_RADIUS, 1, 16, 1, true);
-    const _pointerMat = new THREE.ShaderMaterial({
-      uniforms: { uColor: { value: new THREE.Color(0xff3333) } },
-      vertexShader: `
-        varying float vV;
-        void main() {
-          vV = uv.y;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        varying float vV;
-        void main() {
-          // v=0 が手前 (phone 側)、v=1 が奥 (ヒット側) になるよう後で向きを合わせる
-          //   手前側は smoothstep で完全透明へフェード
-          float alpha = smoothstep(0.0, 0.5, vV);
-          if (alpha < 0.01) discard;
-          gl_FragColor = vec4(uColor, alpha * 0.85);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const _pointerLine = new THREE.Mesh(_pointerGeom, _pointerMat);
-    _pointerLine.renderOrder = 1000;
-    _pointerLine.visible = false;
-    _pointerLine.frustumCulled = false;
-    scene.add(_pointerLine);
-    // 円柱の中心→終端変換用の一時変数
-    const _ptCylOrigin = new THREE.Vector3();
-    const _ptCylQuat   = new THREE.Quaternion();
-    const _ptCylUp     = new THREE.Vector3(0, 1, 0);
-    const _ptCylDir    = new THREE.Vector3();
-    // 2 点間 (from = phone 側、to = ヒット側) に円柱を配置
-    //   CylinderGeometry の UV は底 (−Y 端) で v=0、頂上 (+Y 端) で v=1
-    //   phone 側 (from) を v=0 側 (底) に配置する必要があるため、+Y 方向を from→to に向ける
-    function _ptPlaceCyl(from, to, colorHex) {
-      _ptCylDir.subVectors(to, from);
-      const len = _ptCylDir.length();
-      if (len < 1e-4) { _pointerLine.visible = false; return; }
-      _pointerLine.visible = true;
-      _ptCylOrigin.copy(from).addScaledVector(_ptCylDir, 0.5);   // 中央配置
-      _ptCylDir.multiplyScalar(1 / len);
-      _ptCylQuat.setFromUnitVectors(_ptCylUp, _ptCylDir);
-      _pointerLine.position.copy(_ptCylOrigin);
-      _pointerLine.quaternion.copy(_ptCylQuat);
-      _pointerLine.scale.set(1, len, 1);   // 長さだけスケール (半径は固定 _POINTER_RADIUS)
-      _pointerMat.uniforms.uColor.value.setHex(colorHex);
-    }
-    const _ptRay = new THREE.Raycaster();
-    const _ptFwd = new THREE.Vector3();
-    const _ptEnd = new THREE.Vector3();
-    const _ptTmp = new THREE.Vector3();
-    const _ptTarget = new THREE.Vector3();   // grab 中の目標位置 (= camera + forward · grabDist)
-    let _pointerHit = null;    // ヒット中の movable (cube) or null
-    let _ptBtnPressT = 0;      // ボタン押下開始時刻 (ms)、0=未押下
-    let _ptBtnMode  = 'idle';  // 'idle' | 'select-waiting' | 'spray' | 'grabbing'
-    let _ptGrabDist = 2;       // grab 時に記録された camera→cube 距離 (維持距離)
-    let _ptLastHitName = '';
-    let _ptLastWaitingLogT = 0;
-    function _updatePointer() {
-      if (!window.__effect || !window.__effect[2]) return;
-      if (ROLE !== 'camera') return;
-      // ポインターの照射方向 = スマホ上辺が指す方向 (= phone local +Y)
-      //   赤外線リモコン的に本体を向けた方向にレーザーを照射。
-      //   画面に映る方向 (= local -Z、背面カメラ) とは別軸。別画面 (observer/master) で
-      //   ポインターの着弾位置と cube の重なりを目視する運用。
-      _ptFwd.set(0, 1, 0).applyQuaternion(camera.quaternion);
-      // grab 中は raycast スキップ (cube 自身を再 hit して target が cube 位置に戻るのを防ぐ)
-      //   代わりに固定距離 _ptGrabDist を用いて target = camera + forward·grabDist を維持
-      if (_ptBtnMode === 'grabbing' && _heldCube) {
-        _ptTarget.copy(camera.position).addScaledVector(_ptFwd, _ptGrabDist);
-        if (!_heldCube.userData.targetPos) _heldCube.userData.targetPos = new THREE.Vector3();
-        _heldCube.userData.targetPos.copy(_ptTarget);
-        _ptPlaceCyl(camera.position, _heldCube.position, 0xffd700);
-        return;
-      }
-      // 通常の raycast (ヒット検出)
-      //   movableCubes の matrixWorld を強制更新 (物理 tick で position は変わるが matrixWorld は
-      //   render 直前にしか更新されないため、_updatePointer での raycast は 1 フレーム古い位置になる)
-      for (let i = 0; i < movableCubes.length; i++) {
-        movableCubes[i].updateMatrixWorld(true);
-      }
-      _ptRay.set(camera.position, _ptFwd);
-      _ptRay.far = 40;
-      const hits = _ptRay.intersectObjects(movableCubes, false);
-      let hit = (hits && hits[0]) || null;
-      // 厳密 raycast が外れた場合のフォールバック: カメラ前方 60° コーン内で最も近い cube
-      //   (スマホポインターは精密狙いが難しく、cube の中心が画面端にある場合も掴めるようにする)
-      if (!hit) {
-        const minDot = Math.cos(60 * Math.PI / 180);
-        let bestCube = null;
-        let bestDist = Infinity;
-        let bestDot = -1;
-        for (let i = 0; i < movableCubes.length; i++) {
-          const c = movableCubes[i];
-          _ptTmp.subVectors(c.position, camera.position);
-          const d = _ptTmp.length();
-          if (d < 0.1 || d > 40) continue;
-          _ptTmp.multiplyScalar(1 / d);
-          const dot = _ptTmp.dot(_ptFwd);
-          if (dot >= minDot && d < bestDist) {
-            bestDist = d;
-            bestDot = dot;
-            bestCube = c;
-          }
-        }
-        if (bestCube) {
-          hit = { object: bestCube, distance: bestDist };
-        }
-      }
-      _pointerHit = hit ? hit.object : null;
-      const endDist = hit ? hit.distance : 10;
-      _ptEnd.copy(camera.position).addScaledVector(_ptFwd, endDist);
-      _ptPlaceCyl(camera.position, _ptEnd, _pointerHit ? 0xffd700 : 0xff3333);
-      // ヒット対象が変わったらログ
-      const curName = _pointerHit ? _pointerHit.name : '(none)';
-      if (curName !== _ptLastHitName) {
-        _ptLastHitName = curName;
-        log('pointer hit → ' + curName, 'ok');
-      }
-      // 'waiting' = ボタン押下中、まだ grab/spray 発動していない状態
-      //   ・held >= 500ms AND _pointerHit → grab 発動
-      //   ・held >= 4000ms AND no hit → spray 発動 (既存の 4 秒ホールド機構)
-      if (_ptBtnMode === 'waiting' && _ptBtnPressT) {
-        const held = performance.now() - _ptBtnPressT;
-        const nowMs = performance.now();
-        if (nowMs - _ptLastWaitingLogT > 500) {
-          _ptLastWaitingLogT = nowMs;
-          // より詳細な診断: 最も近い cube と視線とのなす角度
-          let bestName = 'none', bestDist = Infinity, bestDeg = 180;
-          for (let i = 0; i < movableCubes.length; i++) {
-            const c = movableCubes[i];
-            _ptTmp.subVectors(c.position, camera.position);
-            const d = _ptTmp.length();
-            if (d < 0.01) continue;
-            _ptTmp.multiplyScalar(1 / d);
-            const dot = Math.max(-1, Math.min(1, _ptTmp.dot(_ptFwd)));
-            const deg = Math.acos(dot) * 180 / Math.PI;
-            if (deg < bestDeg) { bestDeg = deg; bestName = c.name; bestDist = d; }
-          }
-          log('waiting held=' + held.toFixed(0) + 'ms hit=' + (_pointerHit ? _pointerHit.name : 'none') +
-              ' cam=(' + camera.position.x.toFixed(1) + ',' + camera.position.y.toFixed(1) + ',' + camera.position.z.toFixed(1) + ')' +
-              ' fwd=(' + _ptFwd.x.toFixed(2) + ',' + _ptFwd.y.toFixed(2) + ',' + _ptFwd.z.toFixed(2) + ')' +
-              ' nearest=' + bestName + ' @' + bestDist.toFixed(1) + 'm/' + bestDeg.toFixed(1) + '°', 'ok');
-        }
-        if (held >= 500 && _pointerHit) {
-          // 既に他クライアントが掴んでいる場合は spray へフォールバック
-          if (_pointerHit.userData.held) {
-            if (held >= 4000 && !_spraySelf.pressStartT) {
-              _spraySelf.pressStartT = performance.now();
-              _spraySelf.armed = false;
-              _spraySelf.lastEmitT = 0;
-              _ptBtnMode = 'spray';
-            }
-          } else {
-            _ptGrabDist = Math.max(0.5, hit.distance);
-            selectObject(_pointerHit);
-            // Opacity タグの ON/OFF (phone pointer 版)
-            if (_pointerHit.userData.__opacityTagTrigger === 'on') {
-              window.__opacityTagged = true;
-              log('opacity tag → ON (' + _pointerHit.name + ' ポインター選択)', 'ok');
-            } else if (_pointerHit.userData.__opacityTagTrigger === 'off') {
-              window.__opacityTagged = false;
-              log('opacity tag → OFF (' + _pointerHit.name + ' ポインター選択)', 'ok');
-            }
-            grabCube(_pointerHit);
-            _ptTarget.copy(camera.position).addScaledVector(_ptFwd, _ptGrabDist);
-            if (!_pointerHit.userData.targetPos) _pointerHit.userData.targetPos = new THREE.Vector3();
-            _pointerHit.userData.targetPos.copy(_ptTarget);
-            _ptBtnMode = 'grabbing';
-            log('phone pointer select+grab: ' + _pointerHit.name + ' @ ' + _ptGrabDist.toFixed(2) + 'm', 'ok');
-          }
-        } else if (held >= 4000 && !_spraySelf.pressStartT) {
-          _spraySelf.pressStartT = performance.now();
-          _spraySelf.armed = false;
-          _spraySelf.lastEmitT = 0;
-          _ptBtnMode = 'spray';
-          log('phone pointer → spray mode (4s hold)', 'ok');
-        }
-      }
-    }
-    updaters.push(_updatePointer);
-    function _applyPhonePointerMode(on) {
-      if (ROLE !== 'camera') { _pointerLine.visible = false; return; }
-      _pointerLine.visible = !!on;
-      // body class 'phone-pointer-on' を toggle: CSS が UI 非表示 + is-camera と合わせて spray ボタン表示
-      document.body.classList.toggle('phone-pointer-on', !!on);
-      if (!on) {
-        _ptBtnMode = 'idle';
-        _ptBtnPressT = 0;
-      }
-    }
-    window.__applyPhonePointerMode = _applyPhonePointerMode;
-    // ボタン操作: Pointer Events (touch/mouse 両対応、確実にイベント捕捉)
-    //   DOM 読み込みが遅い場合に備え setTimeout で deferred バインド
-    function _bindPhoneSprayBtn() {
-      const btn = document.getElementById('phone-spray-btn');
-      if (!btn) { log('phone-spray-btn 未検出、再試行', 'err'); setTimeout(_bindPhoneSprayBtn, 500); return; }
-      const _btnDown = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        _ptBtnPressT = performance.now();
-        _ptBtnMode = 'waiting';
-        btn.classList.add('pressing');
-        try { btn.setPointerCapture && e.pointerId != null && btn.setPointerCapture(e.pointerId); } catch (_) {}
-        log('phone btn ↓ (mode=waiting)', 'ok');
-      };
-      const _btnUp = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        log('phone btn ↑ (mode=' + _ptBtnMode + ')', 'ok');
-        if (_ptBtnMode === 'grabbing' && _heldCube) {
-          releaseCube(_heldCube);
-          selectObject(null);
-        }
-        if (_ptBtnMode === 'spray') {
-          _spraySelf.pressStartT = 0;
-          _spraySelf.armed = false;
-        }
-        _ptBtnMode = 'idle';
-        _ptBtnPressT = 0;
-        btn.classList.remove('pressing');
-      };
-      // Pointer Events が利用可能なら優先 (touch + mouse を統合)
-      if (window.PointerEvent) {
-        btn.addEventListener('pointerdown',   _btnDown, { passive: false });
-        btn.addEventListener('pointerup',     _btnUp,   { passive: false });
-        btn.addEventListener('pointercancel', _btnUp,   { passive: false });
-        btn.addEventListener('pointerleave',  (e) => { if (_ptBtnMode !== 'idle') _btnUp(e); }, { passive: false });
-      } else {
-        btn.addEventListener('touchstart', _btnDown, { passive: false });
-        btn.addEventListener('touchend',   _btnUp,   { passive: false });
-        btn.addEventListener('touchcancel',_btnUp,   { passive: false });
-        btn.addEventListener('mousedown',  _btnDown);
-        btn.addEventListener('mouseup',    _btnUp);
-      }
-      log('phone-spray-btn ハンドラ接続完了', 'ok');
-    }
-    _bindPhoneSprayBtn();
-    ===== 旧ポインター機能ブロック終わり ===== */
 
     // ========== ロール別: パネル表示 + セットアップ ==========
     let _obsResync = null; // observer の yaw/pitch 再同期用 (forcePose 受信後)
@@ -5282,8 +4766,6 @@
       if (_cameraTickFn) _cameraTickFn();
       for (const fn of updaters) fn(dt);
       sendPoseThrottled();
-      // アトラス再アップロードを 1 フレーム 1 回にまとめる (ドット毎の重複 upload を回避)
-      if (typeof window.__flushAtlasUpload === 'function') window.__flushAtlasUpload();
       // 自 avatar は非表示にしたため、毎フレーム追従処理は削除
       // ステータス表示 (10Hz に間引き — 毎フレーム DOM write は style recalc を誘発)
       if (window.__statusLastT == null) window.__statusLastT = 0;
