@@ -1153,6 +1153,77 @@
     const CUBE_HALF = 0.5;   // 1m キューブ半分 = 床上面までの距離
     // ドラッグ移動感度 (px / 1m)。master が変更 → server 経由で全クライアントへ配信される
     let moveSensitivity = 10;
+    // ===== Master 専用: TransformControls (移動ギズモ + 回転リング) =====
+    //   選択オブジェクトに translate + rotate の 2 ギズモを装着する。
+    //   drag 終了時に対応する socket イベント (controlPose / sceneObjectPose) で全クライアント反映。
+    let _tcTranslate = null;
+    let _tcRotate    = null;
+    window.__tcDragging = false;
+    function _getTransformTarget(obj) {
+      if (!obj) return null;
+      const u = obj.userData || {};
+      if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
+        const av = avatars.get(u.avatarId);
+        return av && av.grp;
+      }
+      if (u.sceneObjectId) {
+        const rec = sceneLightObjects.get(u.sceneObjectId);
+        return rec && rec.grp;
+      }
+      return obj;
+    }
+    function _emitSelectedPose() {
+      if (!selectedObject) return;
+      const target = _getTransformTarget(selectedObject);
+      if (!target) return;
+      const u = selectedObject.userData || {};
+      if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
+        if (socket && socket.connected) {
+          const p = target.position; const q = target.quaternion;
+          socket.emit('controlPose', {
+            targetId: u.avatarId,
+            x: p.x, y: p.y, z: p.z,
+            qx: q.x, qy: q.y, qz: q.z, qw: q.w,
+          });
+        }
+      } else if (u.sceneObjectId) {
+        if (socket && socket.connected) {
+          const p = target.position;
+          socket.emit('sceneObjectPose', { id: u.sceneObjectId, x: p.x, y: p.y, z: p.z });
+        }
+      }
+    }
+    function _initMasterGizmos() {
+      if (ROLE !== 'master') return;
+      if (_tcTranslate) return;
+      if (typeof THREE.TransformControls !== 'function') {
+        log('TransformControls 未ロード — ギズモ無効', 'err');
+        return;
+      }
+      _tcTranslate = new THREE.TransformControls(camera, renderer.domElement);
+      _tcTranslate.setMode('translate');
+      _tcTranslate.setSize(0.8);
+      _tcTranslate.setSpace('world');
+      scene.add(_tcTranslate);
+      _tcRotate = new THREE.TransformControls(camera, renderer.domElement);
+      _tcRotate.setMode('rotate');
+      _tcRotate.setSize(1.1);
+      _tcRotate.setSpace('local');
+      scene.add(_tcRotate);
+      const onDrag = (e) => { window.__tcDragging = !!e.value; };
+      _tcTranslate.addEventListener('dragging-changed', onDrag);
+      _tcRotate.addEventListener('dragging-changed', onDrag);
+      _tcTranslate.addEventListener('objectChange', _emitSelectedPose);
+      _tcRotate.addEventListener('objectChange', _emitSelectedPose);
+    }
+    function _attachGizmosTo(obj) {
+      if (!_tcTranslate) return;
+      const target = _getTransformTarget(obj);
+      if (target) { _tcTranslate.attach(target); _tcRotate.attach(target); }
+      else        { _tcTranslate.detach();      _tcRotate.detach(); }
+    }
+    window.__initMasterGizmos = _initMasterGizmos;
+
     function selectObject(obj) {
       if (selectedObject === obj) return;
       // 選択枠は子孫の LineSegments (isLineSegments===true) 全てを対象。
@@ -1179,6 +1250,8 @@
       } else {
         log('deselect', 'ok');
       }
+      // master: TransformControls (移動ギズモ + 回転リング) 装着/取り外し
+      if (ROLE === 'master') _attachGizmosTo(obj);
       updateSelectionHint();
     }
     function updateSelectionHint() {
@@ -3282,19 +3355,25 @@
       }
 
       function _pressBegin(x, y) {
+        // TransformControls のギズモドラッグ中は本体の click を無視
+        if (window.__tcDragging) return;
         _pressAt = { x, y };
         _tapMoved = false;
         _dragState = null;
         window.__cubeDragActive = false;
         const hit = _raycastAt(x, y);
-        // 空の空間 (selectable に当たらず) + 何も選択していない → スプレーの候補として長押し計測開始
-        //   移動は許容しない (tapMoved=true になった時点でキャンセル)。release で停止。
-        if (!hit && !selectedObject) {
+        // オブジェクト外のクリック: 選択中なら解除 (self-move モードに戻る)
+        if (!hit) {
+          if (selectedObject) {
+            selectObject(null);
+            return;
+          }
+          // 無選択状態での空クリックはスプレー長押しの開始候補
           _spraySelf.pressStartT = performance.now();
           _spraySelf.armed = false;
           _spraySelf.lastEmitT = 0;
+          return;
         }
-        if (!hit) return;
         const obj = hit.object;
 
         // 移動 Box (cube1..4) — 全ロール共通仕様:
@@ -3643,35 +3722,38 @@
         if (keys.has('KeyD')) moveTmp.addScaledVector(right, speed);
         if (keys.has('KeyQ')) moveTmp.y -= speed;
         if (keys.has('KeyE')) moveTmp.y += speed;
-        // Master + シーンオブジェクト選択中 → オブジェクトを移動 (カメラは動かさない)
-        if (ROLE === 'master' && selectedObject && selectedObject.userData
-            && selectedObject.userData.sceneObjectId) {
-          const oid = selectedObject.userData.sceneObjectId;
-          const rec = sceneLightObjects.get(oid);
-          if (rec && (moveTmp.x || moveTmp.y || moveTmp.z)) {
-            rec.grp.position.add(moveTmp);
-            // 床下貫通防止 + 大きな範囲外へ飛ばないようクランプ
+        // Master + 任意のオブジェクト選択中 → オブジェクトを移動 (カメラは動かさない)
+        //   対象: scene light / observer avatar (apex/base) / その他 selectable
+        //   選択外クリックで selectObject(null) されたらこの分岐は走らず camera 移動に戻る
+        if (ROLE === 'master' && selectedObject) {
+          const target = _getTransformTarget(selectedObject);
+          const u = selectedObject.userData || {};
+          if (target && (moveTmp.x || moveTmp.y || moveTmp.z)) {
+            target.position.add(moveTmp);
             const HL2 = FIELD_HALF * 2;
-            rec.grp.position.x = Math.max(-HL2, Math.min(HL2, rec.grp.position.x));
-            rec.grp.position.z = Math.max(-HL2, Math.min(HL2, rec.grp.position.z));
-            rec.grp.position.y = Math.max(0.05, Math.min(50, rec.grp.position.y));
-            // サーバー送信 (throttle 40ms)、エコー抑制フラグ
+            target.position.x = Math.max(-HL2, Math.min(HL2, target.position.x));
+            target.position.z = Math.max(-HL2, Math.min(HL2, target.position.z));
+            target.position.y = Math.max(0.05, Math.min(50, target.position.y));
             const now = performance.now();
             if (now - _sceneObjSentAt > 40) {
               _sceneObjSentAt = now;
-              window.__selfMovingObjId = oid;
-              // 少し後にフラグを解除 (echo 到着後)
-              clearTimeout(window.__selfMovingObjTimer);
-              window.__selfMovingObjTimer = setTimeout(() => {
-                window.__selfMovingObjId = null;
-              }, 200);
               if (socket && socket.connected) {
-                socket.emit('sceneObjectPose', {
-                  id: oid,
-                  x: rec.grp.position.x,
-                  y: rec.grp.position.y,
-                  z: rec.grp.position.z,
-                });
+                if (u.sceneObjectId) {
+                  window.__selfMovingObjId = u.sceneObjectId;
+                  clearTimeout(window.__selfMovingObjTimer);
+                  window.__selfMovingObjTimer = setTimeout(() => { window.__selfMovingObjId = null; }, 200);
+                  socket.emit('sceneObjectPose', {
+                    id: u.sceneObjectId,
+                    x: target.position.x, y: target.position.y, z: target.position.z,
+                  });
+                } else if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
+                  const q = target.quaternion;
+                  socket.emit('controlPose', {
+                    targetId: u.avatarId,
+                    x: target.position.x, y: target.position.y, z: target.position.z,
+                    qx: q.x, qy: q.y, qz: q.z, qw: q.w,
+                  });
+                }
               }
             }
           }
@@ -4059,6 +4141,8 @@
     // MASTER セットアップ (クライアント選択 + 強制ポーズ + Off-Axis + viewerEye)
     // ============================================================
     function setupMaster() {
+      // TransformControls ギズモの遅延初期化 (TransformControls スクリプトロード後)
+      _initMasterGizmos();
       // ========== dirty フラグ ヘルパ (input echo 焼き潰し防止) ==========
       //   ・全 master 入力欄で `input` イベント → dirty=true
       //   ・socket echo (viewerEye / moveConfig / fogConfig / forcePose) 受信時、
