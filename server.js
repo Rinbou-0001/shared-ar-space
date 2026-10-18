@@ -91,7 +91,7 @@ let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpa
 
 // FogExp2 密度共有パラメータ (space2 で使用、master が変更 → 全クライアントへ配信)
 //   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密、0.1 = デフォルト
-let fogConfig = { density: 0.1 };
+let fogConfig = { density: 0.0 };
 
 // オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
 //   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
