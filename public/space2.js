@@ -811,8 +811,12 @@
     scene.add(sprayDome);
     // raycast 専用リスト (selectables とは分離 — 選択ロジックに影響させない)
     //   旧 sprayDome も残す (後方互換、空のまま。デフォルト target として使う)
-    const _sprayables = [sprayDome];
-    sprayDome.visible = false;   // space2 では空気中スプレーは廃止、物体表面のみ
+    //   three.js r150 の raycaster は visible=false のメッシュも hit するため、
+    //   旧 sprayDome は _sprayables に入れずに完全除外する (以前は visible=false で
+    //   安全と考えていたがそれは誤りで、半径 10m のドーム球が camera から 9m 付近で
+    //   常に先に raycast ヒットし、壁/天井/床への到達を全て塞いでいた)
+    const _sprayables = [];
+    sprayDome.visible = false;
 
     // ===== 統合アトラス方式ペイント基盤 (space1 同等コスト、1 枚テクスチャ共有) =====
     //   床・4 壁・各 Cube は 1 枚の CanvasTexture (アトラス) を共有し、各メッシュの UV
@@ -1209,19 +1213,22 @@
             ') pos=(' + _sprayOrigin.x.toFixed(1) + ',' + _sprayOrigin.y.toFixed(1) + ',' + _sprayOrigin.z.toFixed(1) + ')', 'ok');
       }
       const hits = _sprayRay.intersectObjects(_sprayables, false);
-      if (hits.length === 0 || !hits[0].uv) {
-        if (window.__sprayDirCount % 10 === 1) log('no hit', 'err');
+      // paintRT を持つ最初のヒットを採用 (非 paintable は skip)
+      let hit = null;
+      for (const h of hits) {
+        if (h && h.uv && h.object && h.object.userData && h.object.userData.paintRT) {
+          hit = h;
+          break;
+        }
+      }
+      if (!hit) {
+        if (window.__sprayDirCount % 10 === 1) log('no paintable hit (' + hits.length + ' candidates)', 'err');
         return;
       }
-      const hit = hits[0];
       const uv = hit.uv;
       const target = hit.object;
       const tgtName = (target && target.name) || '';
-      const rt = target && target.userData && target.userData.paintRT;
-      if (!rt) {
-        log('hit=' + tgtName + ' だが paintRT 無し (スキップ)', 'err');
-        return;
-      }
+      const rt = target.userData.paintRT;
       // 診断: 新しい対象をヒットしたら 1 回だけログ
       if (!window.__sprayHitSeen) window.__sprayHitSeen = new Set();
       if (!window.__sprayHitSeen.has(tgtName)) {
