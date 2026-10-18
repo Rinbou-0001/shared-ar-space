@@ -92,7 +92,7 @@
     //   ★ 床面自体は純白 (0xffffff) なので視覚的変化なし (白+白=白)。
     //      グリッド/境界線 (濃グレー) と他クライアントのアバターだけがフェードして見える。
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
-    scene.fog = new THREE.FogExp2(0xffffff, 0.1);
+    scene.fog = new THREE.FogExp2(0xffffff, 0.0);   // 初期値 0 (フォグ無効スタート)
 
     // ========== Fog 中心切替 (効果3) ==========
     //   既定: Three.js 標準の fog = カメラからの距離に基づくフェード (アバター追従)
@@ -979,6 +979,28 @@
     }
     // CanvasTexture 方式で必要だったフレーム末尾フラッシュは不要 (shader paint は即時 GPU 反映)
     window.__flushAtlasUpload = function () {};
+    // 初回に atlasRT を透明クリア (未初期化メモリによるノイズ描画を防止)
+    _clearAtlas();
+    // ペイントオーバーレイ用の共有マテリアル生成関数:
+    //   paint shader は OVER の premultiplied alpha で atlas に書き込む (RGB は alpha で前乗算済み) ため、
+    //   オーバーレイ側も CustomBlending (OneFactor, OneMinusSrcAlphaFactor) で描画しないと alpha が二重に
+    //   乗って見えなくなる (= 「スプレーが壁に届いていないように見える」原因)。
+    function _makeAtlasOverlayMaterial() {
+      return new THREE.MeshBasicMaterial({
+        map: _atlasTex,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        fog: true,
+        blending: THREE.CustomBlending,
+        blendEquation: THREE.AddEquation,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+        blendEquationAlpha: THREE.AddEquation,
+        blendSrcAlpha: THREE.OneFactor,
+        blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+      });
+    }
 
     // ===== 外壁: 40m × 40m エリアを囲む高さ 20m の 4 面 =====
     const WALL_HALF = 20;
@@ -998,13 +1020,10 @@
       wall.receiveShadow = true;
       scene.add(wall);
 
-      // ペイントオーバーレイ (壁の内側 0.01m 手前、アトラス共有)
+      // ペイントオーバーレイ (壁の内側 0.05m 手前、アトラス共有)
       const overlay = new THREE.Mesh(
         new THREE.PlaneGeometry(WALL_SIDE, WALL_H_M),
-        new THREE.MeshBasicMaterial({
-          map: _atlasTex, transparent: true, side: THREE.DoubleSide,
-          depthWrite: false, alphaTest: 0.01, fog: true,
-        })
+        _makeAtlasOverlayMaterial()
       );
       _remapMeshUV(overlay, id);
       overlay.userData.sprayRegionId = id;   // ブラシ密度参照用
@@ -1048,10 +1067,7 @@
     {
       const floorOverlay = new THREE.Mesh(
         new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
-        new THREE.MeshBasicMaterial({
-          map: _atlasTex, transparent: true, side: THREE.DoubleSide,
-          depthWrite: false, alphaTest: 0.01, fog: true,
-        })
+        _makeAtlasOverlayMaterial()
       );
       _remapMeshUV(floorOverlay, 'floor-paint');
       floorOverlay.userData.sprayRegionId = 'floor-paint';
@@ -1061,6 +1077,41 @@
       floorOverlay.renderOrder = 11;
       scene.add(floorOverlay);
       _sprayables.push(floorOverlay);
+    }
+
+    // ===== 天面 (天井) 40m × 40m, 高さ WALL_H_M =====
+    //   ・床と同じ形状を天高に配置し、内側 (下向き) 向きにする
+    //   ・床と同じく 1m グリッドを下面に貼る
+    //   ・現状スプレーは当たらない (ceiling 専用のアトラス領域は未割当だが、将来追加可能)
+    {
+      const ceiling = new THREE.Mesh(
+        new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
+        new THREE.MeshStandardMaterial({
+          color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+        })
+      );
+      ceiling.rotation.x = Math.PI / 2;   // 床と逆の向き (法線 -Y = 下向きに内側)
+      ceiling.position.set(0, WALL_H_M, 0);
+      ceiling.name = 'ceiling';
+      ceiling.receiveShadow = true;
+      scene.add(ceiling);
+
+      // 1m グリッド (ceiling の下面に薄グレー) — 床と同じ密度 (41 + 41 本)
+      const _cLines = [];
+      for (let i = 0; i <= 2 * WALL_HALF; i++) {
+        const x = -WALL_HALF + i;
+        _cLines.push(x, -WALL_HALF, 0.011,  x, +WALL_HALF, 0.011);
+      }
+      for (let j = 0; j <= 2 * WALL_HALF; j++) {
+        const z = -WALL_HALF + j;
+        _cLines.push(-WALL_HALF, z, 0.011,  +WALL_HALF, z, 0.011);
+      }
+      const _cGeom = new THREE.BufferGeometry();
+      _cGeom.setAttribute('position', new THREE.Float32BufferAttribute(_cLines, 3));
+      const _cGrid = new THREE.LineSegments(_cGeom, new THREE.LineBasicMaterial({ color: 0x9ca3af }));
+      _cGrid.rotation.x = Math.PI / 2;
+      _cGrid.position.set(0, WALL_H_M - 0.02, 0);   // 天面の少し下 (内側)
+      scene.add(_cGrid);
     }
 
     // ===== 可動 Cube/Box: 共有アトラスのスロットに UV remap + 材質共有 =====
