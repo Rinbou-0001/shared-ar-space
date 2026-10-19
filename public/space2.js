@@ -599,34 +599,81 @@
     // raycast 対象リスト (_makePaintable 経由で壁/床/天井が push される)
     const _sprayables = [];
 
-    // ===== 草オブジェクト発生 (wood ペイントモードカメラ専用) =====
-    //   wood 色 (#1b5e20) のスプレーヒット点を world 空間でサンプリング。
-    //   8cm ボクセル (Union-Find) で連結成分を管理し、クラスタのボクセル数が
-    //   GRASS_OPEN_VOXELS (直径 2m 円相当 ≒ 491) を超えた瞬間に「開放」。
-    //   開放後は、クラスタに属する全ボクセルから草を一斉発生 (フレーム分割)。
-    //   以後そのクラスタに追加される新ボクセルは即時 1 回だけ発火。
-    //   送信元 (sprayer 自身) が判定 → 'grassSpawn' 送信 → 全クライアントで描画。
-    const GRASS_WOOD_HEX = '1b5e20';
-    const GRASS_SAMPLE_INTERVAL_MS = 50;         // 同一ボクセルへのサンプル記録間隔
-    const GRASS_VOXEL = 0.08;                    // 結合距離 = ボクセル辺
-    const GRASS_VOXEL_MIN_POINTS = 1;            // 1 ボクセルを「占有」と判定するスプレー点数 (1 ヒットで占有)
-    const GRASS_OPEN_VOXELS = 491;               // クラスタ開放閾値 (= π/0.08² ≒ 直径2m円)
-    const GRASS_HIT_FILL_MAX_R = 0.5;            // 1 ヒットで占有化する tangent disk の最大半径 (m)
-    const GRASS_DEBUG_LOG_INTERVAL_MS = 2000;    // 診断ログ間隔
-    const GRASS_PER_VOXEL = 4;                   // 1 ボクセル発火あたりの草本数
-    const GRASS_OPEN_BURST_PER_TICK = 60;        // 開放瞬間のフレーム分割スパイク回避
-    const GRASS_MAX_INSTANCES = 8000;            // InstancedMesh 上限
-    const GRASS_BLADE_H = 0.06;                  // 草 1 本の高さ (6cm)
-    const GRASS_BLADE_W = 0.012;                 // 草 1 本の幅
-    // 検出状態 (sprayer 自身のローカル集計) ─ Union-Find
-    //   key = 'ix,iy,iz' → { ix,iy,iz, pts, parent, rank, size, gateOpen, spawned,
-    //                        cx,cy,cz (world center), nx,ny,nz (法線合計), nCount, lastT }
-    const _grassVoxels = new Map();
-    const _grassPendingLocal = [];               // 開放時の自分向け遅延描画キュー
-    // 描画状態 (全クライアント)
-    let _grassMesh = null;
-    let _grassCount = 0;
-    const _grassDummy = (window.THREE ? new THREE.Object3D() : null);
+    // ===== ペイントモード派生オブジェクト発生 (wood/river/sky 統合アーキテクチャ) =====
+    //   方式: 案5 (チャンク + カメラカリング) ベース + モード汎用化
+    //   ・8cm ボクセル (Union-Find) で連結成分管理、ボクセル数が 491 (直径2m円相当)
+    //     を超えたクラスタのみ「開放」
+    //   ・開放後は 2m×2m×2m チャンク単位の InstancedMesh へボクセル毎に 1 回発火
+    //   ・カメラから CULL_DIST 以上のチャンクは visible=false (描画コスト定数化)
+    //   ・各モードはジオメトリ・密度・サーフェス制約が別 (MODE_RULES テーブルで差替え)
+    //   ・現状スプレー発火は wood のみ有効。river/sky はテーブルを追加するだけで有効化可能。
+    //   ・送信元 (sprayer 自身) が検出 → 'modeSpawn' を emit → 全クライアントで描画。
+    const MODE_VOXEL = 0.08;                     // 連結距離 = ボクセル辺
+    const MODE_VOXEL_MIN_POINTS = 1;             // ボクセル占有の最小スプレー点数
+    const MODE_OPEN_VOXELS = 491;                // クラスタ開放閾値 (直径2m円)
+    const MODE_HIT_FILL_MAX_R = 0.5;             // 1 ヒットで占有化する tangent disk 最大半径 (m)
+    const MODE_OPEN_BURST_PER_TICK = 60;         // 開放瞬間のフレーム分割スパイク回避
+    const MODE_CHUNK_SIZE = 2.0;                 // チャンク辺 (m)
+    const MODE_CULL_DIST = 6.0;                  // カメラからこの距離を超えたチャンクは非表示 (m)
+    const MODE_CULL_INTERVAL_MS = 200;           // カリング判定の間隔 (全チャンクを毎フレーム走査しない)
+    const MODE_DEBUG_LOG_INTERVAL_MS = 2000;     // 診断ログ間隔
+    // モード別ルール (ジオメトリ/密度/描画制約)。make() は呼ばれた時に lazy 生成。
+    const MODE_RULES = {
+      wood: {
+        color: '1b5e20',
+        perVoxel: 4,                             // 1 ボクセルあたりの本数
+        maxPerChunk: 2000,                       // 1 チャンク InstancedMesh の上限
+        makeGeometry: () => _makeGrassGeometry(),
+        makeMaterial: () => new THREE.MeshBasicMaterial({
+          color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
+        }),
+        scaleJitter: [0.7, 1.3],
+        orientUpWithNormal: true,
+      },
+      // 将来有効化する例 (まだスプレー発火には紐付けていない)
+      river: {
+        color: '008cdd',
+        perVoxel: 1,
+        maxPerChunk: 2000,
+        makeGeometry: () => _makeFlatTileGeometry(MODE_VOXEL * 1.1),
+        makeMaterial: () => new THREE.MeshBasicMaterial({
+          color: 0x1aa0e8, side: THREE.DoubleSide, transparent: true, opacity: 0.75,
+        }),
+        scaleJitter: [0.9, 1.2],
+        orientUpWithNormal: true,                // 水面は面に沿わせる
+      },
+      sky: {
+        color: '002044',
+        perVoxel: 2,
+        maxPerChunk: 2000,
+        makeGeometry: () => _makeBillboardStarGeometry(0.025),
+        makeMaterial: () => new THREE.MeshBasicMaterial({
+          color: 0xaacfff, transparent: true, opacity: 0.9, depthWrite: false,
+        }),
+        scaleJitter: [0.5, 1.5],
+        orientUpWithNormal: false,               // 星は常にカメラ正対 (手動 billboard)
+      },
+    };
+    // スプレー発火を有効化するモード集合 (現状は wood のみ)
+    const MODE_SPRAY_ACTIVE = new Set(['wood']);
+    // 色 hex → mode 名の逆引き
+    const _modeByColor = new Map();
+    for (const [m, r] of Object.entries(MODE_RULES)) _modeByColor.set(r.color.toLowerCase(), m);
+
+    // 検出状態 (sprayer 自身のローカル集計、モード別 Union-Find)
+    //   key = 'mode|ix,iy,iz' → { mode, ix, iy, iz, pts, parent, rank, size,
+    //                             gateOpen, spawned, nSumX,Y,Z, nCount, lastT }
+    const _modeVoxels = new Map();
+    // 開放時の遅延発火キュー (sprayer のみ使用)
+    const _modePendingLocal = [];
+    // チャンク (全クライアント共通)
+    //   key = 'mode|cx,cy,cz' → { mode, cx, cy, cz, mesh, count, group }
+    const _modeChunks = new Map();
+    const _modeChunkDummy = (window.THREE ? new THREE.Object3D() : null);
+    // チャンク全体を束ねる group (scene に 1 つだけ add)
+    let _modeChunkGroup = null;
+    // カメラカリングの throttle
+    let _modeLastCullT = 0;
 
     // ===== 統合アトラス方式ペイント基盤 (space1 同等コスト、1 枚テクスチャ共有) =====
     //   床・4 壁・各 Cube は 1 枚の CanvasTexture (アトラス) を共有し、各メッシュの UV
@@ -1107,219 +1154,254 @@
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
 
-    // 草システム: InstancedMesh を lazy 初期化
-    function _ensureGrassMesh() {
-      if (_grassMesh) return _grassMesh;
-      // X-shaped 2 枚クロスで草 1 本を表現する簡易ジオメトリ
+    // ============ モード別ジオメトリ ============
+    function _makeGrassGeometry() {
       const g = new THREE.BufferGeometry();
-      const H = GRASS_BLADE_H, W = GRASS_BLADE_W;
-      // 2 枚のプレーン (±45°) を 1 ジオメトリに結合: 計 8 頂点、12 index
+      const H = 0.06, W = 0.012;
       const positions = new Float32Array([
-        // plane A (XY)
         -W / 2, 0, 0,   W / 2, 0, 0,   W / 2, H, 0,  -W / 2, H, 0,
-        // plane B (YZ)
          0, 0, -W / 2,  0, 0, W / 2,   0, H, W / 2,   0, H, -W / 2,
       ]);
-      const indices = [
-        0, 1, 2, 0, 2, 3,
-        4, 5, 6, 4, 6, 7,
-      ];
+      const indices = [0,1,2, 0,2,3, 4,5,6, 4,6,7];
       g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       g.setIndex(indices);
       g.computeVertexNormals();
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
-      });
-      _grassMesh = new THREE.InstancedMesh(g, mat, GRASS_MAX_INSTANCES);
-      _grassMesh.count = 0;
-      _grassMesh.name = 'grass-instanced';
-      _grassMesh.frustumCulled = false;
-      scene.add(_grassMesh);
-      return _grassMesh;
+      return g;
+    }
+    function _makeFlatTileGeometry(size) {
+      const g = new THREE.PlaneGeometry(size, size);
+      g.rotateX(-Math.PI / 2);  // 水平、normal は +Y
+      return g;
+    }
+    function _makeBillboardStarGeometry(size) {
+      const g = new THREE.PlaneGeometry(size, size);
+      return g;
     }
 
-    // normal を Up に合わせる Quaternion を生成
-    const _grassAxisY = new THREE.Vector3(0, 1, 0);
-    const _grassTmpV1 = new THREE.Vector3();
-    const _grassTmpV2 = new THREE.Vector3();
-    const _grassTmpQ  = new THREE.Quaternion();
-    function _grassOrientQuat(nx, ny, nz, outQ) {
-      _grassTmpV1.set(nx, ny, nz).normalize();
-      outQ.setFromUnitVectors(_grassAxisY, _grassTmpV1);
+    // ============ Union-Find ============
+    function _modeFind(b) {
+      while (b.parent !== b) { b.parent = b.parent.parent; b = b.parent; }
+      return b;
+    }
+    function _modeUnion(a, b) {
+      const ra = _modeFind(a), rb = _modeFind(b);
+      if (ra === rb) return ra;
+      if (ra.rank < rb.rank) {
+        ra.parent = rb; rb.size += ra.size; rb.gateOpen = rb.gateOpen || ra.gateOpen; return rb;
+      } else if (ra.rank > rb.rank) {
+        rb.parent = ra; ra.size += rb.size; ra.gateOpen = ra.gateOpen || rb.gateOpen; return ra;
+      } else {
+        rb.parent = ra; ra.rank++; ra.size += rb.size; ra.gateOpen = ra.gateOpen || rb.gateOpen; return ra;
+      }
     }
 
-    // 1 ボクセル単位の草発生 (grassSpawn ペイロード)
-    //   data: { x,y,z (ボクセル中心), nx,ny,nz (法線), r (ジッタ半径 = VOXEL/2) }
-    function _renderGrassAt(data) {
-      if (!data) return;
-      const mesh = _ensureGrassMesh();
-      const r = Math.max(0.01, Math.min(0.5, data.r || GRASS_VOXEL * 0.5));
-      const n = GRASS_PER_VOXEL;
-      _grassOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _grassTmpQ);
-      const nrm = _grassTmpV1.set(data.nx || 0, data.ny || 1, data.nz || 0).normalize();
-      const t1 = _grassTmpV2.set(1, 0, 0);
+    // ============ チャンク管理 ============
+    function _ensureChunkGroup() {
+      if (_modeChunkGroup) return _modeChunkGroup;
+      _modeChunkGroup = new THREE.Group();
+      _modeChunkGroup.name = 'mode-spawn-root';
+      scene.add(_modeChunkGroup);
+      return _modeChunkGroup;
+    }
+    function _chunkKey(mode, cx, cy, cz) { return mode + '|' + cx + ',' + cy + ',' + cz; }
+    function _ensureChunk(mode, cx, cy, cz) {
+      const key = _chunkKey(mode, cx, cy, cz);
+      let ch = _modeChunks.get(key);
+      if (ch) return ch;
+      const rule = MODE_RULES[mode]; if (!rule) return null;
+      const group = _ensureChunkGroup();
+      const geom = rule.makeGeometry();
+      const mat  = rule.makeMaterial();
+      const mesh = new THREE.InstancedMesh(geom, mat, rule.maxPerChunk);
+      mesh.count = 0;
+      mesh.name = 'chunk-' + key;
+      mesh.frustumCulled = false;  // カリングは手動 (距離ベース)
+      // チャンク中心にメッシュを置くわけではない: 各 instance は world 座標で配置する
+      // 位置リセットは group の 0,0,0 のまま。(mesh.position = 0,0,0)
+      group.add(mesh);
+      ch = { mode, cx, cy, cz, mesh, count: 0, cxWorld: (cx + 0.5) * MODE_CHUNK_SIZE,
+             cyWorld: (cy + 0.5) * MODE_CHUNK_SIZE, czWorld: (cz + 0.5) * MODE_CHUNK_SIZE };
+      _modeChunks.set(key, ch);
+      return ch;
+    }
+    function _chunkOfWorld(mode, wx, wy, wz) {
+      const cx = Math.floor(wx / MODE_CHUNK_SIZE);
+      const cy = Math.floor(wy / MODE_CHUNK_SIZE);
+      const cz = Math.floor(wz / MODE_CHUNK_SIZE);
+      return _ensureChunk(mode, cx, cy, cz);
+    }
+
+    // カメラカリング: 遠いチャンクは visible=false
+    const _modeCullCamPos = (window.THREE ? new THREE.Vector3() : null);
+    function _modeCullTick() {
+      const nowT = performance.now();
+      if (nowT - _modeLastCullT < MODE_CULL_INTERVAL_MS) return;
+      _modeLastCullT = nowT;
+      if (!camera || !_modeChunkGroup) return;
+      camera.getWorldPosition(_modeCullCamPos);
+      const d2 = MODE_CULL_DIST * MODE_CULL_DIST;
+      for (const ch of _modeChunks.values()) {
+        const dx = ch.cxWorld - _modeCullCamPos.x;
+        const dy = ch.cyWorld - _modeCullCamPos.y;
+        const dz = ch.czWorld - _modeCullCamPos.z;
+        const inside = (dx * dx + dy * dy + dz * dz) <= d2;
+        if (ch.mesh.visible !== inside) ch.mesh.visible = inside;
+      }
+    }
+
+    // ============ ジオメトリ補助 (法線→quaternion) ============
+    const _modeAxisY = new THREE.Vector3(0, 1, 0);
+    const _modeTmpV1 = new THREE.Vector3();
+    const _modeTmpV2 = new THREE.Vector3();
+    const _modeTmpQ  = new THREE.Quaternion();
+    function _modeOrientQuat(nx, ny, nz, outQ) {
+      _modeTmpV1.set(nx, ny, nz);
+      if (_modeTmpV1.lengthSq() < 1e-6) { outQ.identity(); return; }
+      _modeTmpV1.normalize();
+      outQ.setFromUnitVectors(_modeAxisY, _modeTmpV1);
+    }
+
+    // ============ 発火 (ボクセル → チャンクの InstancedMesh へ) ============
+    //   data: { mode, x, y, z, nx, ny, nz, r }
+    function _renderModeSpawnAt(data) {
+      if (!data || !data.mode) return;
+      const rule = MODE_RULES[data.mode]; if (!rule) return;
+      const ch = _chunkOfWorld(data.mode, data.x, data.y, data.z);
+      if (!ch) return;
+      if (ch.count >= rule.maxPerChunk) return;
+      const r = Math.max(0.01, Math.min(0.5, data.r || MODE_VOXEL * 0.5));
+      const n = rule.perVoxel;
+      _modeOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _modeTmpQ);
+      const nrm = _modeTmpV1.set(data.nx || 0, data.ny || 1, data.nz || 0);
+      if (nrm.lengthSq() < 1e-6) nrm.set(0, 1, 0);
+      nrm.normalize();
+      const t1 = _modeTmpV2.set(1, 0, 0);
       if (Math.abs(nrm.dot(t1)) > 0.9) t1.set(0, 0, 1);
       t1.sub(nrm.clone().multiplyScalar(nrm.dot(t1))).normalize();
       const t2 = new THREE.Vector3().crossVectors(nrm, t1).normalize();
+      const [sMin, sMax] = rule.scaleJitter;
       for (let i = 0; i < n; i++) {
-        if (_grassCount >= GRASS_MAX_INSTANCES) break;
+        if (ch.count >= rule.maxPerChunk) break;
         const rr = Math.sqrt(Math.random()) * r;
         const th = Math.random() * Math.PI * 2;
         const dx = Math.cos(th) * rr, dy = Math.sin(th) * rr;
         const px = data.x + t1.x * dx + t2.x * dy;
-        const py = data.y + t1.y * dx + t2.y * dy + nrm.y * 0.001;
+        const py = data.y + t1.y * dx + t2.y * dy + (rule.orientUpWithNormal ? nrm.y * 0.001 : 0);
         const pz = data.z + t1.z * dx + t2.z * dy;
-        _grassDummy.position.set(px, py, pz);
-        _grassDummy.quaternion.copy(_grassTmpQ);
-        _grassDummy.rotateY(Math.random() * Math.PI);
-        _grassDummy.scale.setScalar(0.7 + Math.random() * 0.6);
-        _grassDummy.updateMatrix();
-        mesh.setMatrixAt(_grassCount, _grassDummy.matrix);
-        _grassCount++;
+        _modeChunkDummy.position.set(px, py, pz);
+        if (rule.orientUpWithNormal) {
+          _modeChunkDummy.quaternion.copy(_modeTmpQ);
+          _modeChunkDummy.rotateY(Math.random() * Math.PI);
+        } else {
+          _modeChunkDummy.quaternion.identity();
+        }
+        const s = sMin + Math.random() * (sMax - sMin);
+        _modeChunkDummy.scale.setScalar(s);
+        _modeChunkDummy.updateMatrix();
+        ch.mesh.setMatrixAt(ch.count, _modeChunkDummy.matrix);
+        ch.count++;
       }
-      mesh.count = _grassCount;
-      mesh.instanceMatrix.needsUpdate = true;
+      ch.mesh.count = ch.count;
+      ch.mesh.instanceMatrix.needsUpdate = true;
     }
 
-    function _clearAllGrass() {
-      if (_grassMesh) { _grassMesh.count = 0; _grassMesh.instanceMatrix.needsUpdate = true; }
-      _grassCount = 0;
-      _grassVoxels.clear();
-      _grassPendingLocal.length = 0;
+    function _clearAllModeSpawn() {
+      for (const ch of _modeChunks.values()) {
+        ch.count = 0;
+        ch.mesh.count = 0;
+        ch.mesh.instanceMatrix.needsUpdate = true;
+      }
+      _modeVoxels.clear();
+      _modePendingLocal.length = 0;
     }
 
-    // ─── Union-Find helpers ───
-    function _grassFind(b) {
-      while (b.parent !== b) {
-        b.parent = b.parent.parent; // 経路圧縮
-        b = b.parent;
-      }
-      return b;
-    }
-    function _grassUnion(a, b) {
-      const ra = _grassFind(a), rb = _grassFind(b);
-      if (ra === rb) return ra;
-      // rank マージ + gateOpen は OR
-      if (ra.rank < rb.rank) {
-        ra.parent = rb;
-        rb.size += ra.size;
-        rb.gateOpen = rb.gateOpen || ra.gateOpen;
-        return rb;
-      } else if (ra.rank > rb.rank) {
-        rb.parent = ra;
-        ra.size += rb.size;
-        ra.gateOpen = ra.gateOpen || rb.gateOpen;
-        return ra;
-      } else {
-        rb.parent = ra;
-        ra.rank++;
-        ra.size += rb.size;
-        ra.gateOpen = ra.gateOpen || rb.gateOpen;
-        return ra;
-      }
-    }
-
-    // 1 ボクセル分の発火 (ローカル描画 + サーバー送信)
-    function _grassFireVoxel(b) {
+    // sprayer 自身用: 1 ボクセルを「占有」化、ゲート/発火判定して emit
+    function _modeFireVoxel(b) {
       if (b.spawned) return;
       b.spawned = true;
-      // ボクセル中心 (ワールド)
-      const cx = (b.ix + 0.5) * GRASS_VOXEL;
-      const cy = (b.iy + 0.5) * GRASS_VOXEL;
-      const cz = (b.iz + 0.5) * GRASS_VOXEL;
-      // 法線平均
+      const cx = (b.ix + 0.5) * MODE_VOXEL;
+      const cy = (b.iy + 0.5) * MODE_VOXEL;
+      const cz = (b.iz + 0.5) * MODE_VOXEL;
       const nlen = Math.hypot(b.nSumX, b.nSumY, b.nSumZ) || 1;
       const nx = b.nSumX / nlen, ny = b.nSumY / nlen, nz = b.nSumZ / nlen;
       const payload = {
+        mode: b.mode,
         x: +cx.toFixed(4), y: +cy.toFixed(4), z: +cz.toFixed(4),
         nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
-        r: +(GRASS_VOXEL * 0.5).toFixed(4),
+        r: +(MODE_VOXEL * 0.5).toFixed(4),
       };
-      _renderGrassAt(payload);
-      if (socket && socket.connected) socket.emit('grassSpawn', payload);
+      _renderModeSpawnAt(payload);
+      if (socket && socket.connected) socket.emit('modeSpawn', payload);
     }
-
-    // 開放瞬間に全ボクセルをペンディングキューへ (フレーム分割描画)
-    function _grassEnqueueBurst(root) {
+    function _modeEnqueueBurst(root) {
       let n = 0;
-      for (const b of _grassVoxels.values()) {
-        if (_grassFind(b) !== root) continue;
+      for (const b of _modeVoxels.values()) {
+        if (b.mode !== root.mode) continue;
+        if (_modeFind(b) !== root) continue;
         if (b.spawned) continue;
-        _grassPendingLocal.push(b);
+        _modePendingLocal.push(b);
         n++;
       }
-      log('grass gate open (voxels=' + root.size + ', burst=' + n + ')', 'ok');
+      log('[mode] gate open: ' + root.mode + ' (voxels=' + root.size + ', burst=' + n + ')', 'ok');
     }
-
-    // tick から呼ばれる: ペンディングキューを少しずつ消化
-    function _grassBurstTick() {
-      if (_grassPendingLocal.length === 0) return;
-      const take = Math.min(GRASS_OPEN_BURST_PER_TICK, _grassPendingLocal.length);
+    function _modeBurstTick() {
+      if (_modePendingLocal.length === 0) return;
+      const take = Math.min(MODE_OPEN_BURST_PER_TICK, _modePendingLocal.length);
       for (let i = 0; i < take; i++) {
-        const b = _grassPendingLocal.shift();
-        if (!b) continue;
-        if (b.spawned) continue;
-        // 既に開放済みかチェック (他プロセスで消化済みの場合もスキップ)
-        _grassFireVoxel(b);
+        const b = _modePendingLocal.shift();
+        if (!b || b.spawned) continue;
+        _modeFireVoxel(b);
       }
     }
-
-    // ボクセル 1 つを占有化し、26 近傍とマージ + ゲート/発火判定を行う内部ヘルパー
-    function _grassOccupyVoxel(ix, iy, iz, nx, ny, nz, nowT) {
-      const key = ix + ',' + iy + ',' + iz;
-      let bucket = _grassVoxels.get(key);
-      const isNew = !bucket;
+    function _modeOccupyVoxel(mode, ix, iy, iz, nx, ny, nz) {
+      const key = mode + '|' + ix + ',' + iy + ',' + iz;
+      let bucket = _modeVoxels.get(key);
       if (!bucket) {
         bucket = {
-          ix, iy, iz,
+          mode, ix, iy, iz,
           pts: 0,
           parent: null, rank: 0, size: 1,
           gateOpen: false, spawned: false,
           nSumX: 0, nSumY: 0, nSumZ: 0, nCount: 0,
-          lastT: 0,
         };
         bucket.parent = bucket;
-        _grassVoxels.set(key, bucket);
+        _modeVoxels.set(key, bucket);
       }
-      // 同一ボクセルは throttle 内でも占有情報 (pts, 法線) は保存 (開放判定で必要)
       bucket.pts++;
       bucket.nSumX += nx; bucket.nSumY += ny; bucket.nSumZ += nz;
       bucket.nCount++;
-      if (bucket.pts < GRASS_VOXEL_MIN_POINTS) return null;
-      // 26 近傍マージ
+      if (bucket.pts < MODE_VOXEL_MIN_POINTS) return null;
+      // 26 近傍マージ (同一モードのみ)
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
         if (!dx && !dy && !dz) continue;
-        const nk = (ix + dx) + ',' + (iy + dy) + ',' + (iz + dz);
-        const nb = _grassVoxels.get(nk);
+        const nk = mode + '|' + (ix + dx) + ',' + (iy + dy) + ',' + (iz + dz);
+        const nb = _modeVoxels.get(nk);
         if (!nb) continue;
-        if (nb.pts < GRASS_VOXEL_MIN_POINTS) continue;
-        _grassUnion(bucket, nb);
+        if (nb.pts < MODE_VOXEL_MIN_POINTS) continue;
+        _modeUnion(bucket, nb);
       }
       return bucket;
     }
 
-    // sprayer 自身の wood ヒットを受け取り、tangent disk 内の全ボクセルを占有化。
-    // 1 ヒット = (worldR) に相当する壁面エリアを一度にマークするため、閾値 (491 voxel)
-    // への到達が現実的な時間で可能になる。
+    // sprayer のヒット → 色から mode 解決 → tangent disk で各ボクセルを占有化
     const _tmpT1 = new THREE.Vector3();
     const _tmpT2 = new THREE.Vector3();
     const _tmpNrm = new THREE.Vector3();
-    function _pushWoodSprayHit(worldPt, normal, worldR, colorHex) {
-      if (!worldPt || !normal) return;
-      if (!colorHex || colorHex.toLowerCase() !== GRASS_WOOD_HEX) return;
-      const nowT = performance.now();
-      const r = Math.min(GRASS_HIT_FILL_MAX_R, Math.max(GRASS_VOXEL, worldR || GRASS_VOXEL));
+    function _pushPaintHit(worldPt, normal, worldR, colorHex) {
+      if (!worldPt || !normal || !colorHex) return;
+      const mode = _modeByColor.get(colorHex.toLowerCase());
+      if (!mode || !MODE_SPRAY_ACTIVE.has(mode)) return;
+      const r = Math.min(MODE_HIT_FILL_MAX_R, Math.max(MODE_VOXEL, worldR || MODE_VOXEL));
       _tmpNrm.set(normal.x, normal.y, normal.z);
       if (_tmpNrm.lengthSq() < 1e-6) _tmpNrm.set(0, 1, 0);
       _tmpNrm.normalize();
-      // 面上接線 2 軸
       _tmpT1.set(1, 0, 0);
       if (Math.abs(_tmpNrm.dot(_tmpT1)) > 0.9) _tmpT1.set(0, 0, 1);
       _tmpT1.sub(_tmpNrm.clone().multiplyScalar(_tmpNrm.dot(_tmpT1))).normalize();
       _tmpT2.copy(_tmpNrm).cross(_tmpT1).normalize();
-      const openRoots = new Set();   // 今回のヒットで開放に至った root を一意に集計
-      const touchedBuckets = [];     // 開放済みクラスタに所属するもの (即時発火候補)
-      const step = GRASS_VOXEL;      // サンプルステップ (ボクセル辺と同じで十分覆える)
+      const openRoots = new Set();
+      const touchedBuckets = [];
+      const step = MODE_VOXEL;
       const rr = r * r;
       for (let a = -r; a <= r + 1e-6; a += step) {
         for (let b = -r; b <= r + 1e-6; b += step) {
@@ -1327,55 +1409,75 @@
           const px = worldPt.x + _tmpT1.x * a + _tmpT2.x * b;
           const py = worldPt.y + _tmpT1.y * a + _tmpT2.y * b;
           const pz = worldPt.z + _tmpT1.z * a + _tmpT2.z * b;
-          const ix = Math.floor(px / GRASS_VOXEL);
-          const iy = Math.floor(py / GRASS_VOXEL);
-          const iz = Math.floor(pz / GRASS_VOXEL);
-          const bucket = _grassOccupyVoxel(ix, iy, iz, _tmpNrm.x, _tmpNrm.y, _tmpNrm.z, nowT);
+          const ix = Math.floor(px / MODE_VOXEL);
+          const iy = Math.floor(py / MODE_VOXEL);
+          const iz = Math.floor(pz / MODE_VOXEL);
+          const bucket = _modeOccupyVoxel(mode, ix, iy, iz, _tmpNrm.x, _tmpNrm.y, _tmpNrm.z);
           if (bucket) touchedBuckets.push(bucket);
         }
       }
-      // ゲート判定 + 発火
       for (const bucket of touchedBuckets) {
-        const root = _grassFind(bucket);
+        const root = _modeFind(bucket);
         if (!root.gateOpen) {
-          if (root.size >= GRASS_OPEN_VOXELS && !openRoots.has(root)) {
+          if (root.size >= MODE_OPEN_VOXELS && !openRoots.has(root)) {
             root.gateOpen = true;
             openRoots.add(root);
-            _grassEnqueueBurst(root);
+            _modeEnqueueBurst(root);
           }
           continue;
         }
-        // 開放済み → このボクセル単独発火 (未発火のみ)
-        _grassFireVoxel(bucket);
+        _modeFireVoxel(bucket);
       }
-      _grassMaybeDebugLog(nowT, worldPt, r);
+      _modeMaybeDebugLog(performance.now(), r);
     }
 
-    // ============ 診断ログ ============
-    let _grassDbgLastT = 0;
-    let _grassDbgHits = 0;
-    function _grassMaybeDebugLog(nowT, worldPt, r) {
-      _grassDbgHits++;
-      if (nowT - _grassDbgLastT < GRASS_DEBUG_LOG_INTERVAL_MS) return;
-      _grassDbgLastT = nowT;
-      // 占有ボクセル数、最大クラスタサイズ、開放済みクラスタ数、総草本数
-      let occ = 0, maxSize = 0, openRoots = 0;
+    // ============ 診断ログ (チャンク + モード別統計) ============
+    let _modeDbgLastT = 0;
+    let _modeDbgHits = 0;
+    function _modeMaybeDebugLog(nowT, r) {
+      _modeDbgHits++;
+      if (nowT - _modeDbgLastT < MODE_DEBUG_LOG_INTERVAL_MS) return;
+      _modeDbgLastT = nowT;
+      // モード別統計
+      const perMode = {};
       const rootsSeen = new Set();
-      for (const b of _grassVoxels.values()) {
-        if (b.pts >= GRASS_VOXEL_MIN_POINTS) occ++;
-        const root = _grassFind(b);
-        if (!rootsSeen.has(root)) {
-          rootsSeen.add(root);
-          if (root.size > maxSize) maxSize = root.size;
-          if (root.gateOpen) openRoots++;
+      for (const b of _modeVoxels.values()) {
+        const m = b.mode;
+        if (!perMode[m]) perMode[m] = { occ: 0, maxSize: 0, openRoots: 0 };
+        if (b.pts >= MODE_VOXEL_MIN_POINTS) perMode[m].occ++;
+        const root = _modeFind(b);
+        const rk = m + '|' + root.ix + ',' + root.iy + ',' + root.iz;
+        if (!rootsSeen.has(rk)) {
+          rootsSeen.add(rk);
+          if (root.size > perMode[m].maxSize) perMode[m].maxSize = root.size;
+          if (root.gateOpen) perMode[m].openRoots++;
         }
       }
-      log('[grass dbg] hits=' + _grassDbgHits + ' occ=' + occ
-        + ' maxCluster=' + maxSize + '/' + GRASS_OPEN_VOXELS
-        + ' openClusters=' + openRoots
-        + ' blades=' + _grassCount + '/' + GRASS_MAX_INSTANCES
-        + ' pendingQ=' + _grassPendingLocal.length
-        + ' lastR=' + r.toFixed(2) + 'm',
+      // チャンク統計 (全体 + 可視)
+      let chunksTotal = 0, chunksVisible = 0, instTotal = 0;
+      const perModeInst = {};
+      for (const ch of _modeChunks.values()) {
+        chunksTotal++;
+        if (ch.mesh.visible) chunksVisible++;
+        instTotal += ch.count;
+        perModeInst[ch.mode] = (perModeInst[ch.mode] || 0) + ch.count;
+      }
+      const parts = [];
+      for (const m of Object.keys(MODE_RULES)) {
+        const s = perMode[m];
+        const inst = perModeInst[m] || 0;
+        if (!s && inst === 0) continue;
+        parts.push(m + '{occ=' + (s ? s.occ : 0)
+          + ' max=' + (s ? s.maxSize : 0) + '/' + MODE_OPEN_VOXELS
+          + ' open=' + (s ? s.openRoots : 0)
+          + ' inst=' + inst + '}');
+      }
+      log('[mode dbg] hits=' + _modeDbgHits
+        + ' chunks=' + chunksVisible + '/' + chunksTotal
+        + ' instTotal=' + instTotal
+        + ' pendingQ=' + _modePendingLocal.length
+        + ' lastR=' + r.toFixed(2) + 'm'
+        + (parts.length ? ' | ' + parts.join(' ') : ''),
         'ok');
     }
     // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
@@ -1426,16 +1528,15 @@
           s: seed,
         });
       }
-      // 草発生ロジック: wood 色 (#1b5e20) をスプレーしている時のみ world 空間サンプル蓄積
-      if (colorHex && colorHex.toLowerCase() === GRASS_WOOD_HEX && hit.point) {
-        // 面法線: hit.face.normal は object local、world へ変換
+      // モード派生オブジェクト発生ロジック: color から mode 解決して _pushPaintHit
+      if (hit.point) {
         let wnx = 0, wny = 1, wnz = 0;
         if (hit.face && hit.face.normal && target) {
           const nLocal = hit.face.normal.clone();
           nLocal.transformDirection(target.matrixWorld);
           wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
         }
-        _pushWoodSprayHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
+        _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
       }
     }
 
@@ -3429,17 +3530,17 @@
       // space2 専用アトラスリセット
       socket.on('resetAtlas2', () => {
         _clearAllPaintables();
-        _clearAllGrass();
+        _clearAllModeSpawn();
         log('atlas cleared (space2)', 'ok');
       });
 
-      // 草オブジェクト発生 (wood スプレー派生) ─ サーバーから配信
-      socket.on('grassSpawn', (data) => { _renderGrassAt(data); });
-      socket.on('grassHistoryBatch', (list) => {
+      // ペイントモード派生オブジェクト発生 (wood/river/sky) ─ サーバーから配信
+      socket.on('modeSpawn', (data) => { _renderModeSpawnAt(data); });
+      socket.on('modeHistoryBatch', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _renderGrassAt(d);
+        for (const d of list) _renderModeSpawnAt(d);
       });
-      socket.on('resetGrass', () => { _clearAllGrass(); log('grass cleared', 'ok'); });
+      socket.on('resetModeSpawn', () => { _clearAllModeSpawn(); log('[mode] cleared', 'ok'); });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
 
@@ -3543,7 +3644,8 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
-    updaters.push(_grassBurstTick);
+    updaters.push(_modeBurstTick);
+    updaters.push(_modeCullTick);
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
 

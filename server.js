@@ -115,10 +115,11 @@ let effectState = { 1: false, 2: false, 3: false, 4: false };
 const SPRAY_HISTORY_CAP = 20000;
 let sprayHistory = [];
 let sprayHistory2 = [];   // space2 専用アトラス UV 履歴
-// space2 wood ペイントモードの草発生履歴 (新規接続時に全配信)
-//   各要素: { x,y,z, nx,ny,nz, r } — 1 件 ~56 bytes
-const GRASS_HISTORY_CAP = 8000;
-let grassHistory2 = [];
+// space2 ペイントモード派生オブジェクト発生履歴 (wood/river/sky 統合)
+//   各要素: { mode, x,y,z, nx,ny,nz, r } — 1 件 ~64 bytes
+const MODE_SPAWN_HISTORY_CAP = 16000;
+const MODE_SPAWN_ALLOWED = new Set(['wood', 'river', 'sky']);
+let modeSpawnHistory2 = [];
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
 //   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
@@ -212,11 +213,11 @@ io.on('connection', (socket) => {
       socket.emit('sprayBatch2', sprayHistory2.slice(i, i + CHUNK));
     }
   }
-  // space2 草発生履歴
-  if (grassHistory2.length > 0) {
+  // space2 モード派生オブジェクト発生履歴
+  if (modeSpawnHistory2.length > 0) {
     const CHUNK = 500;
-    for (let i = 0; i < grassHistory2.length; i += CHUNK) {
-      socket.emit('grassHistoryBatch', grassHistory2.slice(i, i + CHUNK));
+    for (let i = 0; i < modeSpawnHistory2.length; i += CHUNK) {
+      socket.emit('modeHistoryBatch', modeSpawnHistory2.slice(i, i + CHUNK));
     }
   }
   // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
@@ -501,36 +502,38 @@ io.on('connection', (socket) => {
   // space2 専用リセット (アトラスのみ)
   socket.on('resetAtlas2', () => {
     sprayHistory2 = [];
-    grassHistory2 = [];
+    modeSpawnHistory2 = [];
     io.emit('resetAtlas2', { t: Date.now() });
-    io.emit('resetGrass', { t: Date.now() });
+    io.emit('resetModeSpawn', { t: Date.now() });
   });
 
-  // space2 草オブジェクト発生イベント (wood スプレーのクラスタ検出が sprayer 側で発火)
-  //   data: { x,y,z, nx,ny,nz, r }
-  socket.on('grassSpawn', (data) => {
-    if (!data || typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
+  // space2 モード派生オブジェクト発生イベント (wood/river/sky 統合)
+  //   data: { mode, x,y,z, nx,ny,nz, r }
+  socket.on('modeSpawn', (data) => {
+    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return;
+    if (typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
     if (typeof data.r !== 'number' || !(data.r > 0 && data.r < 1)) return;
     const rec = {
+      mode: data.mode,
       x: data.x, y: data.y, z: data.z,
       nx: (typeof data.nx === 'number') ? data.nx : 0,
       ny: (typeof data.ny === 'number') ? data.ny : 1,
       nz: (typeof data.nz === 'number') ? data.nz : 0,
       r: data.r,
     };
-    grassHistory2.push(rec);
-    if (grassHistory2.length > GRASS_HISTORY_CAP) {
-      grassHistory2.splice(0, grassHistory2.length - GRASS_HISTORY_CAP);
+    modeSpawnHistory2.push(rec);
+    if (modeSpawnHistory2.length > MODE_SPAWN_HISTORY_CAP) {
+      modeSpawnHistory2.splice(0, modeSpawnHistory2.length - MODE_SPAWN_HISTORY_CAP);
     }
-    socket.broadcast.emit('grassSpawn', rec);
+    socket.broadcast.emit('modeSpawn', rec);
   });
 
-  // master のみ: 草を一括リセット
-  socket.on('resetGrass', () => {
+  // master のみ: モード派生オブジェクトを一括リセット
+  socket.on('resetModeSpawn', () => {
     const sender = users.get(socket.id);
     if (!sender || sender.role !== 'master') return;
-    grassHistory2 = [];
-    io.emit('resetGrass', { t: Date.now() });
+    modeSpawnHistory2 = [];
+    io.emit('resetModeSpawn', { t: Date.now() });
   });
 
   // space3 リセット (master 専用: 塗り + cube 位置を全クライアントで一括リセット)
