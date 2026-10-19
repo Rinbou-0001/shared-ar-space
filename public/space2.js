@@ -658,6 +658,12 @@
     };
     // チャンク cap 到達時の再試行上限 (保険)
     const MODE_FIRE_RETRY_LIMIT = 3;
+    // 発生アニメーション: スプレーから遅延してフェードイン (塗り始めから順に現れる)
+    const MODE_SPAWN_DELAY_MS = 2000;            // スプレー発火から出現開始までの遅延
+    const MODE_SPAWN_FADE_MS  = 1000;            // 出現開始から full scale までのフェード時間
+    // アニメーション中のエントリ: { blades, appearAt, fadeEnd, done }
+    //   blades: 配列 [{ chunk, idx, pos:Vector3, quat:Quaternion, scaleTarget:number }]
+    const _modeAnimEntries = [];
     // スプレー発火を有効化するモード集合 (現状は wood のみ)
     const MODE_SPRAY_ACTIVE = new Set(['wood']);
     // 色 hex → mode 名の逆引き
@@ -1289,7 +1295,17 @@
     // ============ 発火 (ボクセル → チャンクの InstancedMesh へ) ============
     //   data: { mode, x, y, z, nx, ny, nz, r }
     //   戻り値: true=少なくとも1本描画成功 / false=チャンク cap で失敗 (呼び出し側で再試行可)
-    function _renderModeSpawnAt(data) {
+    //   history batch (初期ロード) 専用: フェードなしで即座にフル描画
+    function _renderModeSpawnImmediate(data) {
+      return _renderModeSpawnCore(data, 1.0, null);
+    }
+    // アニメーション用: 初期スケール 0 でスロット確保しつつ per-blade メタを返す
+    //   collected: push 先の配列。各 blade は { chunk, idx, pos, quat, scaleTarget }
+    function _allocateAnimatedBlades(data, collected) {
+      return _renderModeSpawnCore(data, 0.0, collected);
+    }
+    // 内部実装: initialScaleFactor で描画スケールを制御、collected 非null時は per-blade メタ収集
+    function _renderModeSpawnCore(data, initialScaleFactor, collected) {
       if (!data || !data.mode) return false;
       const rule = MODE_RULES[data.mode]; if (!rule) return false;
       const ch = _chunkOfWorld(data.mode, data.x, data.y, data.z);
@@ -1322,10 +1338,19 @@
         } else {
           _modeChunkDummy.quaternion.identity();
         }
-        const s = sMin + Math.random() * (sMax - sMin);
-        _modeChunkDummy.scale.setScalar(s);
+        const sTarget = sMin + Math.random() * (sMax - sMin);
+        _modeChunkDummy.scale.setScalar(sTarget * initialScaleFactor);
         _modeChunkDummy.updateMatrix();
         ch.mesh.setMatrixAt(ch.count, _modeChunkDummy.matrix);
+        if (collected) {
+          collected.push({
+            chunk: ch,
+            idx: ch.count,
+            pos: _modeChunkDummy.position.clone(),
+            quat: _modeChunkDummy.quaternion.clone(),
+            scaleTarget: sTarget,
+          });
+        }
         ch.count++;
       }
       // LOD 中のチャンクに追加された場合は間引き count を保つ (次 cull tick で正確化)
@@ -1344,11 +1369,77 @@
       }
       _modeVoxels.clear();
       _modePendingLocal.length = 0;
+      _modeAnimEntries.length = 0;
     }
 
-    // sprayer 自身用: 1 ボクセルを「占有」化、ゲート/発火判定して emit
-    // ローカル描画が chunk cap で失敗した場合は retry キューに戻し、
-    // emit は成功時のみ (= 他クライアントにも描画を保証)。
+    // ============ 発生アニメーション ============
+    //   遅延 MODE_SPAWN_DELAY_MS 後に allocate、以降 MODE_SPAWN_FADE_MS でスケール 0→1 補間
+    //   戻り値: スケジュール成功 (true) / 不正データ (false)
+    function _renderModeSpawnAt(data) {
+      if (!data || !data.mode) return false;
+      if (!MODE_RULES[data.mode]) return false;
+      const now = performance.now();
+      _modeAnimEntries.push({
+        data,
+        appearAt: now + MODE_SPAWN_DELAY_MS,
+        fadeEnd:  now + MODE_SPAWN_DELAY_MS + MODE_SPAWN_FADE_MS,
+        blades: null,
+        done: false,
+        retryCount: 0,
+      });
+      return true;
+    }
+
+    function _modeAnimTick() {
+      if (_modeAnimEntries.length === 0) return;
+      const now = performance.now();
+      const dirtyMeshes = new Set();
+      let hasDone = false;
+      for (let i = 0; i < _modeAnimEntries.length; i++) {
+        const e = _modeAnimEntries[i];
+        if (e.done) { hasDone = true; continue; }
+        if (now < e.appearAt) continue;
+        // 初回: allocate (chunk cap 失敗時は retry)
+        if (!e.blades) {
+          const list = [];
+          const ok = _allocateAnimatedBlades(e.data, list);
+          if (!ok || list.length === 0) {
+            e.retryCount++;
+            if (e.retryCount > MODE_FIRE_RETRY_LIMIT) {
+              _modeDbgDropped++;
+              e.done = true;
+              hasDone = true;
+            }
+            continue;
+          }
+          e.blades = list;
+          for (const bl of e.blades) dirtyMeshes.add(bl.chunk.mesh);
+          continue;  // 同フレームでフェード進行までは待つ
+        }
+        // フェード進行
+        const t = Math.min(1, (now - e.appearAt) / MODE_SPAWN_FADE_MS);
+        for (const bl of e.blades) {
+          _modeChunkDummy.position.copy(bl.pos);
+          _modeChunkDummy.quaternion.copy(bl.quat);
+          _modeChunkDummy.scale.setScalar(bl.scaleTarget * t);
+          _modeChunkDummy.updateMatrix();
+          bl.chunk.mesh.setMatrixAt(bl.idx, _modeChunkDummy.matrix);
+          dirtyMeshes.add(bl.chunk.mesh);
+        }
+        if (t >= 1) { e.done = true; hasDone = true; }
+      }
+      for (const m of dirtyMeshes) m.instanceMatrix.needsUpdate = true;
+      // Cleanup: 済みエントリを削除 (低頻度)
+      if (hasDone) {
+        let w = 0;
+        for (let i = 0; i < _modeAnimEntries.length; i++) {
+          if (!_modeAnimEntries[i].done) _modeAnimEntries[w++] = _modeAnimEntries[i];
+        }
+        _modeAnimEntries.length = w;
+      }
+    }
+
+    // sprayer 自身用: 1 ボクセル発火 (スケジュールのみ、実描画は anim tick 側で 2s 後に allocate)
     function _modeFireVoxel(b) {
       if (b.spawned) return;
       const cx = (b.ix + 0.5) * MODE_VOXEL;
@@ -1362,20 +1453,10 @@
         nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
         r: +(MODE_VOXEL * 0.5).toFixed(4),
       };
-      const ok = _renderModeSpawnAt(payload);
-      if (!ok) {
-        // chunk cap で失敗 → spawned を立てずに retry キューへ (保険)
-        b.retryCount = (b.retryCount || 0) + 1;
-        if (b.retryCount <= MODE_FIRE_RETRY_LIMIT) {
-          _modePendingLocal.push(b);
-        } else {
-          // 諦める (このボクセルは永続的に空白、再発火不可)
-          b.spawned = true;
-          _modeDbgDropped++;
-        }
-        return;
-      }
+      // スケジュールしてフェード付き描画 (chunk cap リトライは anim tick 側で処理)
+      _renderModeSpawnAt(payload);
       b.spawned = true;
+      // sprayer のみ emit (remote は受信して独自に anim スケジュール)
       if (socket && socket.connected) socket.emit('modeSpawn', payload);
     }
     function _modeEnqueueBurst(root) {
@@ -1526,6 +1607,7 @@
         + ' chunks(vis/lod/total)=' + chunksVisible + '/' + chunksLod + '/' + chunksTotal
         + ' inst(drawn/total)=' + instDrawn + '/' + instTotal
         + ' pendingQ=' + _modePendingLocal.length
+        + ' animQ=' + _modeAnimEntries.length
         + ' dropped=' + _modeDbgDropped
         + ' lastR=' + r.toFixed(2) + 'm'
         + (parts.length ? ' | ' + parts.join(' ') : ''),
@@ -3586,10 +3668,12 @@
       });
 
       // ペイントモード派生オブジェクト発生 (wood/river/sky) ─ サーバーから配信
+      // ライブイベントはフェード付き (local と同じ 2s 遅延 + 1s フェード)
       socket.on('modeSpawn', (data) => { _renderModeSpawnAt(data); });
+      // 履歴 (初期ロード) はフェードなしで即描画
       socket.on('modeHistoryBatch', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _renderModeSpawnAt(d);
+        for (const d of list) _renderModeSpawnImmediate(d);
       });
       socket.on('resetModeSpawn', () => { _clearAllModeSpawn(); log('[mode] cleared', 'ok'); });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
@@ -3696,6 +3780,7 @@
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
     updaters.push(_modeBurstTick);
+    updaters.push(_modeAnimTick);
     updaters.push(_modeCullTick);
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
