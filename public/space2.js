@@ -94,61 +94,9 @@
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
     scene.fog = new THREE.FogExp2(0xffffff, 0.0);   // 初期値 0 (フォグ無効スタート)
 
-    // ========== Fog 中心切替 (効果3) ==========
-    //   既定: Three.js 標準の fog = カメラからの距離に基づくフェード (アバター追従)
-    //   効果3 ON: フィールド原点 (0,0,0) からの距離に基づくフェード (アバター位置不変)
-    //   実装: 全マテリアルの fog_vertex を onBeforeCompile で差し替え、
-    //         共有 uniform `uFogOriginMode` (0/1) で切替。
-    //         Mesh/Line 系どちらも vFogDepth varying を使うので同じ差し替えで動く。
-    const _uFogOriginMode = { value: 0 };
-    window.__uFogOriginMode = _uFogOriginMode;
-    function _patchMaterialFog(mat) {
-      if (!mat || !mat.isMaterial) return;
-      if (mat.userData && mat.userData.__originFogPatched) return;
-      mat.userData = mat.userData || {};
-      mat.userData.__originFogPatched = true;
-      const prevOBC = mat.onBeforeCompile ? mat.onBeforeCompile.bind(mat) : null;
-      mat.onBeforeCompile = (shader) => {
-        if (prevOBC) prevOBC(shader);
-        shader.uniforms.uFogOriginMode = _uFogOriginMode;
-        // 頂点シェーダー: fog_vertex を差し替え
-        //   ・既定 (uFogOriginMode<0.5): -mvPosition.z (= カメラ距離、Three.js 標準)
-        //   ・原点モード (>=0.5):          length((modelMatrix * vec4(transformed,1)).xyz)
-        shader.vertexShader = shader.vertexShader
-          .replace('#include <common>', '#include <common>\nuniform float uFogOriginMode;')
-          .replace('#include <fog_vertex>', [
-            '#ifdef USE_FOG',
-            '  if (uFogOriginMode > 0.5) {',
-            '    vec4 _wpFog = vec4(transformed, 1.0);',
-            '    #ifdef USE_INSTANCING',
-            '      _wpFog = instanceMatrix * _wpFog;',
-            '    #endif',
-            '    _wpFog = modelMatrix * _wpFog;',
-            '    vFogDepth = length(_wpFog.xyz);',
-            '  } else {',
-            '    vFogDepth = -mvPosition.z;',
-            '  }',
-            '#endif',
-          ].join('\n'));
-      };
-      mat.needsUpdate = true;
-    }
-    function _patchSceneFog() {
-      scene.traverse((obj) => {
-        if (!obj) return;
-        if (obj.material) {
-          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-          mats.forEach(_patchMaterialFog);
-        }
-      });
-    }
-    window.__patchSceneFog = _patchSceneFog;
-    function _applyFogOriginMode(wantOrigin) {
-      _uFogOriginMode.value = wantOrigin ? 1 : 0;
-      _patchSceneFog();   // 新しく追加されたマテリアルも含めて再走査
-      try { log('fog center → ' + (wantOrigin ? 'ORIGIN (fixed)' : 'CAMERA (default)'), 'ok'); } catch (_) {}
-    }
-    window.__applyFogOriginMode = _applyFogOriginMode;
+    // 効果3 (Fog 原点固定) は廃止。__patchSceneFog は呼び出し互換のため no-op として残置。
+    window.__patchSceneFog = function () {};
+    window.__applyFogOriginMode = function () {};
 
     const camera = new THREE.PerspectiveCamera(
       72,
@@ -960,6 +908,82 @@
     // 可動 Cube/Box: 現状 movableCubes は空のため何もしない (将来再有効化する場合は
     //   _makePaintable(cube, baseColor, worldSpanM=1, 128) で各 cube に独立 paint RT を割り当て)
     void movableCubes;
+
+    // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
+    //   位置 (0.5, 1, 0) を L の内角 (= 共有縦辺) として、plate1 が +X 方向、plate2 が +Z 方向に伸びる
+    //   それぞれ縦長 (W=0.179 × H=0.286)、長辺 (0.286m) は Y 軸に沿った共有縦線で接する
+    //   各 plate は独立 paintRT を持ち、タグ付きオブザーバーが居る間だけキャンバス面を可視化
+    //   外側は L 字の凹角反対側 (plate1 の outer=-Z、plate2 の outer=-X)
+    const PLATE_W = 0.179;
+    const PLATE_H = 0.286;
+    const PLATE_ORIGIN = new THREE.Vector3(0.5, 1, 0);
+    const PLATE_APEX_OFFSET = 0.15;    // L 外側 15cm に apex を独自に持つ
+    const _plateEdgeMat = new THREE.LineBasicMaterial({ color: 0xeaeded });
+
+    function _makePlate(tagId, offset, rotationY) {
+      // offset: 共有縦辺からの横オフセット方向 (world ベクトル)
+      // rotationY: plane の Y 軸回転
+      const grp = new THREE.Group();
+      grp.position.copy(PLATE_ORIGIN).add(offset);
+      scene.add(grp);
+      // キャンバス面 (paint RT 対応、タグ付き時のみ可視化)
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(PLATE_W, PLATE_H),
+        new THREE.MeshStandardMaterial({
+          color: 0xffffff, side: THREE.DoubleSide, roughness: 1.0, metalness: 0.0,
+        })
+      );
+      mesh.rotation.y = rotationY;
+      mesh.name = tagId;
+      mesh.visible = false;   // 初期非表示 (タグ付きオブザーバー出現で可視化)
+      grp.add(mesh);
+      _makePaintable(mesh, PLATE_W, 256);
+      // 枠線 (常時可視)
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(mesh.geometry),
+        _plateEdgeMat
+      );
+      edges.rotation.y = rotationY;
+      grp.add(edges);
+      // 外向き法線 (L 外側方向) = plane normal を反転した向き
+      //   PlaneGeometry 標準法線は +Z。rotationY 適用後に world の outer 方向を記録
+      const outerLocal = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(0, rotationY, 0));
+      grp.userData.plateTag = tagId;
+      grp.userData.plateMesh = mesh;
+      grp.userData.plateCenter = mesh.position.clone().applyEuler(new THREE.Euler(0, 0, 0)).add(grp.position);
+      grp.userData.plateOuter = outerLocal.clone();   // world 方向ベクトル (単位ベクトル)
+      return grp;
+    }
+    // plate1: +X 側に PLATE_W/2 ずらし、normal = +Z (plane のまま)、outer = -Z
+    const _plate1Grp = _makePlate('plate1', new THREE.Vector3(PLATE_W / 2, 0, 0), 0);
+    // plate2: +Z 側に PLATE_W/2 ずらし、rotation.y=-π/2 で plane を +X 向きにする、outer = -X
+    const _plate2Grp = _makePlate('plate2', new THREE.Vector3(0, 0, PLATE_W / 2), -Math.PI / 2);
+    const _plates = { plate1: _plate1Grp, plate2: _plate2Grp };
+    window.__plates = _plates;
+
+    // タグ付きオブザーバーの存在チェック → plateMesh.visible を更新
+    function _syncPlateVisibility() {
+      for (const tag of ['plate1', 'plate2']) {
+        const grp = _plates[tag]; if (!grp) continue;
+        let hasOwner = false;
+        avatars.forEach((a) => {
+          if (a && a.customTags && a.customTags.indexOf(tag) >= 0) hasOwner = true;
+        });
+        grp.userData.plateMesh.visible = hasOwner;
+      }
+    }
+    window.__syncPlateVisibility = _syncPlateVisibility;
+    // 自分の plate タグ (観察者がオフアクシス ON 時の表示先に使う) を取得
+    function _getMyPlateGrp() {
+      if (ROLE !== 'observer') return null;
+      const self = (myId != null) ? avatars.get(myId) : null;
+      if (!self || !self.customTags) return null;
+      for (const tag of ['plate1', 'plate2']) {
+        if (self.customTags.indexOf(tag) >= 0) return _plates[tag];
+      }
+      return null;
+    }
+    window.__getMyPlateGrp = _getMyPlateGrp;
 
     // ===== ミニチュア塗り Box (20cm): 空間の塗り状況をライブ反映 =====
     //   位置 (1, 1, 0) 固定、各面に対応する壁/床/天井の paintRT.texture を map。
@@ -2232,11 +2256,8 @@
       //   ・物理用 userData: __movable, __isCanvasBox, halfExt, inertiaFactor, 初期位置
       //   ・base の "ローカル" 位置に対して配置 (grp の子として追加される前提)
       let canvasBox = null;
-      // canvasBox は observer アバターのみ、かつ **入室時 (= 初回生成時) の effect1 ON** の場合のみ生成
-      //   ・rebuild では既存を維持する実装になっているので、ここでの判定は初回生成時のみ効く
-      //   ・master パネルで effect1 を ON にした状態で入室した observer にのみ canvasBox が付く
-      const _effect1On = !!(window.__effect && window.__effect[1]);
-      if (!omitBox && targetRole === 'observer' && _effect1On) {
+      // 効果1 は廃止したため canvasBox 生成は無効化 (plate1/plate2 タグに移行)
+      if (false && !omitBox && targetRole === 'observer') {
         // 6 面マテリアル配列: BoxGeometry のインデックスは
         //   0=+X 右, 1=-X 左, 2=+Y 上, 3=-Y 下, 4=+Z (Base と接する前面), 5=-Z (奥面)
         //   effect2 OFF ではカメラが +Z 面と同じ平面にあり +Z 面は edge-on で見えないため、
@@ -2784,6 +2805,12 @@
       socket.on('pose', (u) => {
         const a = avatars.get(u.id);
         if (!a) return;
+        // master が WASD で動かしている最中は、対象 observer の自前 pose で上書きしない
+        //   (= master 画面で avatar がカクつく原因だった)
+        if (ROLE === 'master' && window.__masterOwnedAvatarId === u.id) {
+          if (u.role) a.role = u.role;
+          return;
+        }
         a.grp.position.set(u.x, u.y, u.z);
         a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         if (u.role) a.role = u.role;
@@ -2795,7 +2822,7 @@
           if (u.id === myId) _syncMyEntryTagUI();
         }
       });
-      // 自身の entryTag を #status の #my-entry-tag span に反映 (observer 用の "入室番号" 表示)
+      // 自身の entryTag を #status の #my-entry-tag span に反映
       function _syncMyEntryTagUI() {
         const el = document.getElementById('my-entry-tag');
         if (!el) return;
@@ -2803,6 +2830,17 @@
         el.textContent = (a && a.entryTag) ? a.entryTag : '';
       }
       window.__syncMyEntryTagUI = _syncMyEntryTagUI;
+      // サーバーから自分の entryTag を受信した時に反映 (本人には broadcast('join') が届かないため)
+      socket.on('selfEntryTag', (data) => {
+        if (!data || !data.entryTag || !myId) return;
+        const a = avatars.get(myId);
+        if (a) {
+          a.entryTag = data.entryTag;
+          _syncMyEntryTagUI();
+          if (typeof rebuildClientSelect === 'function') rebuildClientSelect();
+          log('self entry tag → ' + data.entryTag, 'ok');
+        }
+      });
 
       // カスタムタグ (hole_test 等) の付与/解除を全クライアントで反映
       socket.on('avatarTag', (data) => {
@@ -2827,6 +2865,14 @@
             const params = a.frustumLines && a.frustumLines.userData && a.frustumLines.userData.__frustumParams;
             const disp = params ? { width: params.W, height: params.H } : { width: 0.3, height: 0.2 };
             rebuildAvatarFrustum(data.id, disp);
+          }
+        }
+        // plate1/plate2 タグ変更 → plate 可視化を更新
+        if (data.tag === 'plate1' || data.tag === 'plate2') {
+          if (typeof window.__syncPlateVisibility === 'function') window.__syncPlateVisibility();
+          // 自分自身のオブザーバーパネル UI (タグボタン) を更新
+          if (data.id === myId && typeof window.__syncObsPlateButtons === 'function') {
+            window.__syncObsPlateButtons();
           }
         }
         log('avatarTag: ' + data.id.substring(0,6) + ' ' + data.tag + ' = ' + (data.on ? 'ON' : 'OFF'), 'ok');
@@ -3047,14 +3093,9 @@
             btn.style.color = on ? '#052e16' : 'white';
           }
         }
-        // 効果1: observer 入室時の canvasBox 生成ゲート (入室後の切替はなし、ゲートのみ)
-        //   既入室中の observer に対しては何もしない — 入室時の window.__effect[1] 値で決定済み
-        //   camera / master には影響なし
+        // 効果1: 廃止 (旧 canvasBox 生成ゲート)
         // 効果2: 未割当 (旧 phone pointer 機能は廃止)
-        // 効果3: Fog 中心をフィールド原点に固定 ↔ カメラ (= アバター) に戻す
-        if (n === 3 && typeof window.__applyFogOriginMode === 'function') {
-          window.__applyFogOriginMode(on);
-        }
+        // 効果3: 廃止 (旧 Fog 原点固定)
         // 効果4: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
         if (n === 4) {
           renderer.shadowMap.enabled = on;
@@ -3804,6 +3845,7 @@
           });
         }
         _wasdAvatarPending = null;
+        window.__masterOwnedAvatarId = null;   // 制御終了 → observer の pose を再度受け入れる
       }
       window.addEventListener('keyup', (e) => {
         keys.delete(e.code);
@@ -3851,6 +3893,8 @@
             // observer avatar は "終了時のみ送信" (= WASD 全キー離した時に _flushAvatarPending で emit)
             if ((u.selectType === 'apex' || u.selectType === 'base') && u.avatarId) {
               _wasdAvatarPending = { avatarId: u.avatarId, grp: target };
+              // 対象 observer の自前 pose を一時的に無視 (master 側カクつき防止)
+              window.__masterOwnedAvatarId = u.avatarId;
             } else if (u.sceneObjectId) {
               const now = performance.now();
               if (now - _sceneObjSentAt > 40) {
@@ -4033,6 +4077,33 @@
         applyBoxVisibility();
         log('box 表示 → ' + (boxVisibilityEnabled ? 'ON' : 'OFF') + ' (box + 内面格子 + 選択枠)', 'ok');
       });
+
+      // ========== plate1 / plate2 セルフタグ付与ボタン (観測者用) ==========
+      //   クリックで自分自身に対して avatarTag(plate1 or plate2) を toggle emit
+      //   サーバー側は role!=master の自己 plate タグに限り受理するよう緩和済み
+      function _syncObsPlateButtons() {
+        const self = (myId != null) ? avatars.get(myId) : null;
+        const tags = (self && self.customTags) ? self.customTags : [];
+        ['plate1', 'plate2'].forEach((tag) => {
+          const btn = _by('obs-' + tag + '-toggle');
+          if (!btn) return;
+          const on = tags.indexOf(tag) >= 0;
+          btn.style.background = on ? '#06b6d4' : '#475569';
+          btn.style.color      = on ? '#083344' : 'white';
+        });
+      }
+      window.__syncObsPlateButtons = _syncObsPlateButtons;
+      ['plate1', 'plate2'].forEach((tag) => {
+        _bind('obs-' + tag + '-toggle', 'click', () => {
+          if (!myId || !socket || !socket.connected) return;
+          const self = avatars.get(myId);
+          const tags = (self && self.customTags) ? self.customTags : [];
+          const nextOn = !(tags.indexOf(tag) >= 0);
+          socket.emit('avatarTag', { targetId: myId, tag: tag, on: nextOn });
+          log('self ' + tag + ' → ' + (nextOn ? 'ON' : 'OFF'), 'ok');
+        });
+      });
+      _syncObsPlateButtons();
 
       // ========== FOV 入力 (Enter で適応) ==========
       //   camera.fov (vertical) を書き換え + apex-base 距離 d = H / (2 tan(fov/2)) を再計算。
@@ -5023,23 +5094,44 @@
         // ユーザー由来の姿勢を退避
         _oaSavePos.copy(camera.position);
         _oaSaveQuat.copy(camera.quaternion);
-        if (ROLE === 'camera') {
-          // スマホ: eye = 自分の位置、画面 = 視線 20cm 前方、画面姿勢 = camera 姿勢
-          _oaEye.copy(_oaSavePos);
-          _oaTmp.set(0, 0, -1).applyQuaternion(_oaSaveQuat);
-          _oaDispCenter.copy(_oaSavePos).addScaledVector(_oaTmp, CAM_WINDOW_DIST);
-          _oaDispQuat.copy(_oaSaveQuat);
-        } else {
-          // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置
-          //   display 姿勢 = camera 姿勢 × 180°Y flip
-          //   → 観測者が YPR を動かすと自動で display 姿勢も追従する
-          _oaDispCenter.copy(_oaSavePos);
-          _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
-          _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
+        // プレート override: 観測者が plate タグを持つ場合、display = plate 矩形、apex = L 外側 15cm
+        let _usedPlate = false;
+        let _plateW = myDisplay.width, _plateH = myDisplay.height;
+        if (ROLE === 'observer' && typeof window.__getMyPlateGrp === 'function') {
+          const pg = window.__getMyPlateGrp();
+          if (pg && pg.userData && pg.userData.plateMesh) {
+            // plate の world transform
+            const pMesh = pg.userData.plateMesh;
+            pMesh.updateMatrixWorld(true);
+            const pCenter = new THREE.Vector3().setFromMatrixPosition(pMesh.matrixWorld);
+            const pQuat   = new THREE.Quaternion().setFromRotationMatrix(pMesh.matrixWorld);
+            // outer 方向 = plate の local -Z を world へ (= L 字凸角方向)
+            const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(pQuat).normalize();
+            _oaDispCenter.copy(pCenter);
+            _oaDispQuat.copy(pQuat);
+            _oaEye.copy(pCenter).addScaledVector(outer, PLATE_APEX_OFFSET);
+            _plateW = PLATE_W;
+            _plateH = PLATE_H;
+            _usedPlate = true;
+          }
+        }
+        if (!_usedPlate) {
+          if (ROLE === 'camera') {
+            // スマホ: eye = 自分の位置、画面 = 視線 20cm 前方、画面姿勢 = camera 姿勢
+            _oaEye.copy(_oaSavePos);
+            _oaTmp.set(0, 0, -1).applyQuaternion(_oaSaveQuat);
+            _oaDispCenter.copy(_oaSavePos).addScaledVector(_oaTmp, CAM_WINDOW_DIST);
+            _oaDispQuat.copy(_oaSaveQuat);
+          } else {
+            // observer / master: eye = viewerEye (共通固定点)、画面 = アバター位置
+            _oaDispCenter.copy(_oaSavePos);
+            _oaEye.set(viewerEye.x, viewerEye.y, viewerEye.z);
+            _oaDispQuat.copy(_oaSaveQuat).multiply(_oaFlipQ);
+          }
         }
         const ok = applyOffAxisProjection(
           camera, _oaEye, _oaDispCenter, _oaDispQuat,
-          myDisplay.width, myDisplay.height,
+          _plateW, _plateH,
           0.05, 500
         );
         // 状態遷移時のみ 1 回ログ (毎フレーム log を吐くのを回避)
