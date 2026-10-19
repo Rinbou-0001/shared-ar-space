@@ -624,7 +624,7 @@
       wood: {
         color: '1b5e20',
         perVoxel: 4,                             // 1 ボクセルあたりの本数
-        maxPerChunk: 2000,                       // 1 チャンク InstancedMesh の上限
+        maxPerChunk: 3000,                       // 1 チャンク InstancedMesh の上限 (2m×2m 面 625 vox × 4 本 = 2500 + 余裕)
         makeGeometry: () => _makeGrassGeometry(),
         makeMaterial: () => new THREE.MeshBasicMaterial({
           color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
@@ -636,7 +636,7 @@
       river: {
         color: '008cdd',
         perVoxel: 1,
-        maxPerChunk: 2000,
+        maxPerChunk: 3000,
         makeGeometry: () => _makeFlatTileGeometry(MODE_VOXEL * 1.1),
         makeMaterial: () => new THREE.MeshBasicMaterial({
           color: 0x1aa0e8, side: THREE.DoubleSide, transparent: true, opacity: 0.75,
@@ -647,7 +647,7 @@
       sky: {
         color: '002044',
         perVoxel: 2,
-        maxPerChunk: 2000,
+        maxPerChunk: 3000,
         makeGeometry: () => _makeBillboardStarGeometry(0.025),
         makeMaterial: () => new THREE.MeshBasicMaterial({
           color: 0xaacfff, transparent: true, opacity: 0.9, depthWrite: false,
@@ -656,6 +656,8 @@
         orientUpWithNormal: false,               // 星は常にカメラ正対 (手動 billboard)
       },
     };
+    // チャンク cap 到達時の再試行上限 (保険)
+    const MODE_FIRE_RETRY_LIMIT = 3;
     // スプレー発火を有効化するモード集合 (現状は wood のみ)
     const MODE_SPRAY_ACTIVE = new Set(['wood']);
     // 色 hex → mode 名の逆引き
@@ -1286,12 +1288,14 @@
 
     // ============ 発火 (ボクセル → チャンクの InstancedMesh へ) ============
     //   data: { mode, x, y, z, nx, ny, nz, r }
+    //   戻り値: true=少なくとも1本描画成功 / false=チャンク cap で失敗 (呼び出し側で再試行可)
     function _renderModeSpawnAt(data) {
-      if (!data || !data.mode) return;
-      const rule = MODE_RULES[data.mode]; if (!rule) return;
+      if (!data || !data.mode) return false;
+      const rule = MODE_RULES[data.mode]; if (!rule) return false;
       const ch = _chunkOfWorld(data.mode, data.x, data.y, data.z);
-      if (!ch) return;
-      if (ch.count >= rule.maxPerChunk) return;
+      if (!ch) return false;
+      if (ch.count >= rule.maxPerChunk) return false;
+      const startCount = ch.count;
       const r = Math.max(0.01, Math.min(0.5, data.r || MODE_VOXEL * 0.5));
       const n = rule.perVoxel;
       _modeOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _modeTmpQ);
@@ -1329,6 +1333,7 @@
         ? Math.floor(ch.count * MODE_FAR_LOD_RATIO)
         : ch.count;
       ch.mesh.instanceMatrix.needsUpdate = true;
+      return ch.count > startCount;
     }
 
     function _clearAllModeSpawn() {
@@ -1342,9 +1347,10 @@
     }
 
     // sprayer 自身用: 1 ボクセルを「占有」化、ゲート/発火判定して emit
+    // ローカル描画が chunk cap で失敗した場合は retry キューに戻し、
+    // emit は成功時のみ (= 他クライアントにも描画を保証)。
     function _modeFireVoxel(b) {
       if (b.spawned) return;
-      b.spawned = true;
       const cx = (b.ix + 0.5) * MODE_VOXEL;
       const cy = (b.iy + 0.5) * MODE_VOXEL;
       const cz = (b.iz + 0.5) * MODE_VOXEL;
@@ -1356,7 +1362,20 @@
         nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
         r: +(MODE_VOXEL * 0.5).toFixed(4),
       };
-      _renderModeSpawnAt(payload);
+      const ok = _renderModeSpawnAt(payload);
+      if (!ok) {
+        // chunk cap で失敗 → spawned を立てずに retry キューへ (保険)
+        b.retryCount = (b.retryCount || 0) + 1;
+        if (b.retryCount <= MODE_FIRE_RETRY_LIMIT) {
+          _modePendingLocal.push(b);
+        } else {
+          // 諦める (このボクセルは永続的に空白、再発火不可)
+          b.spawned = true;
+          _modeDbgDropped++;
+        }
+        return;
+      }
+      b.spawned = true;
       if (socket && socket.connected) socket.emit('modeSpawn', payload);
     }
     function _modeEnqueueBurst(root) {
@@ -1460,6 +1479,7 @@
     // ============ 診断ログ (チャンク + モード別統計) ============
     let _modeDbgLastT = 0;
     let _modeDbgHits = 0;
+    let _modeDbgDropped = 0;
     function _modeMaybeDebugLog(nowT, r) {
       _modeDbgHits++;
       if (nowT - _modeDbgLastT < MODE_DEBUG_LOG_INTERVAL_MS) return;
@@ -1506,6 +1526,7 @@
         + ' chunks(vis/lod/total)=' + chunksVisible + '/' + chunksLod + '/' + chunksTotal
         + ' inst(drawn/total)=' + instDrawn + '/' + instTotal
         + ' pendingQ=' + _modePendingLocal.length
+        + ' dropped=' + _modeDbgDropped
         + ' lastR=' + r.toFixed(2) + 'm'
         + (parts.length ? ' | ' + parts.join(' ') : ''),
         'ok');
