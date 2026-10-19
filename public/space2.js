@@ -968,6 +968,20 @@
     const _plate2Grp = _makePlate('plate2', new THREE.Vector3(0, 0, PLATE_W / 2), Math.PI / 2);
     const _plates = { plate1: _plate1Grp, plate2: _plate2Grp };
     window.__plates = _plates;
+    // プレートは専用レイヤー (= 2) に移動。master / camera のカメラだけこのレイヤーを enable し、
+    //   observer のカメラは標準レイヤー 0 のみ → observer 視点では自他問わず全プレートが非表示に。
+    const PLATE_LAYER = 2;
+    (function _setPlateLayerRec(obj) {
+      obj.layers.set(PLATE_LAYER);
+      obj.children.forEach(_setPlateLayerRec);
+    })(_plate1Grp);
+    (function _setPlateLayerRec(obj) {
+      obj.layers.set(PLATE_LAYER);
+      obj.children.forEach(_setPlateLayerRec);
+    })(_plate2Grp);
+    if (ROLE === 'master' || ROLE === 'camera') {
+      camera.layers.enable(PLATE_LAYER);
+    }
 
     // タグ付きオブザーバーの存在チェック → plateMesh.visible を更新
     function _syncPlateVisibility() {
@@ -5178,27 +5192,9 @@
           } catch (_) {}
         }
         if (!ok) camera.updateProjectionMatrix();
-        // 自身の plate を自分視点のレンダーから一時隠蔽
-        //   mesh (白板) だけでなく、枠線 (edges) やその他グレー色の要素も丸ごと非表示にするため
-        //   grp 自体を visible=false にする。他クライアント視点では visible=true なので
-        //   plate は彼らにはそのまま見えつづける (レンダー順はクライアント毎に独立)。
-        //   加えてミニキューブも自分視点の plate 真後ろに居るとグレーの壁のように映るため隠す。
-        let _hiddenGrp = null, _hiddenMini = null;
-        if (_plateGrpForDisplay) {
-          _hiddenGrp = _plateGrpForDisplay.visible;
-          _plateGrpForDisplay.visible = false;
-          if (typeof _miniCube !== 'undefined' && _miniCube) {
-            _hiddenMini = _miniCube.visible;
-            _miniCube.visible = false;
-          }
-        }
+        // observer のカメラは PLATE_LAYER を enable していないため、プレート群は自動的に
+        //   自身視点のレンダーから除外される。追加の mesh.visible 操作は不要。
         renderer.render(scene, camera);
-        if (_hiddenGrp !== null && _plateGrpForDisplay) {
-          _plateGrpForDisplay.visible = _hiddenGrp;
-          if (_hiddenMini !== null && typeof _miniCube !== 'undefined' && _miniCube) {
-            _miniCube.visible = _hiddenMini;
-          }
-        }
         // 復元: ユーザー由来の姿勢を戻す (次フレームの操作が正しく効く)
         camera.position.copy(_oaSavePos);
         camera.quaternion.copy(_oaSaveQuat);
