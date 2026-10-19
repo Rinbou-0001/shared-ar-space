@@ -485,19 +485,40 @@ io.on('connection', (socket) => {
   //     u, v = 対象メッシュ標準 UV (0..1)
   //     r = UV radius (0..1 の小数)
   //     s = ノイズ seed
-  socket.on('spray2', (data) => {
-    if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
-    if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return;
+  // 共通: 1 件 spray2 を正規化して history に push、返す (broadcast 用 rec)
+  function _normalizeSpray2(data) {
+    if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return null;
+    if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return null;
     const c = (typeof data.c === 'string') ? data.c.slice(0, 6) : 'ffffff';
     const rec = { u: data.u, v: data.v, c };
     if (typeof data.tgt === 'string' && data.tgt.length > 0 && data.tgt.length < 64) rec.tgt = data.tgt;
     if (typeof data.r === 'number' && data.r > 0 && data.r < 1)   rec.r = data.r;
     if (typeof data.s === 'number' && isFinite(data.s))           rec.s = data.s >>> 0;
+    return rec;
+  }
+  function _pushSpray2History(rec) {
     sprayHistory2.push(rec);
     if (sprayHistory2.length > SPRAY_HISTORY_CAP) {
       sprayHistory2.splice(0, sprayHistory2.length - SPRAY_HISTORY_CAP);
     }
-    socket.broadcast.emit('spray2', rec);
+  }
+  socket.on('spray2', (data) => {
+    const rec = _normalizeSpray2(data);
+    if (!rec) return;
+    _pushSpray2History(rec);
+    socket.broadcast.volatile.emit('spray2', rec);
+  });
+  // バッチ版: クライアントが 50ms 窓で集約した配列を受信
+  //   broadcast も volatile で詰まり防止
+  socket.on('spray2Batch', (list) => {
+    if (!Array.isArray(list) || list.length === 0) return;
+    if (list.length > 256) list = list.slice(0, 256);  // DoS 保険
+    const accepted = [];
+    for (const d of list) {
+      const rec = _normalizeSpray2(d);
+      if (rec) { _pushSpray2History(rec); accepted.push(rec); }
+    }
+    if (accepted.length) socket.broadcast.volatile.emit('spray2Batch', accepted);
   });
   // space2 専用リセット (アトラスのみ)
   socket.on('resetAtlas2', () => {

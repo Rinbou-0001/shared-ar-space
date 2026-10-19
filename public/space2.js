@@ -1221,6 +1221,43 @@
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
 
+    // ===== Spray 同期最適化 (A: 送信側バッチ, C: volatile emit) =====
+    //   40Hz × カメラ数 の個別 emit を 50ms 窓でまとめる。
+    //   volatile で送るので受信側が slow な場合は drop → キュー詰まり防止。
+    const SPRAY_BATCH_INTERVAL_MS = 50;
+    const _sprayOutBuf = [];
+    let _sprayOutLastFlushT = 0;
+    function _sprayFlushTick() {
+      if (_sprayOutBuf.length === 0) return;
+      const now = performance.now();
+      if (now - _sprayOutLastFlushT < SPRAY_BATCH_INTERVAL_MS) return;
+      _sprayOutLastFlushT = now;
+      if (socket && socket.connected) {
+        // volatile: 送信キューが詰まっていたら skip (再送しない)
+        const packet = _sprayOutBuf.splice(0);
+        socket.volatile.emit('spray2Batch', packet);
+      } else {
+        // 未接続中は buffer を破棄 (再接続後も古い打点は不要)
+        _sprayOutBuf.length = 0;
+      }
+    }
+
+    // ===== Spray 受信側合流 (G: rAF 内 1 回に合流) =====
+    //   個別 _applyRemoteSpray を複数回/フレーム呼ばれても GPU 書込みは
+    //   requestAnimationFrame 内の 1 ループに集約し、パイプラインの詰まりを解消。
+    const _applyRemoteBuf = [];
+    let _applyRemoteScheduled = false;
+    function _scheduleApplyRemote(data) {
+      _applyRemoteBuf.push(data);
+      if (_applyRemoteScheduled) return;
+      _applyRemoteScheduled = true;
+      requestAnimationFrame(() => {
+        _applyRemoteScheduled = false;
+        const batch = _applyRemoteBuf.splice(0);
+        for (const d of batch) _applyRemoteSprayImmediate(d);
+      });
+    }
+
     // ============ モード別ジオメトリ ============
     function _makeGrassGeometry() {
       const g = new THREE.BufferGeometry();
@@ -1803,8 +1840,10 @@
       const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
       _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
+      // 送信: 単発 emit ではなく _sprayOutBuf に push、50ms 毎に 'spray2Batch' として
+      // volatile emit (遅延時は socket.io が drop → キュー詰まり防止)。
       if (socket && socket.connected) {
-        socket.emit('spray2', {
+        _sprayOutBuf.push({
           tgt: tgtName,
           u: +uv.x.toFixed(4),
           v: +uv.y.toFixed(4),
@@ -3797,7 +3836,7 @@
       });
 
       // space2 専用スプレー受信: space3 の 'spray' / 'sprayBatch' は購読せず相互影響を遮断
-      function _applyRemoteSpray(data) {
+      function _applyRemoteSprayImmediate(data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         if (!data.tgt) return;
         const mesh = _paintables.get(data.tgt);
@@ -3807,10 +3846,17 @@
         const uvR = (typeof data.r === 'number') ? data.r : 0.01;
         _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
       }
-      socket.on('spray2', _applyRemoteSpray);
+      // 単発 spray2 (後方互換) → 合流キュー
+      socket.on('spray2', _scheduleApplyRemote);
+      // 新規: バッチ (A: 送信側 50ms 窓で集約されたもの)
+      socket.on('spray2Batch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) _scheduleApplyRemote(d);
+      });
+      // 履歴 (初回接続時の既存塗り再現)
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _applyRemoteSpray(d);
+        for (const d of list) _scheduleApplyRemote(d);
       });
       // space2 専用アトラスリセット
       socket.on('resetAtlas2', () => {
@@ -3937,6 +3983,7 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
+    updaters.push(_sprayFlushTick);
     updaters.push(_modeBurstTick);
     updaters.push(_modeAnimTick);
     updaters.push(_modeCullTick);
