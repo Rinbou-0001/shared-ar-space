@@ -961,6 +961,66 @@
     //   _makePaintable(cube, baseColor, worldSpanM=1, 128) で各 cube に独立 paint RT を割り当て)
     void movableCubes;
 
+    // ===== ミニチュア塗り Box (20cm): 空間の塗り状況をライブ反映 =====
+    //   位置 (1, 1, 0) 固定、各面に対応する壁/床/天井の paintRT.texture を map。
+    //   塗っていない所 (alpha=0) は alphaTest で透過。
+    //   回転は "最新入室 camera" の avatar.grp.quaternion を毎フレーム コピー
+    //   (phone の前方傾きがそのまま cube の前方傾きになる direct mirror)。
+    //   #eaeded の 2px 境界ラインを EdgesGeometry で付与。
+    const MINI_SIZE = 0.2;
+    let _miniCube = null;
+    function _getPaintTex(name) {
+      const m = _paintables.get(name);
+      return (m && m.userData && m.userData.paintRT) ? m.userData.paintRT.texture : null;
+    }
+    function _miniFaceMat(name) {
+      return new THREE.MeshBasicMaterial({
+        map: _getPaintTex(name),
+        transparent: true,
+        alphaTest: 0.01,
+        side: THREE.DoubleSide,
+      });
+    }
+    {
+      const geom = new THREE.BoxGeometry(MINI_SIZE, MINI_SIZE, MINI_SIZE);
+      // BoxGeometry のマテリアル配列順: [+X, -X, +Y, -Y, +Z, -Z]
+      //   内側 "mirror": observer が cube の +X 側から覗き込むと、空間を +X 方向 (= 壁 wall-E) 側へ
+      //   実際に歩いて見るのと同じ内容が見える、という思想
+      const mats = [
+        _miniFaceMat('wall-E'),       // +X
+        _miniFaceMat('wall-W'),       // -X
+        _miniFaceMat('ceiling'),      // +Y
+        _miniFaceMat('floor-paint'),  // -Y
+        _miniFaceMat('wall-S'),       // +Z
+        _miniFaceMat('wall-N'),       // -Z
+      ];
+      _miniCube = new THREE.Mesh(geom, mats);
+      _miniCube.position.set(1, 1, 0);
+      _miniCube.name = 'mini-paint-cube';
+      scene.add(_miniCube);
+      // #eaeded, 2px の境界
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geom),
+        new THREE.LineBasicMaterial({ color: 0xeaeded, linewidth: 2 })
+      );
+      edges.name = 'mini-paint-cube-edges';
+      _miniCube.add(edges);
+    }
+    // 最新入室 camera avatar の quaternion を毎フレーム cube に反映
+    function _findLatestCameraAvatar() {
+      let latest = null;
+      // avatars は Map。挿入順で最後の camera-role を取る
+      avatars.forEach((av) => { if (av && av.role === 'camera') latest = av; });
+      return latest;
+    }
+    function _updateMiniCube() {
+      if (!_miniCube) return;
+      const av = _findLatestCameraAvatar();
+      if (!av || !av.grp) return;
+      _miniCube.quaternion.copy(av.grp.quaternion);
+    }
+    updaters.push(_updateMiniCube);
+
     // スプレー状態 (self): press-and-hold で発射開始、release で停止
     const _spraySelf = {
       pressStartT: 0,          // press 開始時刻 (ms)、0 = press 中でない
