@@ -918,14 +918,21 @@
     const PLATE_H = 0.286;
     const PLATE_ORIGIN = new THREE.Vector3(0.5, 1, 0);
     const PLATE_APEX_OFFSET = 0.15;    // L 外側 15cm に apex を独自に持つ
+    // L 全体の yaw: 旧 (0 → 共有縦辺中心で plate1 が +X / plate2 が +Z) から +45° 回転
+    //   = ユーザー指定の "Yaw -90 → -45" に相当
+    const PLATE_WRAPPER_YAW = Math.PI / 4;
     const _plateEdgeMat = new THREE.LineBasicMaterial({ color: 0xeaeded });
+    const _platesWrapper = new THREE.Group();
+    _platesWrapper.position.copy(PLATE_ORIGIN);
+    _platesWrapper.rotation.y = PLATE_WRAPPER_YAW;
+    scene.add(_platesWrapper);
 
     function _makePlate(tagId, offset, rotationY) {
-      // offset: 共有縦辺からの横オフセット方向 (world ベクトル)
-      // rotationY: plane の Y 軸回転
+      // offset: 共有縦辺 (wrapper 原点) からの相対オフセット
+      // rotationY: plane のローカル Y 軸回転 (wrapper の yaw を上乗せ)
       const grp = new THREE.Group();
-      grp.position.copy(PLATE_ORIGIN).add(offset);
-      scene.add(grp);
+      grp.position.copy(offset);
+      _platesWrapper.add(grp);
       // キャンバス面 (paint RT 対応、タグ付き時のみ可視化)
       const mesh = new THREE.Mesh(
         new THREE.PlaneGeometry(PLATE_W, PLATE_H),
@@ -5108,7 +5115,9 @@
             // outer 方向 = plate の local -Z を world へ (= L 字凸角方向)
             const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(pQuat).normalize();
             _oaDispCenter.copy(pCenter);
-            _oaDispQuat.copy(pQuat);
+            // off-axis の慣例: dispQuat の +Z は apex (eye) 側を指す必要がある。
+            //   plate の local +Z は L 凹角側を指すので、Y 軸 180° 回転で反転させて eye 側 (-Z) に向ける
+            _oaDispQuat.copy(pQuat).multiply(_oaFlipQ);
             _oaEye.copy(pCenter).addScaledVector(outer, PLATE_APEX_OFFSET);
             _plateW = PLATE_W;
             _plateH = PLATE_H;
