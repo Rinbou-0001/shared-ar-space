@@ -753,6 +753,131 @@
     const _paintQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _paintShaderMat);
     _paintScene.add(_paintQuad);
 
+    // ===== 複数塗り点を 1 draw call で描画するインスタンス版 (receiver 側ラグ対策 / P4) =====
+    //   各 instance = 1 塗り点 (center, radius, color, seed)。
+    //   既存 _paintShaderMat と同一の見た目 (ノイズ密度 + falloff + alpha) を保つ。
+    //   1 フレーム分の全 remote spray を target 別にグループ化し、target ごとに 1 draw で RT に描画。
+    const PAINT_BATCH_MAX = 256;  // 1 draw call あたりの最大 instance 数
+    const _paintBatchBaseGeom = new THREE.PlaneGeometry(2, 2);  // -1..+1 の unit quad
+    const _paintBatchGeom = new THREE.InstancedBufferGeometry();
+    _paintBatchGeom.index = _paintBatchBaseGeom.index;
+    _paintBatchGeom.setAttribute('position', _paintBatchBaseGeom.attributes.position);
+    _paintBatchGeom.setAttribute('uv',       _paintBatchBaseGeom.attributes.uv);
+    _paintBatchGeom.setAttribute('normal',   _paintBatchBaseGeom.attributes.normal);
+    const _paintBatchCenter = new Float32Array(PAINT_BATCH_MAX * 2);
+    const _paintBatchRadius = new Float32Array(PAINT_BATCH_MAX);
+    const _paintBatchColor  = new Float32Array(PAINT_BATCH_MAX * 3);
+    const _paintBatchSeed   = new Float32Array(PAINT_BATCH_MAX);
+    const _paintBatchCenterAttr = new THREE.InstancedBufferAttribute(_paintBatchCenter, 2).setUsage(THREE.DynamicDrawUsage);
+    const _paintBatchRadiusAttr = new THREE.InstancedBufferAttribute(_paintBatchRadius, 1).setUsage(THREE.DynamicDrawUsage);
+    const _paintBatchColorAttr  = new THREE.InstancedBufferAttribute(_paintBatchColor, 3).setUsage(THREE.DynamicDrawUsage);
+    const _paintBatchSeedAttr   = new THREE.InstancedBufferAttribute(_paintBatchSeed, 1).setUsage(THREE.DynamicDrawUsage);
+    _paintBatchGeom.setAttribute('aUvCenter', _paintBatchCenterAttr);
+    _paintBatchGeom.setAttribute('aRadius',   _paintBatchRadiusAttr);
+    _paintBatchGeom.setAttribute('aColor',    _paintBatchColorAttr);
+    _paintBatchGeom.setAttribute('aSeed',     _paintBatchSeedAttr);
+    const _paintBatchMat = new THREE.ShaderMaterial({
+      uniforms: {},
+      vertexShader: `
+        attribute vec2  aUvCenter;
+        attribute float aRadius;
+        attribute vec3  aColor;
+        attribute float aSeed;
+        varying vec2  vLocal;
+        varying vec3  vInstanceColor;
+        varying float vInstanceSeed;
+        varying float vInstanceRadius;
+        varying vec2  vInstanceCenter;
+        void main() {
+          // position は -1..+1 の unit quad
+          vLocal = position.xy;
+          vec2 uv = aUvCenter + position.xy * aRadius;
+          vInstanceColor  = aColor;
+          vInstanceSeed   = aSeed;
+          vInstanceRadius = aRadius;
+          vInstanceCenter = aUvCenter;
+          // UV [0..1] → clip [-1..+1]
+          gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision highp float;
+        varying vec2  vLocal;
+        varying vec3  vInstanceColor;
+        varying float vInstanceSeed;
+        varying float vInstanceRadius;
+        varying vec2  vInstanceCenter;
+        float hash(vec2 p) {
+          p = mod(p, vec2(997.0));
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+        void main() {
+          // vLocal: -1..+1 (quad local), 中心 (0,0), 外周 1.0
+          float r = length(vLocal);
+          if (r > 1.0) discard;
+          float falloff = 1.0 - smoothstep(0.0, 1.0, r);
+          falloff = pow(falloff, 0.85);
+          // ノイズ用: 元 shader と同じく UV 座標 (RT 上の絶対位置) × 600 を seed にする
+          vec2 uv = vInstanceCenter + vLocal * vInstanceRadius;
+          float n = hash(uv * 600.0 + vec2(vInstanceSeed, vInstanceSeed * 1.37));
+          float threshold = 1.0 - falloff * 0.95;
+          if (n < threshold) discard;
+          float alpha = clamp(falloff * 0.6 + 0.25, 0.0, 1.0);
+          gl_FragColor = vec4(vInstanceColor, alpha);
+        }
+      `,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+    });
+    const _paintBatchMesh = new THREE.Mesh(_paintBatchGeom, _paintBatchMat);
+    _paintBatchMesh.frustumCulled = false;
+    const _paintBatchScene = new THREE.Scene();
+    _paintBatchScene.add(_paintBatchMesh);
+    const _paintBatchTmpColor = new THREE.Color();
+
+    // 複数塗り点を 1 draw call で RT に描画 (chunks of PAINT_BATCH_MAX)
+    function _applyPaintBatch(rt, points) {
+      if (!rt || !Array.isArray(points) || points.length === 0) return;
+      const prev = renderer.getRenderTarget();
+      const oldAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      for (let off = 0; off < points.length; off += PAINT_BATCH_MAX) {
+        const chunk = Math.min(PAINT_BATCH_MAX, points.length - off);
+        for (let i = 0; i < chunk; i++) {
+          const p = points[off + i];
+          _paintBatchCenter[i * 2    ] = p.u;
+          _paintBatchCenter[i * 2 + 1] = p.v;
+          _paintBatchRadius[i] = (typeof p.r === 'number' && p.r > 0) ? p.r : 0.01;
+          const colStr = (typeof p.c === 'string') ? ('#' + p.c) : '#ffffff';
+          _paintBatchTmpColor.set(colStr);
+          _paintBatchColor[i * 3    ] = _paintBatchTmpColor.r;
+          _paintBatchColor[i * 3 + 1] = _paintBatchTmpColor.g;
+          _paintBatchColor[i * 3 + 2] = _paintBatchTmpColor.b;
+          const seedN = (typeof p.s === 'number') ? p.s : Date.now();
+          _paintBatchSeed[i] = ((seedN >>> 0) % 100000) * 0.01;
+        }
+        _paintBatchCenterAttr.needsUpdate = true;
+        _paintBatchRadiusAttr.needsUpdate = true;
+        _paintBatchColorAttr.needsUpdate  = true;
+        _paintBatchSeedAttr.needsUpdate   = true;
+        _paintBatchGeom.instanceCount = chunk;
+        renderer.setRenderTarget(rt);
+        renderer.render(_paintBatchScene, _paintCamera);
+      }
+      renderer.setRenderTarget(prev);
+      renderer.autoClear = oldAutoClear;
+    }
+
     // space1 準拠のブラシ寸法パラメータ
     const SPRAY_HALF_ANGLE  = Math.PI / 9;    // 20° (円錐半角)
     const SPRAY_MAX_WORLD_R = 1.0;            // 最大世界半径 1.0m (= 直径 2m)
@@ -1247,22 +1372,35 @@
       if (_modeOverwriteOutBuf.length) socket.emit('modeOverwriteBatch', _modeOverwriteOutBuf.splice(0));
     }
 
-    // ===== Spray 受信側合流 (G: rAF 内 1 回に合流) =====
-    //   個別 _applyRemoteSpray を複数回/フレーム呼ばれても GPU 書込みは
-    //   requestAnimationFrame 内の 1 ループに集約し、パイプラインの詰まりを解消。
+    // ===== Spray 受信側 (P4: GPU 多点 1-pass 描画) =====
+    //   受信した 1 frame 分の全 spray を target 別にグループ化し、各 target について
+    //   1 draw call で全点を描画 (InstancedBufferGeometry)。
+    //   バッチ内の件数に関わらず 1 target = 1 GPU render pass。受信ラグ発生源を根本除去。
     const _applyRemoteBuf = [];
     let _applyRemoteScheduled = false;
-    // 実関数本体は socket.on('connect') ブロック内で定義 (後方で代入)
-    let _applyRemoteSprayImmediate = null;
     function _scheduleApplyRemote(data) {
-      if (typeof _applyRemoteSprayImmediate !== 'function') return;
+      if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+      if (!data.tgt) return;
       _applyRemoteBuf.push(data);
       if (_applyRemoteScheduled) return;
       _applyRemoteScheduled = true;
       requestAnimationFrame(() => {
         _applyRemoteScheduled = false;
         const batch = _applyRemoteBuf.splice(0);
-        for (const d of batch) _applyRemoteSprayImmediate(d);
+        // target mesh (= paintRT) 別にグループ化
+        const byRT = new Map();  // rt → [point...]
+        for (const d of batch) {
+          const mesh = _paintables.get(d.tgt);
+          if (!mesh) continue;
+          const rt = mesh.userData && mesh.userData.paintRT;
+          if (!rt) continue;
+          if (!byRT.has(rt)) byRT.set(rt, []);
+          byRT.get(rt).push(d);
+        }
+        // 各 RT について 1 draw call (chunk 内) で描画
+        for (const [rt, pts] of byRT) {
+          _applyPaintBatch(rt, pts);
+        }
       });
     }
 
@@ -3843,18 +3981,8 @@
         }
       });
 
-      // space2 専用スプレー受信: space3 の 'spray' / 'sprayBatch' は購読せず相互影響を遮断
-      // 外側スコープで宣言された _applyRemoteSprayImmediate (let) にここで実体を代入
-      _applyRemoteSprayImmediate = function (data) {
-        if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
-        if (!data.tgt) return;
-        const mesh = _paintables.get(data.tgt);
-        if (!mesh) return;
-        const rt = mesh.userData.paintRT; if (!rt) return;
-        const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
-        const uvR = (typeof data.r === 'number') ? data.r : 0.01;
-        _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
-      };
+      // space2 専用スプレー受信: 単発 _applyRemoteSprayImmediate は廃止
+      //   (P4 で全パスを _applyPaintBatch 経由に統一、インスタンス 1-draw で描画)
       // 単発 spray2 (後方互換) → 合流キュー
       socket.on('spray2', _scheduleApplyRemote);
       // 新規: バッチ (A: 送信側 50ms 窓で集約されたもの)
