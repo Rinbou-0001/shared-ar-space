@@ -5178,7 +5178,18 @@
           } catch (_) {}
         }
         if (!ok) camera.updateProjectionMatrix();
+        // 自身の plate を自分視点のレンダーから一時隠蔽 (さもなくば白い板が camera 直前に居て
+        // 視界が全部白くなり、"壁しか見えない" ように映ってしまう)
+        let _hiddenPlateVis = null;
+        if (_plateGrpForDisplay && _plateGrpForDisplay.userData && _plateGrpForDisplay.userData.plateMesh) {
+          const _pm = _plateGrpForDisplay.userData.plateMesh;
+          _hiddenPlateVis = _pm.visible;
+          _pm.visible = false;
+        }
         renderer.render(scene, camera);
+        if (_hiddenPlateVis !== null && _plateGrpForDisplay && _plateGrpForDisplay.userData && _plateGrpForDisplay.userData.plateMesh) {
+          _plateGrpForDisplay.userData.plateMesh.visible = _hiddenPlateVis;
+        }
         // 復元: ユーザー由来の姿勢を戻す (次フレームの操作が正しく効く)
         camera.position.copy(_oaSavePos);
         camera.quaternion.copy(_oaSaveQuat);
