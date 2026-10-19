@@ -599,6 +599,29 @@
     // raycast 対象リスト (_makePaintable 経由で壁/床/天井が push される)
     const _sprayables = [];
 
+    // ===== 草オブジェクト発生 (wood ペイントモードカメラ専用) =====
+    //   wood 色 (#1b5e20) のスプレーヒット点を world 空間でサンプリング。
+    //   8cm ボクセルで連結成分 (DBSCAN 近似) を作り、
+    //   占有ボクセル数 × 面積が閾値を超えたクラスタから草 (InstancedMesh plane) を発生させる。
+    //   送信元 (sprayer 自身) が検出 → 'grassSpawn' 送信 → 全クライアントで描画。
+    const GRASS_WOOD_HEX = '1b5e20';
+    const GRASS_SAMPLE_INTERVAL_MS = 50;         // 同一ボクセルへのサンプル記録間隔
+    const GRASS_VOXEL = 0.08;                    // クラスタ結合距離 (= ボクセル辺)
+    const GRASS_CLUSTER_MIN_POINTS = 12;         // 一まとまりに必要な最小サンプル点数
+    const GRASS_CLUSTER_MIN_AREA = 0.015;        // 面積閾値 m² (占有ボクセル数 × VOXEL²)
+    const GRASS_SPAWN_DENSITY = 400;             // 本/m²
+    const GRASS_RESPAWN_COOLDOWN_MS = 2000;      // 同一クラスタの再発生抑止時間
+    const GRASS_MAX_INSTANCES = 2000;            // InstancedMesh 上限
+    const GRASS_BLADE_H = 0.06;                  // 草 1 本の高さ (6cm)
+    const GRASS_BLADE_W = 0.012;                 // 草 1 本の幅
+    // 検出状態 (sprayer 自身のローカル集計)
+    const _grassVoxels = new Map();              // key(ix,iy,iz) → { ix,iy,iz, pts:[], firstT, lastSpawnedT }
+    let _grassLastSampleT = new Map();           // 同一ボクセルサンプル throttle
+    // 描画状態 (全クライアント)
+    let _grassMesh = null;
+    let _grassCount = 0;
+    const _grassDummy = (window.THREE ? new THREE.Object3D() : null);
+
     // ===== 統合アトラス方式ペイント基盤 (space1 同等コスト、1 枚テクスチャ共有) =====
     //   床・4 壁・各 Cube は 1 枚の CanvasTexture (アトラス) を共有し、各メッシュの UV
     //   属性を自領域に remap することで独立に塗り分けられる。1 ドットの GPU 再アップロードは
@@ -1077,6 +1100,165 @@
     const _sprayRay = new THREE.Raycaster();
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
+
+    // 草システム: InstancedMesh を lazy 初期化
+    function _ensureGrassMesh() {
+      if (_grassMesh) return _grassMesh;
+      // X-shaped 2 枚クロスで草 1 本を表現する簡易ジオメトリ
+      const g = new THREE.BufferGeometry();
+      const H = GRASS_BLADE_H, W = GRASS_BLADE_W;
+      // 2 枚のプレーン (±45°) を 1 ジオメトリに結合: 計 8 頂点、12 index
+      const positions = new Float32Array([
+        // plane A (XY)
+        -W / 2, 0, 0,   W / 2, 0, 0,   W / 2, H, 0,  -W / 2, H, 0,
+        // plane B (YZ)
+         0, 0, -W / 2,  0, 0, W / 2,   0, H, W / 2,   0, H, -W / 2,
+      ]);
+      const indices = [
+        0, 1, 2, 0, 2, 3,
+        4, 5, 6, 4, 6, 7,
+      ];
+      g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      g.setIndex(indices);
+      g.computeVertexNormals();
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
+      });
+      _grassMesh = new THREE.InstancedMesh(g, mat, GRASS_MAX_INSTANCES);
+      _grassMesh.count = 0;
+      _grassMesh.name = 'grass-instanced';
+      _grassMesh.frustumCulled = false;
+      scene.add(_grassMesh);
+      return _grassMesh;
+    }
+
+    // normal を Up に合わせる Quaternion を生成
+    const _grassAxisY = new THREE.Vector3(0, 1, 0);
+    const _grassTmpV1 = new THREE.Vector3();
+    const _grassTmpV2 = new THREE.Vector3();
+    const _grassTmpQ  = new THREE.Quaternion();
+    function _grassOrientQuat(nx, ny, nz, outQ) {
+      _grassTmpV1.set(nx, ny, nz).normalize();
+      outQ.setFromUnitVectors(_grassAxisY, _grassTmpV1);
+    }
+
+    // クラスタ発火: 中心・法線・半径を受けて複数本をランダム散布
+    function _renderGrassAt(data) {
+      if (!data) return;
+      const mesh = _ensureGrassMesh();
+      const r = Math.max(0.02, Math.min(0.5, data.r || 0.08));
+      const area = Math.PI * r * r;
+      const n = Math.max(3, Math.min(80, Math.round(GRASS_SPAWN_DENSITY * area)));
+      _grassOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _grassTmpQ);
+      // 面上接線 2 軸を得る (normal に対する任意直交基底)
+      const nrm = _grassTmpV1.set(data.nx || 0, data.ny || 1, data.nz || 0).normalize();
+      const t1 = _grassTmpV2.set(1, 0, 0);
+      if (Math.abs(nrm.dot(t1)) > 0.9) t1.set(0, 0, 1);
+      t1.sub(nrm.clone().multiplyScalar(nrm.dot(t1))).normalize();
+      const t2 = new THREE.Vector3().crossVectors(nrm, t1).normalize();
+      for (let i = 0; i < n; i++) {
+        if (_grassCount >= GRASS_MAX_INSTANCES) break;
+        const rr = Math.sqrt(Math.random()) * r;
+        const th = Math.random() * Math.PI * 2;
+        const dx = Math.cos(th) * rr, dy = Math.sin(th) * rr;
+        const px = data.x + t1.x * dx + t2.x * dy;
+        const py = data.y + t1.y * dx + t2.y * dy + nrm.y * 0.001;
+        const pz = data.z + t1.z * dx + t2.z * dy;
+        _grassDummy.position.set(px, py, pz);
+        _grassDummy.quaternion.copy(_grassTmpQ);
+        _grassDummy.rotateY(Math.random() * Math.PI);
+        _grassDummy.scale.setScalar(0.7 + Math.random() * 0.6);
+        _grassDummy.updateMatrix();
+        mesh.setMatrixAt(_grassCount, _grassDummy.matrix);
+        _grassCount++;
+      }
+      mesh.count = _grassCount;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+
+    function _clearAllGrass() {
+      if (_grassMesh) { _grassMesh.count = 0; _grassMesh.instanceMatrix.needsUpdate = true; }
+      _grassCount = 0;
+      _grassVoxels.clear();
+      _grassLastSampleT.clear();
+    }
+
+    // sprayer 自身の wood ヒットを受け取り、ボクセルクラスタに積む。
+    // 閾値を超えたクラスタは grassSpawn を emit。
+    function _pushWoodSprayHit(worldPt, normal, colorHex) {
+      if (!worldPt || !normal) return;
+      if (!colorHex || colorHex.toLowerCase() !== GRASS_WOOD_HEX) return;
+      const nowT = performance.now();
+      const ix = Math.floor(worldPt.x / GRASS_VOXEL);
+      const iy = Math.floor(worldPt.y / GRASS_VOXEL);
+      const iz = Math.floor(worldPt.z / GRASS_VOXEL);
+      const key = ix + ',' + iy + ',' + iz;
+      // 同一ボクセルの throttle (50ms)
+      const lastT = _grassLastSampleT.get(key) || 0;
+      if (nowT - lastT < GRASS_SAMPLE_INTERVAL_MS) return;
+      _grassLastSampleT.set(key, nowT);
+      let bucket = _grassVoxels.get(key);
+      if (!bucket) {
+        bucket = { ix, iy, iz, pts: [], firstT: nowT, lastSpawnedT: 0, nSum: { x: 0, y: 0, z: 0 } };
+        _grassVoxels.set(key, bucket);
+      }
+      bucket.pts.push({ x: worldPt.x, y: worldPt.y, z: worldPt.z });
+      bucket.nSum.x += normal.x; bucket.nSum.y += normal.y; bucket.nSum.z += normal.z;
+      // 発火判定: ボクセル連結成分でクラスタ化し、点数・面積を評価
+      _checkGrassCluster(ix, iy, iz, nowT);
+    }
+
+    // 対象ボクセルを種に連結成分を広げ、閾値を超えたら grassSpawn 発火
+    function _checkGrassCluster(sx, sy, sz, nowT) {
+      const seedKey = sx + ',' + sy + ',' + sz;
+      const seed = _grassVoxels.get(seedKey); if (!seed) return;
+      if (nowT - seed.lastSpawnedT < GRASS_RESPAWN_COOLDOWN_MS) return;
+      // BFS で 26 近傍を走査 (結果は seed に属するクラスタ全体)
+      const visited = new Set([seedKey]);
+      const queue = [seed];
+      const members = [seed];
+      let totalPts = seed.pts.length;
+      while (queue.length) {
+        const cur = queue.shift();
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+          if (!dx && !dy && !dz) continue;
+          const nk = (cur.ix + dx) + ',' + (cur.iy + dy) + ',' + (cur.iz + dz);
+          if (visited.has(nk)) continue;
+          const nb = _grassVoxels.get(nk);
+          if (!nb) continue;
+          visited.add(nk);
+          queue.push(nb);
+          members.push(nb);
+          totalPts += nb.pts.length;
+        }
+      }
+      const area = members.length * GRASS_VOXEL * GRASS_VOXEL;
+      if (totalPts < GRASS_CLUSTER_MIN_POINTS) return;
+      if (area < GRASS_CLUSTER_MIN_AREA) return;
+      // クラスタ中心と平均法線
+      let cx = 0, cy = 0, cz = 0, pn = 0, nx = 0, ny = 0, nz = 0;
+      for (const m of members) {
+        for (const p of m.pts) { cx += p.x; cy += p.y; cz += p.z; pn++; }
+        nx += m.nSum.x; ny += m.nSum.y; nz += m.nSum.z;
+      }
+      if (pn === 0) return;
+      cx /= pn; cy /= pn; cz /= pn;
+      const nlen = Math.hypot(nx, ny, nz) || 1;
+      nx /= nlen; ny /= nlen; nz /= nlen;
+      // 近似半径 = sqrt(area / π)
+      const r = Math.sqrt(area / Math.PI);
+      const payload = {
+        x: +cx.toFixed(4), y: +cy.toFixed(4), z: +cz.toFixed(4),
+        nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
+        r: +r.toFixed(4),
+      };
+      // 全メンバーに cooldown + spawned を付与
+      for (const m of members) m.lastSpawnedT = nowT;
+      // ローカル描画 + サーバーへ (他者にブロードキャスト + 履歴保存)
+      _renderGrassAt(payload);
+      if (socket && socket.connected) socket.emit('grassSpawn', payload);
+      log('grass spawn (pts=' + totalPts + ', area=' + area.toFixed(3) + 'm²)', 'ok');
+    }
     // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
     function _sprayTick() {
       if (!_spraySelf.pressStartT) return;
@@ -1124,6 +1306,17 @@
           r: +uvR.toFixed(4),
           s: seed,
         });
+      }
+      // 草発生ロジック: wood 色 (#1b5e20) をスプレーしている時のみ world 空間サンプル蓄積
+      if (colorHex && colorHex.toLowerCase() === GRASS_WOOD_HEX && hit.point) {
+        // 面法線: hit.face.normal は object local、world へ変換
+        let wnx = 0, wny = 1, wnz = 0;
+        if (hit.face && hit.face.normal && target) {
+          const nLocal = hit.face.normal.clone();
+          nLocal.transformDirection(target.matrixWorld);
+          wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
+        }
+        _pushWoodSprayHit(hit.point, { x: wnx, y: wny, z: wnz }, colorHex);
       }
     }
 
@@ -3117,8 +3310,17 @@
       // space2 専用アトラスリセット
       socket.on('resetAtlas2', () => {
         _clearAllPaintables();
+        _clearAllGrass();
         log('atlas cleared (space2)', 'ok');
       });
+
+      // 草オブジェクト発生 (wood スプレー派生) ─ サーバーから配信
+      socket.on('grassSpawn', (data) => { _renderGrassAt(data); });
+      socket.on('grassHistoryBatch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) _renderGrassAt(d);
+      });
+      socket.on('resetGrass', () => { _clearAllGrass(); log('grass cleared', 'ok'); });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
 
