@@ -1019,7 +1019,8 @@
       if (!av || !av.grp) return;
       _miniCube.quaternion.copy(av.grp.quaternion);
     }
-    updaters.push(_updateMiniCube);
+    // updaters は後方で宣言されるため、ここでは window に保留。後で push される。
+    window.__miniCubeUpdater = _updateMiniCube;
 
     // スプレー状態 (self): press-and-hold で発射開始、release で停止
     const _spraySelf = {
@@ -3130,6 +3131,8 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
+    // ミニキューブ更新 tick (前方で保留した関数を push)
+    if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
 
     // ========== 効果2: スマホ リモコン型ポインター + スプレーボタン ==========
     //   ・effect2 ON + ROLE=camera の時のみ有効化
