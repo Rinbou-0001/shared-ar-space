@@ -120,6 +120,9 @@ let sprayHistory2 = [];   // space2 専用アトラス UV 履歴
 const MODE_SPAWN_HISTORY_CAP = 16000;
 const MODE_SPAWN_ALLOWED = new Set(['wood', 'river', 'sky']);
 let modeSpawnHistory2 = [];
+// モード塗り替え履歴 (modeOverwrite) ─ 新規接続時にリプレイして fade-out 状態を再現
+const MODE_OVERWRITE_HISTORY_CAP = 16000;
+let modeOverwriteHistory2 = [];
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用
 //   誰かが cube1 等を動かしたら、他クライアントに反映 & 新規参加者にも初期状態として配信
@@ -218,6 +221,18 @@ io.on('connection', (socket) => {
     const CHUNK = 500;
     for (let i = 0; i < modeSpawnHistory2.length; i += CHUNK) {
       socket.emit('modeHistoryBatch', modeSpawnHistory2.slice(i, i + CHUNK));
+    }
+  }
+  // space2 モード塗り替え履歴 (fade-out 状態の再現)
+  //   modeHistoryBatch で全スポーンを配信した直後に、各 overwrite を順次 emit する。
+  //   クライアント側は _tryFadeOutModeAt を呼び、該当 voxel をフェードアウト状態にする。
+  //   ※ ライブイベントと違い、新規接続者は即時フェードを見せる必要はないが、
+  //      _tryFadeOutModeAt は即スケール 0 まで 1 秒かけてフェードさせる。初回ロードでは
+  //      多数のフェードアニメが同時進行するが、1 秒で終わるため体感影響は小さい。
+  if (modeOverwriteHistory2.length > 0) {
+    const CHUNK = 500;
+    for (let i = 0; i < modeOverwriteHistory2.length; i += CHUNK) {
+      socket.emit('modeOverwriteHistoryBatch', modeOverwriteHistory2.slice(i, i + CHUNK));
     }
   }
   // 接続直後にサーバー保持中の全オブジェクト位置を配信 (新規参加者への初期状態同期)
@@ -506,10 +521,10 @@ io.on('connection', (socket) => {
     const rec = _normalizeSpray2(data);
     if (!rec) return;
     _pushSpray2History(rec);
-    socket.broadcast.volatile.emit('spray2', rec);
+    socket.broadcast.emit('spray2', rec);
   });
   // バッチ版: クライアントが 50ms 窓で集約した配列を受信
-  //   broadcast も volatile で詰まり防止
+  //   consistency 優先で reliable 配信 (volatile は drop による状態不一致を招くため廃止)
   socket.on('spray2Batch', (list) => {
     if (!Array.isArray(list) || list.length === 0) return;
     if (list.length > 256) list = list.slice(0, 256);  // DoS 保険
@@ -518,12 +533,13 @@ io.on('connection', (socket) => {
       const rec = _normalizeSpray2(d);
       if (rec) { _pushSpray2History(rec); accepted.push(rec); }
     }
-    if (accepted.length) socket.broadcast.volatile.emit('spray2Batch', accepted);
+    if (accepted.length) socket.broadcast.emit('spray2Batch', accepted);
   });
   // space2 専用リセット (アトラスのみ)
   socket.on('resetAtlas2', () => {
     sprayHistory2 = [];
     modeSpawnHistory2 = [];
+    modeOverwriteHistory2 = [];
     io.emit('resetAtlas2', { t: Date.now() });
     io.emit('resetModeSpawn', { t: Date.now() });
   });
@@ -556,6 +572,10 @@ io.on('connection', (socket) => {
     if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
     if (!isFinite(data.ix) || !isFinite(data.iy) || !isFinite(data.iz)) return;
     const rec = { mode: data.mode, ix: data.ix | 0, iy: data.iy | 0, iz: data.iz | 0 };
+    modeOverwriteHistory2.push(rec);
+    if (modeOverwriteHistory2.length > MODE_OVERWRITE_HISTORY_CAP) {
+      modeOverwriteHistory2.splice(0, modeOverwriteHistory2.length - MODE_OVERWRITE_HISTORY_CAP);
+    }
     socket.broadcast.emit('modeOverwrite', rec);
   });
 
@@ -564,6 +584,7 @@ io.on('connection', (socket) => {
     const sender = users.get(socket.id);
     if (!sender || sender.role !== 'master') return;
     modeSpawnHistory2 = [];
+    modeOverwriteHistory2 = [];
     io.emit('resetModeSpawn', { t: Date.now() });
   });
 

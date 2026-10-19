@@ -1233,9 +1233,9 @@
       if (now - _sprayOutLastFlushT < SPRAY_BATCH_INTERVAL_MS) return;
       _sprayOutLastFlushT = now;
       if (socket && socket.connected) {
-        // volatile: 送信キューが詰まっていたら skip (再送しない)
+        // consistency 優先: reliable 配信 (volatile 廃止)
         const packet = _sprayOutBuf.splice(0);
-        socket.volatile.emit('spray2Batch', packet);
+        socket.emit('spray2Batch', packet);
       } else {
         // 未接続中は buffer を破棄 (再接続後も古い打点は不要)
         _sprayOutBuf.length = 0;
@@ -3883,6 +3883,15 @@
         if (!data || typeof data.mode !== 'string') return;
         if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
         _tryFadeOutModeAt(data.mode, data.ix, data.iy, data.iz);
+      });
+      // 塗り替え履歴 (新規接続時にサーバーから受信、既存の fade-out 状態を再現)
+      //   modeHistoryBatch で全スポーンを生成した後に順次フェード処理を実行する
+      socket.on('modeOverwriteHistoryBatch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) {
+          if (!d || typeof d.mode !== 'string') continue;
+          _tryFadeOutModeAt(d.mode, d.ix, d.iy, d.iz);
+        }
       });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
