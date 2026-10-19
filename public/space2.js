@@ -5097,32 +5097,38 @@
       }
 
       // ========== render: myDisplay.offaxis で分岐 ==========
-      if (myDisplay.offaxis) {
+      // プレートタグ付きオブザーバー: off-axis トグルに関わらず plate を display として恒常採用
+      //   (space3 の Canvas 同期と同等思想: タグが設定された瞬間に plate が自身の "表示 canvas" に昇格)
+      let _plateGrpForDisplay = null;
+      if (ROLE === 'observer' && typeof window.__getMyPlateGrp === 'function') {
+        _plateGrpForDisplay = window.__getMyPlateGrp();
+      }
+      const _useOffAxis = (_plateGrpForDisplay != null) || myDisplay.offaxis;
+      if (_useOffAxis) {
         // ユーザー由来の姿勢を退避
         _oaSavePos.copy(camera.position);
         _oaSaveQuat.copy(camera.quaternion);
-        // プレート override: 観測者が plate タグを持つ場合、display = plate 矩形、apex = L 外側 15cm
         let _usedPlate = false;
         let _plateW = myDisplay.width, _plateH = myDisplay.height;
-        if (ROLE === 'observer' && typeof window.__getMyPlateGrp === 'function') {
-          const pg = window.__getMyPlateGrp();
-          if (pg && pg.userData && pg.userData.plateMesh) {
-            // plate の world transform
-            const pMesh = pg.userData.plateMesh;
-            pMesh.updateMatrixWorld(true);
-            const pCenter = new THREE.Vector3().setFromMatrixPosition(pMesh.matrixWorld);
-            const pQuat   = new THREE.Quaternion().setFromRotationMatrix(pMesh.matrixWorld);
-            // outer 方向 = plate の local -Z を world へ (= L 字凸角方向)
-            const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(pQuat).normalize();
-            _oaDispCenter.copy(pCenter);
-            // off-axis の慣例: dispQuat の +Z は apex (eye) 側を指す必要がある。
-            //   plate の local +Z は L 凹角側を指すので、Y 軸 180° 回転で反転させて eye 側 (-Z) に向ける
-            _oaDispQuat.copy(pQuat).multiply(_oaFlipQ);
-            _oaEye.copy(pCenter).addScaledVector(outer, PLATE_APEX_OFFSET);
-            _plateW = PLATE_W;
-            _plateH = PLATE_H;
-            _usedPlate = true;
-          }
+        if (_plateGrpForDisplay && _plateGrpForDisplay.userData && _plateGrpForDisplay.userData.plateMesh) {
+          // plate の world transform
+          const pMesh = _plateGrpForDisplay.userData.plateMesh;
+          pMesh.updateMatrixWorld(true);
+          const pCenter = new THREE.Vector3().setFromMatrixPosition(pMesh.matrixWorld);
+          const pQuat   = new THREE.Quaternion().setFromRotationMatrix(pMesh.matrixWorld);
+          // outer 方向 = plate の local -Z を world へ (= L 字凸角方向)
+          const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(pQuat).normalize();
+          _oaDispCenter.copy(pCenter);
+          _oaDispQuat.copy(pQuat);   // applyOffAxisProjection 側で eye 裏面時に自動反転されるのでそのまま
+          _oaEye.copy(pCenter).addScaledVector(outer, PLATE_APEX_OFFSET);
+          _plateW = PLATE_W;
+          _plateH = PLATE_H;
+          // 観測者の "物理的" 位置も apex に瞬間移動: pose 送信で他クライアントが avatar を plate 位置に描画できるようにする
+          camera.position.copy(_oaEye);
+          camera.lookAt(pCenter);   // 画面法線と正対
+          _oaSavePos.copy(camera.position);
+          _oaSaveQuat.copy(camera.quaternion);
+          _usedPlate = true;
         }
         if (!_usedPlate) {
           if (ROLE === 'camera') {
