@@ -638,9 +638,7 @@
         perVoxel: 1,
         maxPerChunk: 3000,
         makeGeometry: () => _makeFlatTileGeometry(MODE_VOXEL * 1.1),
-        makeMaterial: () => new THREE.MeshBasicMaterial({
-          color: 0x1aa0e8, side: THREE.DoubleSide, transparent: true, opacity: 0.75,
-        }),
+        makeMaterial: () => _makeRiverShaderMaterial(),   // 案C: 水平タイル専用の軽量 shader
         scaleJitter: [0.9, 1.2],
         orientUpWithNormal: true,                // 水面は面に沿わせる
       },
@@ -664,8 +662,8 @@
     // アニメーション中のエントリ: { blades, appearAt, fadeEnd, done }
     //   blades: 配列 [{ chunk, idx, pos:Vector3, quat:Quaternion, scaleTarget:number }]
     const _modeAnimEntries = [];
-    // スプレー発火を有効化するモード集合 (現状は wood のみ)
-    const MODE_SPRAY_ACTIVE = new Set(['wood']);
+    // スプレー発火を有効化するモード集合
+    const MODE_SPRAY_ACTIVE = new Set(['wood', 'river']);
     // 色 hex → mode 名の逆引き
     const _modeByColor = new Map();
     for (const [m, r] of Object.entries(MODE_RULES)) _modeByColor.set(r.color.toLowerCase(), m);
@@ -1182,6 +1180,87 @@
       const g = new THREE.PlaneGeometry(size, size);
       g.rotateX(-Math.PI / 2);  // 水平、normal は +Y
       return g;
+    }
+
+    // 川モード用: space3 の materialBox から低解像度ノイズ生成を流用 (bgRT & 頂点変位は廃止)
+    //   32×32 の低周波ノイズを Linear filter で upscale → 大きな滑らかな blob 感を得る
+    let _sharedRiverNoiseTex = null;
+    function _ensureSharedRiverNoise() {
+      if (_sharedRiverNoiseTex) return _sharedRiverNoiseTex;
+      const SIZE = 32;
+      const cv = document.createElement('canvas');
+      cv.width = SIZE; cv.height = SIZE;
+      const ctx = cv.getContext('2d');
+      const img = ctx.createImageData(SIZE, SIZE);
+      for (let i = 0; i < img.data.length; i += 4) {
+        img.data[i    ] = (Math.random() * 255) | 0;
+        img.data[i + 1] = (Math.random() * 255) | 0;
+        img.data[i + 2] = (Math.random() * 255) | 0;
+        img.data[i + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(cv);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = THREE.LinearFilter;
+      _sharedRiverNoiseTex = tex;
+      return tex;
+    }
+    // 全 river チャンクで uTime を共有するための共通 uniforms (ShaderMaterial.uniforms を同一参照化)
+    const _sharedRiverUniforms = {
+      uNoise:     { value: null },
+      uTime:      { value: 0 },
+      uBaseColor: { value: null },
+      uOpacity:   { value: 0.75 },
+    };
+    function _makeRiverShaderMaterial() {
+      if (!_sharedRiverUniforms.uNoise.value) _sharedRiverUniforms.uNoise.value = _ensureSharedRiverNoise();
+      if (!_sharedRiverUniforms.uBaseColor.value) _sharedRiverUniforms.uBaseColor.value = new THREE.Color(0x1aa0e8);
+      // World-space UV サンプリング: 隣接タイル同士で位相連続 (格子感を消す)
+      // 頂点変位・bgRT 廃止、fragment だけでさざ波 (ノイズ2枚スクロール + Fresnel 風ハイライト)
+      return new THREE.ShaderMaterial({
+        uniforms: _sharedRiverUniforms,
+        vertexShader: `
+          varying vec2 vWxz;
+          varying vec3 vViewDir;
+          varying vec3 vNormal;
+          void main() {
+            // InstancedMesh: instanceMatrix を適用
+            vec4 wPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+            vWxz = wPos.xz;
+            vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+            vViewDir = normalize(-mvPos.xyz);
+            vNormal  = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D uNoise;
+          uniform float uTime;
+          uniform vec3  uBaseColor;
+          uniform float uOpacity;
+          varying vec2 vWxz;
+          varying vec3 vViewDir;
+          varying vec3 vNormal;
+          void main() {
+            // World-space ノイズサンプリング (タイル境界で phase 連続)
+            vec2 n1 = texture2D(uNoise, vWxz * 1.2 + vec2(uTime * 0.07,  uTime * 0.04)).rg;
+            vec2 n2 = texture2D(uNoise, vWxz * 0.8 - vec2(uTime * 0.05, -uTime * 0.06)).rg;
+            float wave = (n1.r + n2.r - 1.0);
+            // Fresnel 風エッジ: 視線と法線の角度で縁を強調
+            float fres = pow(1.0 - max(dot(vNormal, vViewDir), 0.0), 2.5);
+            // ハイライト: ノイズピークを閾値越えで光らせる
+            float sparkle = pow(max(0.0, wave + 0.3), 4.0) * 0.6;
+            vec3 col = uBaseColor + wave * 0.12 + vec3(sparkle);
+            col = mix(col, vec3(1.0), fres * 0.25);
+            gl_FragColor = vec4(col, uOpacity);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
     }
     function _makeBillboardStarGeometry(size) {
       const g = new THREE.PlaneGeometry(size, size);
@@ -3782,6 +3861,8 @@
     updaters.push(_modeBurstTick);
     updaters.push(_modeAnimTick);
     updaters.push(_modeCullTick);
+    // 川 shader の uTime を全チャンク材料で共有 (uniforms 同一参照、1行で全反映)
+    updaters.push(() => { _sharedRiverUniforms.uTime.value = performance.now() * 0.001; });
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
 
