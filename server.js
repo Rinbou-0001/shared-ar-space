@@ -93,6 +93,10 @@ let shaderConfig = { rippleMinM: 0.5, rippleMaxM: 1.5, waveSpeed: 0.6, rippleSpa
 //   density: 0 = フォグ無し、0.06 = ゆるめ、0.12 = 中、0.3 = 濃密、0.1 = デフォルト
 let fogConfig = { density: 0.0 };
 
+// space2 ペイントモード: null | 'wood' | 'river' | 'sky' (exclusive)
+//   master の toggle で切替、camera ロールのクライアントは state.myColor を上書きしてスプレー色を変更
+let currentPaintMode = null;
+
 // オブジェクト移動感度 (space2 で使用、master が変更 → 全クライアントへ配信)
 //   sensitivity: px/m。ドラッグ移動時、この px 動く毎に 1m スナップ (小=敏感、大=鈍感)
 let moveConfig = { sensitivity: 10 };
@@ -182,6 +186,8 @@ io.on('connection', (socket) => {
   socket.emit('shaderConfig', shaderConfig);
   // 接続直後に現在の fog 設定 (space2 のみ利用、他クライアントは無視)
   socket.emit('fogConfig', fogConfig);
+  // 現在のペイントモード (null | wood | river | sky) を接続直後に送信
+  socket.emit('paintMode', { mode: currentPaintMode });
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
   // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
@@ -432,6 +438,18 @@ io.on('connection', (socket) => {
       fogConfig.density = Math.max(0, Math.min(1, data.density));
     }
     io.emit('fogConfig', fogConfig);
+  });
+
+  // space2 ペイントモード (master のみ変更可、全クライアントへ再配信)
+  //   data: { mode: null | 'wood' | 'river' | 'sky' }
+  socket.on('paintMode', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data) return;
+    const m = data.mode;
+    if (m !== null && m !== 'wood' && m !== 'river' && m !== 'sky') return;
+    currentPaintMode = m;
+    io.emit('paintMode', { mode: currentPaintMode });
   });
 
   // space3 スプレー発射 (全ロールが発火可、broadcast して全員に反映)

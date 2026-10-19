@@ -361,6 +361,21 @@
 <div id="master-panel">
   <h3>MASTER 制御</h3>
 
+  <!-- ペイントタブ: camera ロールへ一括でスプレー色 (= paintMode) を割当 -->
+  <div class="m-section">
+    <details open>
+      <summary>ペイント (camera 一括モード)</summary>
+      <div class="m-body">
+        <div class="hint">camera ロールの入室者に共通のスプレー色を割当 (排他、1 つだけ ON)</div>
+        <div class="row" style="gap:6px;">
+          <button class="m-paint-toggle" data-mode="wood"  style="background:#475569; color:white; min-width:72px;">木</button>
+          <button class="m-paint-toggle" data-mode="river" style="background:#475569; color:white; min-width:72px;">川</button>
+          <button class="m-paint-toggle" data-mode="sky"   style="background:#475569; color:white; min-width:72px;">空</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
   <div class="m-section">
     <details open>
       <summary>クライアント選択・強制ポーズ</summary>

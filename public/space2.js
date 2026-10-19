@@ -2854,6 +2854,27 @@
         el.textContent = (a && a.entryTag) ? a.entryTag : '';
       }
       window.__syncMyEntryTagUI = _syncMyEntryTagUI;
+      // ===== ペイントモード (master → camera 一括色変更) =====
+      //   null | 'wood' | 'river' | 'sky' の 4 状態。camera ロールのクライアントは state.myColor を上書き
+      const PAINT_MODE_COLORS = {
+        wood:  '#1b5e20',   // 深緑
+        river: '#008cdd',
+        sky:   '#002044',
+      };
+      window.__currentPaintMode = null;
+      socket.on('paintMode', (data) => {
+        const mode = (data && data.mode) || null;
+        window.__currentPaintMode = mode;
+        if (ROLE === 'camera') {
+          if (mode && PAINT_MODE_COLORS[mode]) {
+            state.myColor = PAINT_MODE_COLORS[mode];
+            log('paint mode → ' + mode + ' (color=' + state.myColor + ')', 'ok');
+          }
+        }
+        if (ROLE === 'master' && typeof window.__syncMasterPaintButtons === 'function') {
+          window.__syncMasterPaintButtons();
+        }
+      });
       // サーバーから自分の entryTag を受信した時に反映 (本人には broadcast('join') が届かないため)
       socket.on('selfEntryTag', (data) => {
         if (!data || !data.entryTag || !myId) return;
@@ -4348,6 +4369,26 @@
     function setupMaster() {
       // TransformControls ギズモの遅延初期化 (TransformControls スクリプトロード後)
       _initMasterGizmos();
+      // ペイントモード toggle (木 / 川 / 空) — exclusive
+      const _paintBtns = Array.from(document.querySelectorAll('.m-paint-toggle'));
+      function _syncMasterPaintButtons() {
+        const cur = window.__currentPaintMode || null;
+        _paintBtns.forEach((btn) => {
+          const on = (btn.dataset.mode === cur);
+          btn.style.background = on ? '#22c55e' : '#475569';
+          btn.style.color      = on ? '#052e16' : 'white';
+        });
+      }
+      window.__syncMasterPaintButtons = _syncMasterPaintButtons;
+      _paintBtns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (!socket || !socket.connected) return;
+          const m = btn.dataset.mode;
+          const next = (window.__currentPaintMode === m) ? null : m;
+          socket.emit('paintMode', { mode: next });
+        });
+      });
+      _syncMasterPaintButtons();
       // ========== dirty フラグ ヘルパ (input echo 焼き潰し防止) ==========
       //   ・全 master 入力欄で `input` イベント → dirty=true
       //   ・socket echo (viewerEye / moveConfig / fogConfig / forcePose) 受信時、
