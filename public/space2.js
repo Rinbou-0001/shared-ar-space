@@ -1348,14 +1348,12 @@
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
 
-    // ===== Spray / Mode 同期最適化 (送信側バッチ化、100ms 窓) =====
-    //   40Hz × カメラ数 の spray2 と、ゲート開放時の 491 件 modeSpawn burst を
-    //   100ms 窓で 1 回の emit に集約 → サーバー broadcast loop の回数を数十倍削減。
-    //   consistency 維持のため reliable 配信 (volatile は使わない)。
+    // ===== Spray 同期最適化 (送信側バッチ化、100ms 窓) =====
+    //   40Hz × カメラ数 の spray2 を 100ms 窓で 1 回の emit に集約。
+    //   モード派生オブジェクト発生 (modeSpawn/modeOverwrite) は **分散生成** に移行したため
+    //   ネット経路に乗せない。各クライアントが spray2 の world 情報から独立に再現。
     const SPRAY_BATCH_INTERVAL_MS = 100;
     const _sprayOutBuf = [];
-    const _modeSpawnOutBuf = [];
-    const _modeOverwriteOutBuf = [];
     let _sprayOutLastFlushT = 0;
     function _sprayFlushTick() {
       const now = performance.now();
@@ -1363,13 +1361,9 @@
       _sprayOutLastFlushT = now;
       if (!(socket && socket.connected)) {
         _sprayOutBuf.length = 0;
-        _modeSpawnOutBuf.length = 0;
-        _modeOverwriteOutBuf.length = 0;
         return;
       }
       if (_sprayOutBuf.length) socket.emit('spray2Batch', _sprayOutBuf.splice(0));
-      if (_modeSpawnOutBuf.length) socket.emit('modeSpawnBatch', _modeSpawnOutBuf.splice(0));
-      if (_modeOverwriteOutBuf.length) socket.emit('modeOverwriteBatch', _modeOverwriteOutBuf.splice(0));
     }
 
     // ===== Spray 受信側 (P4: GPU 多点 1-pass 描画) =====
@@ -1837,8 +1831,8 @@
       // スケジュールしてフェード付き描画 (chunk cap リトライは anim tick 側で処理)
       _renderModeSpawnAt(payload);
       b.spawned = true;
-      // sprayer のみ emit (remote は受信して独自に anim スケジュール)
-      if (socket && socket.connected) _modeSpawnOutBuf.push(payload);
+      // 分散生成: 各クライアントが独立に _pushPaintHit を走らせるので emit 不要
+      //   (sprayer のローカル描画と、他端末の独自生成が spray2 の world 情報から同期)
     }
     function _modeEnqueueBurst(root) {
       let n = 0;
@@ -1896,6 +1890,9 @@
     const _tmpNrm = new THREE.Vector3();
     function _pushPaintHit(worldPt, normal, worldR, colorHex) {
       if (!worldPt || !normal || !colorHex) return;
+      // 効果1 ゲート: モード派生オブジェクト発生機能全体のマスタースイッチ
+      //   OFF の間はスプレー塗装のみ、クラスタ検出・chunk 操作・anim などすべて実行しない
+      if (!window.__effect || !window.__effect[1]) return;
       const mode = _modeByColor.get(colorHex.toLowerCase());
       if (!mode || !MODE_SPRAY_ACTIVE.has(mode)) return;
       const r = Math.min(MODE_HIT_FILL_MAX_R, Math.max(MODE_VOXEL, worldR || MODE_VOXEL));
@@ -1923,12 +1920,10 @@
           if (bucket) {
             touchedBuckets.push(bucket);
             // 塗り替え: 同じ voxel に属する他モードの instance をフェードアウト
+            // 分散生成: 各クライアントが独立に _pushPaintHit を走らせるので emit 不要
             for (const otherMode of Object.keys(MODE_RULES)) {
               if (otherMode === mode) continue;
               _tryFadeOutModeAt(otherMode, ix, iy, iz);
-              if (socket && socket.connected) {
-                _modeOverwriteOutBuf.push({ mode: otherMode, ix, iy, iz });
-              }
             }
           }
         }
@@ -1986,8 +1981,15 @@
       const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
       _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
-      // 送信: _sprayOutBuf に push、100ms 窓で spray2Batch として送信 (reliable)
-      // payload サイズを削減: 小数3桁 (塗装精度としては十分、文字列長 ~25% 減)
+      // 面法線 world 変換 (ペイロードに乗せる + ローカルの mode spawn にも渡す)
+      let wnx = 0, wny = 1, wnz = 0;
+      if (hit.face && hit.face.normal && target) {
+        const nLocal = hit.face.normal.clone();
+        nLocal.transformDirection(target.matrixWorld);
+        wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
+      }
+      // 送信: payload に world 座標 (wx,wy,wz) + 法線 (nx,ny,nz) + world radius (wr) を同梱。
+      //       これにより受信側が同じ入力から独立に _pushPaintHit を走らせられる (分散生成)。
       if (socket && socket.connected) {
         _sprayOutBuf.push({
           tgt: tgtName,
@@ -1996,18 +1998,13 @@
           c: colorHex,
           r: +uvR.toFixed(3),
           s: seed,
+          wx: +hit.point.x.toFixed(3), wy: +hit.point.y.toFixed(3), wz: +hit.point.z.toFixed(3),
+          nx: +wnx.toFixed(3), ny: +wny.toFixed(3), nz: +wnz.toFixed(3),
+          wr: +worldR.toFixed(3),
         });
       }
-      // モード派生オブジェクト発生ロジック: color から mode 解決して _pushPaintHit
-      if (hit.point) {
-        let wnx = 0, wny = 1, wnz = 0;
-        if (hit.face && hit.face.normal && target) {
-          const nLocal = hit.face.normal.clone();
-          nLocal.transformDirection(target.matrixWorld);
-          wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
-        }
-        _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
-      }
+      // sprayer 側ローカルの mode spawn (他クライアントは spray2Batch 受信後に自分で発火)
+      _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
     }
 
     // selectables: raycast 対象。movable cube 全部を含める。
@@ -3983,14 +3980,32 @@
 
       // space2 専用スプレー受信: 単発 _applyRemoteSprayImmediate は廃止
       //   (P4 で全パスを _applyPaintBatch 経由に統一、インスタンス 1-draw で描画)
-      // 単発 spray2 (後方互換) → 合流キュー
-      socket.on('spray2', _scheduleApplyRemote);
-      // 新規: バッチ (A: 送信側 50ms 窓で集約されたもの)
+      // 分散生成: 受信した各 spray は塗装 (paintRT) + モード派生オブジェクト発生 (_pushPaintHit)
+      // を同時に実行。payload に world 座標 (wx/wy/wz) + 法線 (nx/ny/nz) + world radius (wr)
+      // が含まれるので、送信元と同じ入力で独立に再現できる。
+      function _applyRemoteSprayWithMode(d) {
+        if (!d) return;
+        _scheduleApplyRemote(d);
+        if (typeof d.wx === 'number' && typeof d.nx === 'number') {
+          _pushPaintHit(
+            { x: d.wx, y: d.wy, z: d.wz },
+            { x: d.nx, y: d.ny, z: d.nz },
+            (typeof d.wr === 'number') ? d.wr : 0.1,
+            d.c
+          );
+        }
+      }
+      // 単発 spray2 (後方互換) → 合流キュー + ローカル分散生成
+      socket.on('spray2', _applyRemoteSprayWithMode);
+      // 新規: バッチ (送信側 100ms 窓で集約されたもの)
       socket.on('spray2Batch', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _scheduleApplyRemote(d);
+        for (const d of list) _applyRemoteSprayWithMode(d);
       });
-      // 履歴 (初回接続時の既存塗り再現)
+      // 履歴 (初回接続時の既存塗り再現): 塗装のみ再現 (mode spawn は再生成しない — 大量 burst 回避)
+      //   既存塗装位置に対して mode spawn を再生成するには _pushPaintHit を呼べば良いが、
+      //   接続直後に 2万件の履歴から 491件のクラスタ検出が走ると初期ロード負荷が大きい。
+      //   現段階では「新規接続時は塗装のみ復元、mode spawn は接続後の操作で再発火」とする。
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
         for (const d of list) _scheduleApplyRemote(d);
@@ -4002,43 +4017,10 @@
         log('atlas cleared (space2)', 'ok');
       });
 
-      // ペイントモード派生オブジェクト発生 (wood/river/sky) ─ サーバーから配信
-      // ライブイベントはフェード付き (local と同じ 2s 遅延 + 1s フェード)
-      socket.on('modeSpawn', (data) => { _renderModeSpawnAt(data); });
-      // バッチ版 (送信側 100ms 窓で集約されたもの)
-      socket.on('modeSpawnBatch', (list) => {
-        if (!Array.isArray(list)) return;
-        for (const d of list) _renderModeSpawnAt(d);
-      });
-      // 履歴 (初期ロード) はフェードなしで即描画
-      socket.on('modeHistoryBatch', (list) => {
-        if (!Array.isArray(list)) return;
-        for (const d of list) _renderModeSpawnImmediate(d);
-      });
+      // ペイントモード派生オブジェクト発生 (wood/river/sky) は分散生成に移行済。
+      // サーバー側のレガシー互換のため modeSpawn 系ハンドラは残っているが、
+      // クライアントは購読しない (ネット経路に乗らないので受信もしない)。
       socket.on('resetModeSpawn', () => { _clearAllModeSpawn(); log('[mode] cleared', 'ok'); });
-      // 塗り替え (他モードの voxel 位置を 1 秒でフェードアウト)
-      socket.on('modeOverwrite', (data) => {
-        if (!data || typeof data.mode !== 'string') return;
-        if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
-        _tryFadeOutModeAt(data.mode, data.ix, data.iy, data.iz);
-      });
-      // バッチ版
-      socket.on('modeOverwriteBatch', (list) => {
-        if (!Array.isArray(list)) return;
-        for (const d of list) {
-          if (!d || typeof d.mode !== 'string') continue;
-          _tryFadeOutModeAt(d.mode, d.ix, d.iy, d.iz);
-        }
-      });
-      // 塗り替え履歴 (新規接続時にサーバーから受信、既存の fade-out 状態を再現)
-      //   modeHistoryBatch で全スポーンを生成した後に順次フェード処理を実行する
-      socket.on('modeOverwriteHistoryBatch', (list) => {
-        if (!Array.isArray(list)) return;
-        for (const d of list) {
-          if (!d || typeof d.mode !== 'string') continue;
-          _tryFadeOutModeAt(d.mode, d.ix, d.iy, d.iz);
-        }
-      });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
 
@@ -4063,7 +4045,8 @@
             btn.style.color = on ? '#052e16' : 'white';
           }
         }
-        // 効果1: 廃止 (旧 canvasBox 生成ゲート)
+        // 効果1: モード派生オブジェクト発生 (wood/river/sky) のマスタースイッチ
+        //        OFF の間はスプレー塗装のみ、ネット経路に modeSpawn/modeOverwrite 系は乗らない
         // 効果2: 未割当 (旧 phone pointer 機能は廃止)
         // 効果3: 廃止 (旧 Fog 原点固定)
         // 効果4: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
