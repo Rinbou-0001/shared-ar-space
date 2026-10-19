@@ -618,7 +618,6 @@
     const MODE_FAR_LOD_START = 10.0;             // この距離を超えたチャンクは LOD で密度減少 (m)
     const MODE_FAR_LOD_RATIO = 0.5;              // 遠距離時の描画本数倍率 (count を間引き)
     const MODE_CULL_INTERVAL_MS = 200;           // カリング判定の間隔 (全チャンクを毎フレーム走査しない)
-    const MODE_DEBUG_LOG_INTERVAL_MS = 2000;     // 診断ログ間隔
     // モード別ルール (ジオメトリ/密度/描画制約)。make() は呼ばれた時に lazy 生成。
     const MODE_RULES = {
       wood: {
@@ -1407,9 +1406,14 @@
         const rr = Math.sqrt(Math.random()) * r;
         const th = Math.random() * Math.PI * 2;
         const dx = Math.cos(th) * rr, dy = Math.sin(th) * rr;
-        const px = data.x + t1.x * dx + t2.x * dy;
-        const py = data.y + t1.y * dx + t2.y * dy + (rule.orientUpWithNormal ? nrm.y * 0.001 : 0);
-        const pz = data.z + t1.z * dx + t2.z * dy;
+        // 配置オフセット: 法線方向に (半ボクセル + 1mm) ずらすことで、ボクセル中心が
+        // 面の反対側に落ちた時でも必ずサーフェスの表側 (+normal 側) に配置される。
+        // (例: 床 Y=0 でヒット Y が ±1e-9 の精度誤差により voxel iy が 0 / -1 に揺れても
+        //  面の上に水面タイルを置ける)
+        const surfOff = rule.orientUpWithNormal ? (MODE_VOXEL * 0.5 + 0.001) : 0;
+        const px = data.x + t1.x * dx + t2.x * dy + nrm.x * surfOff;
+        const py = data.y + t1.y * dx + t2.y * dy + nrm.y * surfOff;
+        const pz = data.z + t1.z * dx + t2.z * dy + nrm.z * surfOff;
         _modeChunkDummy.position.set(px, py, pz);
         if (rule.orientUpWithNormal) {
           _modeChunkDummy.quaternion.copy(_modeTmpQ);
@@ -1633,65 +1637,9 @@
         }
         _modeFireVoxel(bucket);
       }
-      _modeMaybeDebugLog(performance.now(), r);
     }
-
-    // ============ 診断ログ (チャンク + モード別統計) ============
-    let _modeDbgLastT = 0;
-    let _modeDbgHits = 0;
+    // mode spawn の chunk cap 到達で諦めた本数カウンタ (ログ廃止後も内部計測だけ保持)
     let _modeDbgDropped = 0;
-    function _modeMaybeDebugLog(nowT, r) {
-      _modeDbgHits++;
-      if (nowT - _modeDbgLastT < MODE_DEBUG_LOG_INTERVAL_MS) return;
-      _modeDbgLastT = nowT;
-      // モード別統計
-      const perMode = {};
-      const rootsSeen = new Set();
-      for (const b of _modeVoxels.values()) {
-        const m = b.mode;
-        if (!perMode[m]) perMode[m] = { occ: 0, maxSize: 0, openRoots: 0 };
-        if (b.pts >= MODE_VOXEL_MIN_POINTS) perMode[m].occ++;
-        const root = _modeFind(b);
-        const rk = m + '|' + root.ix + ',' + root.iy + ',' + root.iz;
-        if (!rootsSeen.has(rk)) {
-          rootsSeen.add(rk);
-          if (root.size > perMode[m].maxSize) perMode[m].maxSize = root.size;
-          if (root.gateOpen) perMode[m].openRoots++;
-        }
-      }
-      // チャンク統計 (全体 + 可視 + LOD)
-      let chunksTotal = 0, chunksVisible = 0, chunksLod = 0, instTotal = 0, instDrawn = 0;
-      const perModeInst = {};
-      for (const ch of _modeChunks.values()) {
-        chunksTotal++;
-        if (ch.mesh.visible) {
-          chunksVisible++;
-          if (ch.lodActive) chunksLod++;
-          instDrawn += ch.mesh.count;
-        }
-        instTotal += ch.count;
-        perModeInst[ch.mode] = (perModeInst[ch.mode] || 0) + ch.count;
-      }
-      const parts = [];
-      for (const m of Object.keys(MODE_RULES)) {
-        const s = perMode[m];
-        const inst = perModeInst[m] || 0;
-        if (!s && inst === 0) continue;
-        parts.push(m + '{occ=' + (s ? s.occ : 0)
-          + ' max=' + (s ? s.maxSize : 0) + '/' + MODE_OPEN_VOXELS
-          + ' open=' + (s ? s.openRoots : 0)
-          + ' inst=' + inst + '}');
-      }
-      log('[mode dbg] hits=' + _modeDbgHits
-        + ' chunks(vis/lod/total)=' + chunksVisible + '/' + chunksLod + '/' + chunksTotal
-        + ' inst(drawn/total)=' + instDrawn + '/' + instTotal
-        + ' pendingQ=' + _modePendingLocal.length
-        + ' animQ=' + _modeAnimEntries.length
-        + ' dropped=' + _modeDbgDropped
-        + ' lastR=' + r.toFixed(2) + 'm'
-        + (parts.length ? ' | ' + parts.join(' ') : ''),
-        'ok');
-    }
     // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
     function _sprayTick() {
       if (!_spraySelf.pressStartT) return;
