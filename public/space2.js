@@ -1247,7 +1247,10 @@
     //   requestAnimationFrame 内の 1 ループに集約し、パイプラインの詰まりを解消。
     const _applyRemoteBuf = [];
     let _applyRemoteScheduled = false;
+    // 実関数本体は socket.on('connect') ブロック内で定義 (後方で代入)
+    let _applyRemoteSprayImmediate = null;
     function _scheduleApplyRemote(data) {
+      if (typeof _applyRemoteSprayImmediate !== 'function') return;
       _applyRemoteBuf.push(data);
       if (_applyRemoteScheduled) return;
       _applyRemoteScheduled = true;
@@ -3836,7 +3839,8 @@
       });
 
       // space2 専用スプレー受信: space3 の 'spray' / 'sprayBatch' は購読せず相互影響を遮断
-      function _applyRemoteSprayImmediate(data) {
+      // 外側スコープで宣言された _applyRemoteSprayImmediate (let) にここで実体を代入
+      _applyRemoteSprayImmediate = function (data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         if (!data.tgt) return;
         const mesh = _paintables.get(data.tgt);
@@ -3845,7 +3849,7 @@
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
         const uvR = (typeof data.r === 'number') ? data.r : 0.01;
         _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
-      }
+      };
       // 単発 spray2 (後方互換) → 合流キュー
       socket.on('spray2', _scheduleApplyRemote);
       // 新規: バッチ (A: 送信側 50ms 窓で集約されたもの)
