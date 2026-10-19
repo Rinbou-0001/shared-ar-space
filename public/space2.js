@@ -595,7 +595,7 @@
 
     // ===== スプレー基礎パラメータ =====
     const SPRAY_HOLD_MS = 4000;   // 長押し発射までの猶予 (ms)
-    const SPRAY_EMIT_HZ = 40;     // 送信頻度 (space1 と同じ 40Hz)
+    const SPRAY_EMIT_HZ = 20;     // 送信頻度 (ラグ対策で 40Hz→20Hz)
     // raycast 対象リスト (_makePaintable 経由で壁/床/天井が push される)
     const _sprayables = [];
 
@@ -1022,13 +1022,15 @@
           let subIdx = 0;
           fbx.traverse((child) => {
             if (!child || !child.isMesh) return;
-            // モノクロ (ambient 0.85 + dir 0.35 の既存ライティングで灰色に光る)
-            const monoMat = new THREE.MeshStandardMaterial({
-              color: 0x9a9a9a, roughness: 0.9, metalness: 0.05, side: THREE.DoubleSide,
+            // 配色: 純白固定。影の点滅を避けるため lighting から独立 (MeshBasicMaterial)。
+            // MeshBasicMaterial は AmbientLight / DirectionalLight / shadow の影響を一切受けないため、
+            // カメラ移動時の shadow map ちらつきが発生しない。
+            const monoMat = new THREE.MeshBasicMaterial({
+              color: 0xffffff, side: THREE.DoubleSide,
             });
             child.material = monoMat;
-            child.castShadow = true;
-            child.receiveShadow = true;
+            child.castShadow = false;
+            child.receiveShadow = false;
             // 一意名を付けて paintable 登録
             const nm = 'tree-mesh-' + subIdx; subIdx++;
             child.name = nm;
@@ -1846,15 +1848,15 @@
       const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
       _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
-      // 送信: 単発 emit ではなく _sprayOutBuf に push、50ms 毎に 'spray2Batch' として
-      // volatile emit (遅延時は socket.io が drop → キュー詰まり防止)。
+      // 送信: _sprayOutBuf に push、100ms 窓で spray2Batch として送信 (reliable)
+      // payload サイズを削減: 小数3桁 (塗装精度としては十分、文字列長 ~25% 減)
       if (socket && socket.connected) {
         _sprayOutBuf.push({
           tgt: tgtName,
-          u: +uv.x.toFixed(4),
-          v: +uv.y.toFixed(4),
+          u: +uv.x.toFixed(3),
+          v: +uv.y.toFixed(3),
           c: colorHex,
-          r: +uvR.toFixed(4),
+          r: +uvR.toFixed(3),
           s: seed,
         });
       }
