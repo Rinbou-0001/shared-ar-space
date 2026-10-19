@@ -609,8 +609,10 @@
     const GRASS_WOOD_HEX = '1b5e20';
     const GRASS_SAMPLE_INTERVAL_MS = 50;         // 同一ボクセルへのサンプル記録間隔
     const GRASS_VOXEL = 0.08;                    // 結合距離 = ボクセル辺
-    const GRASS_VOXEL_MIN_POINTS = 3;            // 1 ボクセルを「占有」と判定するスプレー点数
+    const GRASS_VOXEL_MIN_POINTS = 1;            // 1 ボクセルを「占有」と判定するスプレー点数 (1 ヒットで占有)
     const GRASS_OPEN_VOXELS = 491;               // クラスタ開放閾値 (= π/0.08² ≒ 直径2m円)
+    const GRASS_HIT_FILL_MAX_R = 0.5;            // 1 ヒットで占有化する tangent disk の最大半径 (m)
+    const GRASS_DEBUG_LOG_INTERVAL_MS = 2000;    // 診断ログ間隔
     const GRASS_PER_VOXEL = 4;                   // 1 ボクセル発火あたりの草本数
     const GRASS_OPEN_BURST_PER_TICK = 60;        // 開放瞬間のフレーム分割スパイク回避
     const GRASS_MAX_INSTANCES = 8000;            // InstancedMesh 上限
@@ -1262,16 +1264,11 @@
       }
     }
 
-    // sprayer 自身の wood ヒットを受け取り、DSU でクラスタ管理 + ゲート判定
-    function _pushWoodSprayHit(worldPt, normal, colorHex) {
-      if (!worldPt || !normal) return;
-      if (!colorHex || colorHex.toLowerCase() !== GRASS_WOOD_HEX) return;
-      const nowT = performance.now();
-      const ix = Math.floor(worldPt.x / GRASS_VOXEL);
-      const iy = Math.floor(worldPt.y / GRASS_VOXEL);
-      const iz = Math.floor(worldPt.z / GRASS_VOXEL);
+    // ボクセル 1 つを占有化し、26 近傍とマージ + ゲート/発火判定を行う内部ヘルパー
+    function _grassOccupyVoxel(ix, iy, iz, nx, ny, nz, nowT) {
       const key = ix + ',' + iy + ',' + iz;
       let bucket = _grassVoxels.get(key);
+      const isNew = !bucket;
       if (!bucket) {
         bucket = {
           ix, iy, iz,
@@ -1284,15 +1281,12 @@
         bucket.parent = bucket;
         _grassVoxels.set(key, bucket);
       }
-      // 同一ボクセル throttle
-      if (nowT - bucket.lastT < GRASS_SAMPLE_INTERVAL_MS) return;
-      bucket.lastT = nowT;
+      // 同一ボクセルは throttle 内でも占有情報 (pts, 法線) は保存 (開放判定で必要)
       bucket.pts++;
-      bucket.nSumX += normal.x; bucket.nSumY += normal.y; bucket.nSumZ += normal.z;
+      bucket.nSumX += nx; bucket.nSumY += ny; bucket.nSumZ += nz;
       bucket.nCount++;
-      // 「占有」確定前は何もしない
-      if (bucket.pts < GRASS_VOXEL_MIN_POINTS) return;
-      // 26 近傍の既存ボクセルとマージ (「占有」確定済みのものだけ対象)
+      if (bucket.pts < GRASS_VOXEL_MIN_POINTS) return null;
+      // 26 近傍マージ
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
         if (!dx && !dy && !dz) continue;
         const nk = (ix + dx) + ',' + (iy + dy) + ',' + (iz + dz);
@@ -1301,17 +1295,88 @@
         if (nb.pts < GRASS_VOXEL_MIN_POINTS) continue;
         _grassUnion(bucket, nb);
       }
-      const root = _grassFind(bucket);
-      if (!root.gateOpen) {
-        // 開放閾値チェック
-        if (root.size >= GRASS_OPEN_VOXELS) {
-          root.gateOpen = true;
-          _grassEnqueueBurst(root);
+      return bucket;
+    }
+
+    // sprayer 自身の wood ヒットを受け取り、tangent disk 内の全ボクセルを占有化。
+    // 1 ヒット = (worldR) に相当する壁面エリアを一度にマークするため、閾値 (491 voxel)
+    // への到達が現実的な時間で可能になる。
+    const _tmpT1 = new THREE.Vector3();
+    const _tmpT2 = new THREE.Vector3();
+    const _tmpNrm = new THREE.Vector3();
+    function _pushWoodSprayHit(worldPt, normal, worldR, colorHex) {
+      if (!worldPt || !normal) return;
+      if (!colorHex || colorHex.toLowerCase() !== GRASS_WOOD_HEX) return;
+      const nowT = performance.now();
+      const r = Math.min(GRASS_HIT_FILL_MAX_R, Math.max(GRASS_VOXEL, worldR || GRASS_VOXEL));
+      _tmpNrm.set(normal.x, normal.y, normal.z);
+      if (_tmpNrm.lengthSq() < 1e-6) _tmpNrm.set(0, 1, 0);
+      _tmpNrm.normalize();
+      // 面上接線 2 軸
+      _tmpT1.set(1, 0, 0);
+      if (Math.abs(_tmpNrm.dot(_tmpT1)) > 0.9) _tmpT1.set(0, 0, 1);
+      _tmpT1.sub(_tmpNrm.clone().multiplyScalar(_tmpNrm.dot(_tmpT1))).normalize();
+      _tmpT2.copy(_tmpNrm).cross(_tmpT1).normalize();
+      const openRoots = new Set();   // 今回のヒットで開放に至った root を一意に集計
+      const touchedBuckets = [];     // 開放済みクラスタに所属するもの (即時発火候補)
+      const step = GRASS_VOXEL;      // サンプルステップ (ボクセル辺と同じで十分覆える)
+      const rr = r * r;
+      for (let a = -r; a <= r + 1e-6; a += step) {
+        for (let b = -r; b <= r + 1e-6; b += step) {
+          if (a * a + b * b > rr) continue;
+          const px = worldPt.x + _tmpT1.x * a + _tmpT2.x * b;
+          const py = worldPt.y + _tmpT1.y * a + _tmpT2.y * b;
+          const pz = worldPt.z + _tmpT1.z * a + _tmpT2.z * b;
+          const ix = Math.floor(px / GRASS_VOXEL);
+          const iy = Math.floor(py / GRASS_VOXEL);
+          const iz = Math.floor(pz / GRASS_VOXEL);
+          const bucket = _grassOccupyVoxel(ix, iy, iz, _tmpNrm.x, _tmpNrm.y, _tmpNrm.z, nowT);
+          if (bucket) touchedBuckets.push(bucket);
         }
-        return;
       }
-      // 既に開放済み: 即時 1 ボクセル発火
-      _grassFireVoxel(bucket);
+      // ゲート判定 + 発火
+      for (const bucket of touchedBuckets) {
+        const root = _grassFind(bucket);
+        if (!root.gateOpen) {
+          if (root.size >= GRASS_OPEN_VOXELS && !openRoots.has(root)) {
+            root.gateOpen = true;
+            openRoots.add(root);
+            _grassEnqueueBurst(root);
+          }
+          continue;
+        }
+        // 開放済み → このボクセル単独発火 (未発火のみ)
+        _grassFireVoxel(bucket);
+      }
+      _grassMaybeDebugLog(nowT, worldPt, r);
+    }
+
+    // ============ 診断ログ ============
+    let _grassDbgLastT = 0;
+    let _grassDbgHits = 0;
+    function _grassMaybeDebugLog(nowT, worldPt, r) {
+      _grassDbgHits++;
+      if (nowT - _grassDbgLastT < GRASS_DEBUG_LOG_INTERVAL_MS) return;
+      _grassDbgLastT = nowT;
+      // 占有ボクセル数、最大クラスタサイズ、開放済みクラスタ数、総草本数
+      let occ = 0, maxSize = 0, openRoots = 0;
+      const rootsSeen = new Set();
+      for (const b of _grassVoxels.values()) {
+        if (b.pts >= GRASS_VOXEL_MIN_POINTS) occ++;
+        const root = _grassFind(b);
+        if (!rootsSeen.has(root)) {
+          rootsSeen.add(root);
+          if (root.size > maxSize) maxSize = root.size;
+          if (root.gateOpen) openRoots++;
+        }
+      }
+      log('[grass dbg] hits=' + _grassDbgHits + ' occ=' + occ
+        + ' maxCluster=' + maxSize + '/' + GRASS_OPEN_VOXELS
+        + ' openClusters=' + openRoots
+        + ' blades=' + _grassCount + '/' + GRASS_MAX_INSTANCES
+        + ' pendingQ=' + _grassPendingLocal.length
+        + ' lastR=' + r.toFixed(2) + 'm',
+        'ok');
     }
     // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
     function _sprayTick() {
@@ -1370,7 +1435,7 @@
           nLocal.transformDirection(target.matrixWorld);
           wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
         }
-        _pushWoodSprayHit(hit.point, { x: wnx, y: wny, z: wnz }, colorHex);
+        _pushWoodSprayHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
       }
     }
 
