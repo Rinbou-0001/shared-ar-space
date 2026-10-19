@@ -117,7 +117,7 @@ let sprayHistory = [];
 let sprayHistory2 = [];   // space2 専用アトラス UV 履歴
 // space2 wood ペイントモードの草発生履歴 (新規接続時に全配信)
 //   各要素: { x,y,z, nx,ny,nz, r } — 1 件 ~56 bytes
-const GRASS_HISTORY_CAP = 2000;
+const GRASS_HISTORY_CAP = 8000;
 let grassHistory2 = [];
 
 // space2 のシーン内オブジェクト位置 (name → {x,y,z}) — 全クライアント同期用

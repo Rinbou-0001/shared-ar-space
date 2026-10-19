@@ -601,22 +601,26 @@
 
     // ===== 草オブジェクト発生 (wood ペイントモードカメラ専用) =====
     //   wood 色 (#1b5e20) のスプレーヒット点を world 空間でサンプリング。
-    //   8cm ボクセルで連結成分 (DBSCAN 近似) を作り、
-    //   占有ボクセル数 × 面積が閾値を超えたクラスタから草 (InstancedMesh plane) を発生させる。
-    //   送信元 (sprayer 自身) が検出 → 'grassSpawn' 送信 → 全クライアントで描画。
+    //   8cm ボクセル (Union-Find) で連結成分を管理し、クラスタのボクセル数が
+    //   GRASS_OPEN_VOXELS (直径 2m 円相当 ≒ 491) を超えた瞬間に「開放」。
+    //   開放後は、クラスタに属する全ボクセルから草を一斉発生 (フレーム分割)。
+    //   以後そのクラスタに追加される新ボクセルは即時 1 回だけ発火。
+    //   送信元 (sprayer 自身) が判定 → 'grassSpawn' 送信 → 全クライアントで描画。
     const GRASS_WOOD_HEX = '1b5e20';
     const GRASS_SAMPLE_INTERVAL_MS = 50;         // 同一ボクセルへのサンプル記録間隔
-    const GRASS_VOXEL = 0.08;                    // クラスタ結合距離 (= ボクセル辺)
-    const GRASS_CLUSTER_MIN_POINTS = 12;         // 一まとまりに必要な最小サンプル点数
-    const GRASS_CLUSTER_MIN_AREA = 0.015;        // 面積閾値 m² (占有ボクセル数 × VOXEL²)
-    const GRASS_SPAWN_DENSITY = 400;             // 本/m²
-    const GRASS_RESPAWN_COOLDOWN_MS = 2000;      // 同一クラスタの再発生抑止時間
-    const GRASS_MAX_INSTANCES = 2000;            // InstancedMesh 上限
+    const GRASS_VOXEL = 0.08;                    // 結合距離 = ボクセル辺
+    const GRASS_VOXEL_MIN_POINTS = 3;            // 1 ボクセルを「占有」と判定するスプレー点数
+    const GRASS_OPEN_VOXELS = 491;               // クラスタ開放閾値 (= π/0.08² ≒ 直径2m円)
+    const GRASS_PER_VOXEL = 4;                   // 1 ボクセル発火あたりの草本数
+    const GRASS_OPEN_BURST_PER_TICK = 60;        // 開放瞬間のフレーム分割スパイク回避
+    const GRASS_MAX_INSTANCES = 8000;            // InstancedMesh 上限
     const GRASS_BLADE_H = 0.06;                  // 草 1 本の高さ (6cm)
     const GRASS_BLADE_W = 0.012;                 // 草 1 本の幅
-    // 検出状態 (sprayer 自身のローカル集計)
-    const _grassVoxels = new Map();              // key(ix,iy,iz) → { ix,iy,iz, pts:[], firstT, lastSpawnedT }
-    let _grassLastSampleT = new Map();           // 同一ボクセルサンプル throttle
+    // 検出状態 (sprayer 自身のローカル集計) ─ Union-Find
+    //   key = 'ix,iy,iz' → { ix,iy,iz, pts, parent, rank, size, gateOpen, spawned,
+    //                        cx,cy,cz (world center), nx,ny,nz (法線合計), nCount, lastT }
+    const _grassVoxels = new Map();
+    const _grassPendingLocal = [];               // 開放時の自分向け遅延描画キュー
     // 描画状態 (全クライアント)
     let _grassMesh = null;
     let _grassCount = 0;
@@ -1142,15 +1146,14 @@
       outQ.setFromUnitVectors(_grassAxisY, _grassTmpV1);
     }
 
-    // クラスタ発火: 中心・法線・半径を受けて複数本をランダム散布
+    // 1 ボクセル単位の草発生 (grassSpawn ペイロード)
+    //   data: { x,y,z (ボクセル中心), nx,ny,nz (法線), r (ジッタ半径 = VOXEL/2) }
     function _renderGrassAt(data) {
       if (!data) return;
       const mesh = _ensureGrassMesh();
-      const r = Math.max(0.02, Math.min(0.5, data.r || 0.08));
-      const area = Math.PI * r * r;
-      const n = Math.max(3, Math.min(80, Math.round(GRASS_SPAWN_DENSITY * area)));
+      const r = Math.max(0.01, Math.min(0.5, data.r || GRASS_VOXEL * 0.5));
+      const n = GRASS_PER_VOXEL;
       _grassOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _grassTmpQ);
-      // 面上接線 2 軸を得る (normal に対する任意直交基底)
       const nrm = _grassTmpV1.set(data.nx || 0, data.ny || 1, data.nz || 0).normalize();
       const t1 = _grassTmpV2.set(1, 0, 0);
       if (Math.abs(nrm.dot(t1)) > 0.9) t1.set(0, 0, 1);
@@ -1180,11 +1183,86 @@
       if (_grassMesh) { _grassMesh.count = 0; _grassMesh.instanceMatrix.needsUpdate = true; }
       _grassCount = 0;
       _grassVoxels.clear();
-      _grassLastSampleT.clear();
+      _grassPendingLocal.length = 0;
     }
 
-    // sprayer 自身の wood ヒットを受け取り、ボクセルクラスタに積む。
-    // 閾値を超えたクラスタは grassSpawn を emit。
+    // ─── Union-Find helpers ───
+    function _grassFind(b) {
+      while (b.parent !== b) {
+        b.parent = b.parent.parent; // 経路圧縮
+        b = b.parent;
+      }
+      return b;
+    }
+    function _grassUnion(a, b) {
+      const ra = _grassFind(a), rb = _grassFind(b);
+      if (ra === rb) return ra;
+      // rank マージ + gateOpen は OR
+      if (ra.rank < rb.rank) {
+        ra.parent = rb;
+        rb.size += ra.size;
+        rb.gateOpen = rb.gateOpen || ra.gateOpen;
+        return rb;
+      } else if (ra.rank > rb.rank) {
+        rb.parent = ra;
+        ra.size += rb.size;
+        ra.gateOpen = ra.gateOpen || rb.gateOpen;
+        return ra;
+      } else {
+        rb.parent = ra;
+        ra.rank++;
+        ra.size += rb.size;
+        ra.gateOpen = ra.gateOpen || rb.gateOpen;
+        return ra;
+      }
+    }
+
+    // 1 ボクセル分の発火 (ローカル描画 + サーバー送信)
+    function _grassFireVoxel(b) {
+      if (b.spawned) return;
+      b.spawned = true;
+      // ボクセル中心 (ワールド)
+      const cx = (b.ix + 0.5) * GRASS_VOXEL;
+      const cy = (b.iy + 0.5) * GRASS_VOXEL;
+      const cz = (b.iz + 0.5) * GRASS_VOXEL;
+      // 法線平均
+      const nlen = Math.hypot(b.nSumX, b.nSumY, b.nSumZ) || 1;
+      const nx = b.nSumX / nlen, ny = b.nSumY / nlen, nz = b.nSumZ / nlen;
+      const payload = {
+        x: +cx.toFixed(4), y: +cy.toFixed(4), z: +cz.toFixed(4),
+        nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
+        r: +(GRASS_VOXEL * 0.5).toFixed(4),
+      };
+      _renderGrassAt(payload);
+      if (socket && socket.connected) socket.emit('grassSpawn', payload);
+    }
+
+    // 開放瞬間に全ボクセルをペンディングキューへ (フレーム分割描画)
+    function _grassEnqueueBurst(root) {
+      let n = 0;
+      for (const b of _grassVoxels.values()) {
+        if (_grassFind(b) !== root) continue;
+        if (b.spawned) continue;
+        _grassPendingLocal.push(b);
+        n++;
+      }
+      log('grass gate open (voxels=' + root.size + ', burst=' + n + ')', 'ok');
+    }
+
+    // tick から呼ばれる: ペンディングキューを少しずつ消化
+    function _grassBurstTick() {
+      if (_grassPendingLocal.length === 0) return;
+      const take = Math.min(GRASS_OPEN_BURST_PER_TICK, _grassPendingLocal.length);
+      for (let i = 0; i < take; i++) {
+        const b = _grassPendingLocal.shift();
+        if (!b) continue;
+        if (b.spawned) continue;
+        // 既に開放済みかチェック (他プロセスで消化済みの場合もスキップ)
+        _grassFireVoxel(b);
+      }
+    }
+
+    // sprayer 自身の wood ヒットを受け取り、DSU でクラスタ管理 + ゲート判定
     function _pushWoodSprayHit(worldPt, normal, colorHex) {
       if (!worldPt || !normal) return;
       if (!colorHex || colorHex.toLowerCase() !== GRASS_WOOD_HEX) return;
@@ -1193,71 +1271,47 @@
       const iy = Math.floor(worldPt.y / GRASS_VOXEL);
       const iz = Math.floor(worldPt.z / GRASS_VOXEL);
       const key = ix + ',' + iy + ',' + iz;
-      // 同一ボクセルの throttle (50ms)
-      const lastT = _grassLastSampleT.get(key) || 0;
-      if (nowT - lastT < GRASS_SAMPLE_INTERVAL_MS) return;
-      _grassLastSampleT.set(key, nowT);
       let bucket = _grassVoxels.get(key);
       if (!bucket) {
-        bucket = { ix, iy, iz, pts: [], firstT: nowT, lastSpawnedT: 0, nSum: { x: 0, y: 0, z: 0 } };
+        bucket = {
+          ix, iy, iz,
+          pts: 0,
+          parent: null, rank: 0, size: 1,
+          gateOpen: false, spawned: false,
+          nSumX: 0, nSumY: 0, nSumZ: 0, nCount: 0,
+          lastT: 0,
+        };
+        bucket.parent = bucket;
         _grassVoxels.set(key, bucket);
       }
-      bucket.pts.push({ x: worldPt.x, y: worldPt.y, z: worldPt.z });
-      bucket.nSum.x += normal.x; bucket.nSum.y += normal.y; bucket.nSum.z += normal.z;
-      // 発火判定: ボクセル連結成分でクラスタ化し、点数・面積を評価
-      _checkGrassCluster(ix, iy, iz, nowT);
-    }
-
-    // 対象ボクセルを種に連結成分を広げ、閾値を超えたら grassSpawn 発火
-    function _checkGrassCluster(sx, sy, sz, nowT) {
-      const seedKey = sx + ',' + sy + ',' + sz;
-      const seed = _grassVoxels.get(seedKey); if (!seed) return;
-      if (nowT - seed.lastSpawnedT < GRASS_RESPAWN_COOLDOWN_MS) return;
-      // BFS で 26 近傍を走査 (結果は seed に属するクラスタ全体)
-      const visited = new Set([seedKey]);
-      const queue = [seed];
-      const members = [seed];
-      let totalPts = seed.pts.length;
-      while (queue.length) {
-        const cur = queue.shift();
-        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
-          if (!dx && !dy && !dz) continue;
-          const nk = (cur.ix + dx) + ',' + (cur.iy + dy) + ',' + (cur.iz + dz);
-          if (visited.has(nk)) continue;
-          const nb = _grassVoxels.get(nk);
-          if (!nb) continue;
-          visited.add(nk);
-          queue.push(nb);
-          members.push(nb);
-          totalPts += nb.pts.length;
+      // 同一ボクセル throttle
+      if (nowT - bucket.lastT < GRASS_SAMPLE_INTERVAL_MS) return;
+      bucket.lastT = nowT;
+      bucket.pts++;
+      bucket.nSumX += normal.x; bucket.nSumY += normal.y; bucket.nSumZ += normal.z;
+      bucket.nCount++;
+      // 「占有」確定前は何もしない
+      if (bucket.pts < GRASS_VOXEL_MIN_POINTS) return;
+      // 26 近傍の既存ボクセルとマージ (「占有」確定済みのものだけ対象)
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        if (!dx && !dy && !dz) continue;
+        const nk = (ix + dx) + ',' + (iy + dy) + ',' + (iz + dz);
+        const nb = _grassVoxels.get(nk);
+        if (!nb) continue;
+        if (nb.pts < GRASS_VOXEL_MIN_POINTS) continue;
+        _grassUnion(bucket, nb);
+      }
+      const root = _grassFind(bucket);
+      if (!root.gateOpen) {
+        // 開放閾値チェック
+        if (root.size >= GRASS_OPEN_VOXELS) {
+          root.gateOpen = true;
+          _grassEnqueueBurst(root);
         }
+        return;
       }
-      const area = members.length * GRASS_VOXEL * GRASS_VOXEL;
-      if (totalPts < GRASS_CLUSTER_MIN_POINTS) return;
-      if (area < GRASS_CLUSTER_MIN_AREA) return;
-      // クラスタ中心と平均法線
-      let cx = 0, cy = 0, cz = 0, pn = 0, nx = 0, ny = 0, nz = 0;
-      for (const m of members) {
-        for (const p of m.pts) { cx += p.x; cy += p.y; cz += p.z; pn++; }
-        nx += m.nSum.x; ny += m.nSum.y; nz += m.nSum.z;
-      }
-      if (pn === 0) return;
-      cx /= pn; cy /= pn; cz /= pn;
-      const nlen = Math.hypot(nx, ny, nz) || 1;
-      nx /= nlen; ny /= nlen; nz /= nlen;
-      // 近似半径 = sqrt(area / π)
-      const r = Math.sqrt(area / Math.PI);
-      const payload = {
-        x: +cx.toFixed(4), y: +cy.toFixed(4), z: +cz.toFixed(4),
-        nx: +nx.toFixed(4), ny: +ny.toFixed(4), nz: +nz.toFixed(4),
-        r: +r.toFixed(4),
-      };
-      // 全メンバーに cooldown + spawned を付与
-      for (const m of members) m.lastSpawnedT = nowT;
-      // ローカル描画 + サーバーへ (他者にブロードキャスト + 履歴保存)
-      _renderGrassAt(payload);
-      if (socket && socket.connected) socket.emit('grassSpawn', payload);
-      log('grass spawn (pts=' + totalPts + ', area=' + area.toFixed(3) + 'm²)', 'ok');
+      // 既に開放済み: 即時 1 ボクセル発火
+      _grassFireVoxel(bucket);
     }
     // tick から呼ばれる (updaters 経由)。_spraySelf.pressStartT > 0 の間動く。
     function _sprayTick() {
@@ -3424,6 +3478,7 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
+    updaters.push(_grassBurstTick);
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
 
