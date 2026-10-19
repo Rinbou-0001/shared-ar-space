@@ -916,7 +916,7 @@
     //   外側は L 字の凹角反対側 (plate1 の outer=-Z、plate2 の outer=-X)
     const PLATE_W = 0.179;
     const PLATE_H = 0.286;
-    const PLATE_ORIGIN = new THREE.Vector3(0.5, 1, 0);
+    const PLATE_ORIGIN = new THREE.Vector3(0.7, 1, 0);
     const PLATE_APEX_OFFSET = 0.15;    // L 外側 15cm に apex を独自に持つ
     // L 全体の yaw: 旧 (0 → 共有縦辺中心で plate1 が +X / plate2 が +Z) から +45° 回転
     //   = ユーザー指定の "Yaw -90 → -45" に相当
@@ -963,8 +963,9 @@
     }
     // plate1: +X 側に PLATE_W/2 ずらし、normal = +Z (plane のまま)、outer = -Z
     const _plate1Grp = _makePlate('plate1', new THREE.Vector3(PLATE_W / 2, 0, 0), 0);
-    // plate2: +Z 側に PLATE_W/2 ずらし、rotation.y=-π/2 で plane を +X 向きにする、outer = -X
-    const _plate2Grp = _makePlate('plate2', new THREE.Vector3(0, 0, PLATE_W / 2), -Math.PI / 2);
+    // plate2: +Z 側に PLATE_W/2 ずらし、rotation.y=+π/2 で normal を L 字凹角側 (= +X 方向) に向ける
+    //   旧 -π/2 だと normal が凸角側に向き、apex が内側にスナップされていた問題を修正
+    const _plate2Grp = _makePlate('plate2', new THREE.Vector3(0, 0, PLATE_W / 2), Math.PI / 2);
     const _plates = { plate1: _plate1Grp, plate2: _plate2Grp };
     window.__plates = _plates;
 
@@ -998,7 +999,7 @@
     //   回転は "最新入室 camera" の avatar.grp.quaternion を毎フレーム コピー
     //   (phone の前方傾きがそのまま cube の前方傾きになる direct mirror)。
     //   #eaeded の 2px 境界ラインを EdgesGeometry で付与。
-    const MINI_SIZE = 0.2;
+    const MINI_SIZE = 0.08;   // 8cm × 8cm × 8cm
     let _miniCube = null;
     function _getPaintTex(name) {
       const m = _paintables.get(name);
@@ -2364,8 +2365,10 @@
               (role === 'camera' ? ' [master-only view]' : ''), 'ok');
         } catch (_) {}
       } else {
+        // master = 直径 10cm (radius 0.05)、camera = 直径 30cm (radius 0.15)
+        const _sphRadius = (role === 'master') ? 0.05 : 0.15;
         av.mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(0.15, 24, 16),
+          new THREE.SphereGeometry(_sphRadius, 24, 16),
           new THREE.MeshStandardMaterial({ color: color || '#ffffff', roughness: 0.6 })
         );
         grp.add(av.mesh);
