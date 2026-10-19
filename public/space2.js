@@ -2869,6 +2869,11 @@
           if (mode && PAINT_MODE_COLORS[mode]) {
             state.myColor = PAINT_MODE_COLORS[mode];
             log('paint mode → ' + mode + ' (color=' + state.myColor + ')', 'ok');
+          } else {
+            // 上書き解除 → ランダム色にリセット
+            const _pal = ['#029ecc', '#ffce18', '#df2c1e'];
+            state.myColor = _pal[Math.floor(Math.random() * _pal.length)];
+            log('paint mode cleared → random color=' + state.myColor, 'ok');
           }
         }
         if (ROLE === 'master' && typeof window.__syncMasterPaintButtons === 'function') {
