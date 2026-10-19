@@ -993,8 +993,8 @@
     void movableCubes;
 
     // ===== Ancient Tree (FBX) =====
-    //   高さ 10m、位置 (10, 0, -10)、モノクロマテリアル、スプレー可能
-    //   base (bbox min Y) が Y=0 となるように配置
+    //   高さ 15m、位置 (10, -1, -10)、モノクロマテリアル、スプレー可能
+    //   base (bbox min Y) を Y=-1 に沈める
     (function _loadAncientTree() {
       if (typeof THREE.FBXLoader !== 'function') {
         log('FBXLoader not loaded, ancientTree skipped', 'warn');
@@ -1003,18 +1003,18 @@
       const loader = new THREE.FBXLoader();
       loader.load('/assets/ancientTREE.fbx', (fbx) => {
         try {
-          // 1. 現在の高さ測定 → 10m にスケール
+          // 1. 現在の高さ測定 → 15m にスケール
           const bbox0 = new THREE.Box3().setFromObject(fbx);
           const size0 = new THREE.Vector3(); bbox0.getSize(size0);
           const curH = size0.y || 1;
-          const scale = 10 / curH;
+          const scale = 15 / curH;
           fbx.scale.setScalar(scale);
           // 2. 再測定 → XZ 中心を原点に、Y min を 0 に
           const bbox1 = new THREE.Box3().setFromObject(fbx);
           const c1 = new THREE.Vector3(); bbox1.getCenter(c1);
           fbx.position.sub(new THREE.Vector3(c1.x, bbox1.min.y, c1.z));
-          // 3. 目標位置へ
-          fbx.position.add(new THREE.Vector3(10, 0, -10));
+          // 3. 目標位置へ (Y=-1 で base を 1m 沈める)
+          fbx.position.add(new THREE.Vector3(10, -1, -10));
           fbx.name = 'ancientTree';
           scene.add(fbx);
           // 4. 全 sub-mesh をモノクロマテリアルに差し替え + paintable 化
@@ -1451,12 +1451,13 @@
       if (!ch) return false;
       if (ch.count >= rule.maxPerChunk) return false;
       const startCount = ch.count;
-      // ペイロードから voxel coord を復元 (data.x,y,z はボクセル中心 + 法線オフセット)
-      // 元の voxel の (ix,iy,iz) は data.x,y,z から法線分を引き戻した値を floor したものに等しいが、
-      // 単純に ((x - 0)/VOXEL) を floor + サーフェスオフセット補正で求める
-      const vIx = Math.floor((data.x - (rule.orientUpWithNormal ? (data.nx||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
-      const vIy = Math.floor((data.y - (rule.orientUpWithNormal ? (data.ny||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
-      const vIz = Math.floor((data.z - (rule.orientUpWithNormal ? (data.nz||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
+      // ペイロードは voxel 中心座標 (surface offset は render 側で後付け)。
+      // _modeFireVoxel で `cx = (b.ix + 0.5) * VOXEL` と書いているので、逆算は
+      //   ix = round(data.x / VOXEL - 0.5)
+      // これで overwrite fade-out が instanceMeta.ix と確実に一致する。
+      const vIx = Math.round(data.x / MODE_VOXEL - 0.5);
+      const vIy = Math.round(data.y / MODE_VOXEL - 0.5);
+      const vIz = Math.round(data.z / MODE_VOXEL - 0.5);
       const r = Math.max(0.01, Math.min(0.5, data.r || MODE_VOXEL * 0.5));
       const n = rule.perVoxel;
       _modeOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _modeTmpQ);
