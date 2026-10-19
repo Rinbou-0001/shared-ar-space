@@ -56,7 +56,7 @@ function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60
 //   ・切断しても番号は再利用しない (常にインクリメント)。
 let observerCounter = 0;
 // 付与可能なカスタムタグの一覧 (master が付け外し可能)
-const ALLOWED_CUSTOM_TAGS = new Set(['hole_test']);
+const ALLOWED_CUSTOM_TAGS = new Set(['hole_test', 'plate1', 'plate2']);
 
 // space3 のシーンオブジェクト (master が空間に生成する光源等)
 //   sceneObjects: id → { id, type, tags, x, y, z, config }
@@ -248,10 +248,13 @@ io.on('connection', (socket) => {
     if (typeof pose.qw === 'number') u.qw = pose.qw;
     u.hasPose = true;
 
-    // observer に遷移した時点で 1 度だけ entryTag を割り当てる (#1, #2, ...)
-    if (u.role === 'observer' && !u.entryTag) {
+    // 入室時に 1 度だけ entryTag を割り当てる (#1, #2, ...)
+    //   旧: observer ロールのみ対象 → 修正: 全ロール (camera/observer/master) に付与し、
+    //       送信者自身にも 'selfEntryTag' で通知 (broadcast だけでは本人に届かないため)
+    if (!u.entryTag) {
       observerCounter++;
       u.entryTag = '#' + observerCounter;
+      socket.emit('selfEntryTag', { entryTag: u.entryTag });
     }
 
     if (wasFirst) {
@@ -551,9 +554,14 @@ io.on('connection', (socket) => {
   //   結果は全クライアントに 'avatarTag' で配信 (各クライアントは自身の avatar 記録を更新)
   socket.on('avatarTag', (data) => {
     const sender = users.get(socket.id);
-    if (!sender || sender.role !== 'master') return;
+    if (!sender) return;
     if (!data || typeof data.targetId !== 'string' || typeof data.tag !== 'string') return;
     if (!ALLOWED_CUSTOM_TAGS.has(data.tag)) return;
+    // master 以外の送信は、自分自身への plate1/plate2 のセルフタグに限定許可
+    if (sender.role !== 'master') {
+      if (data.targetId !== socket.id) return;
+      if (data.tag !== 'plate1' && data.tag !== 'plate2') return;
+    }
     const target = users.get(data.targetId);
     if (!target) return;
     target.customTags = target.customTags || [];
