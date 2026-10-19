@@ -614,7 +614,9 @@
     const MODE_HIT_FILL_MAX_R = 0.5;             // 1 ヒットで占有化する tangent disk 最大半径 (m)
     const MODE_OPEN_BURST_PER_TICK = 60;         // 開放瞬間のフレーム分割スパイク回避
     const MODE_CHUNK_SIZE = 2.0;                 // チャンク辺 (m)
-    const MODE_CULL_DIST = 6.0;                  // カメラからこの距離を超えたチャンクは非表示 (m)
+    const MODE_CULL_DIST = 25.0;                 // カメラからこの距離を超えたチャンクは非表示 (m)
+    const MODE_FAR_LOD_START = 10.0;             // この距離を超えたチャンクは LOD で密度減少 (m)
+    const MODE_FAR_LOD_RATIO = 0.5;              // 遠距離時の描画本数倍率 (count を間引き)
     const MODE_CULL_INTERVAL_MS = 200;           // カリング判定の間隔 (全チャンクを毎フレーム走査しない)
     const MODE_DEBUG_LOG_INTERVAL_MS = 2000;     // 診断ログ間隔
     // モード別ルール (ジオメトリ/密度/描画制約)。make() は呼ばれた時に lazy 生成。
@@ -1219,7 +1221,8 @@
       // チャンク中心にメッシュを置くわけではない: 各 instance は world 座標で配置する
       // 位置リセットは group の 0,0,0 のまま。(mesh.position = 0,0,0)
       group.add(mesh);
-      ch = { mode, cx, cy, cz, mesh, count: 0, cxWorld: (cx + 0.5) * MODE_CHUNK_SIZE,
+      ch = { mode, cx, cy, cz, mesh, count: 0, lodActive: false,
+             cxWorld: (cx + 0.5) * MODE_CHUNK_SIZE,
              cyWorld: (cy + 0.5) * MODE_CHUNK_SIZE, czWorld: (cz + 0.5) * MODE_CHUNK_SIZE };
       _modeChunks.set(key, ch);
       return ch;
@@ -1231,7 +1234,11 @@
       return _ensureChunk(mode, cx, cy, cz);
     }
 
-    // カメラカリング: 遠いチャンクは visible=false
+    // カメラカリング + 距離 LOD:
+    //   d <= FAR_LOD_START              → 可視, full count
+    //   FAR_LOD_START < d <= CULL_DIST  → 可視, count = full × FAR_LOD_RATIO (間引き)
+    //   d > CULL_DIST                   → 不可視
+    // 発火順はランダム散布なので、末尾を間引く形でも空間的に均等に残る。
     const _modeCullCamPos = (window.THREE ? new THREE.Vector3() : null);
     function _modeCullTick() {
       const nowT = performance.now();
@@ -1239,13 +1246,29 @@
       _modeLastCullT = nowT;
       if (!camera || !_modeChunkGroup) return;
       camera.getWorldPosition(_modeCullCamPos);
-      const d2 = MODE_CULL_DIST * MODE_CULL_DIST;
+      const cullD2 = MODE_CULL_DIST * MODE_CULL_DIST;
+      const lodD2  = MODE_FAR_LOD_START * MODE_FAR_LOD_START;
       for (const ch of _modeChunks.values()) {
         const dx = ch.cxWorld - _modeCullCamPos.x;
         const dy = ch.cyWorld - _modeCullCamPos.y;
         const dz = ch.czWorld - _modeCullCamPos.z;
-        const inside = (dx * dx + dy * dy + dz * dz) <= d2;
-        if (ch.mesh.visible !== inside) ch.mesh.visible = inside;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > cullD2) {
+          if (ch.mesh.visible) ch.mesh.visible = false;
+          ch.lodActive = false;
+          continue;
+        }
+        if (!ch.mesh.visible) ch.mesh.visible = true;
+        if (d2 > lodD2) {
+          // 遠距離 LOD: count を間引く
+          const lodCount = Math.floor(ch.count * MODE_FAR_LOD_RATIO);
+          if (ch.mesh.count !== lodCount) ch.mesh.count = lodCount;
+          ch.lodActive = true;
+        } else {
+          // 近距離: full
+          if (ch.mesh.count !== ch.count) ch.mesh.count = ch.count;
+          ch.lodActive = false;
+        }
       }
     }
 
@@ -1301,7 +1324,10 @@
         ch.mesh.setMatrixAt(ch.count, _modeChunkDummy.matrix);
         ch.count++;
       }
-      ch.mesh.count = ch.count;
+      // LOD 中のチャンクに追加された場合は間引き count を保つ (次 cull tick で正確化)
+      ch.mesh.count = ch.lodActive
+        ? Math.floor(ch.count * MODE_FAR_LOD_RATIO)
+        : ch.count;
       ch.mesh.instanceMatrix.needsUpdate = true;
     }
 
@@ -1453,12 +1479,16 @@
           if (root.gateOpen) perMode[m].openRoots++;
         }
       }
-      // チャンク統計 (全体 + 可視)
-      let chunksTotal = 0, chunksVisible = 0, instTotal = 0;
+      // チャンク統計 (全体 + 可視 + LOD)
+      let chunksTotal = 0, chunksVisible = 0, chunksLod = 0, instTotal = 0, instDrawn = 0;
       const perModeInst = {};
       for (const ch of _modeChunks.values()) {
         chunksTotal++;
-        if (ch.mesh.visible) chunksVisible++;
+        if (ch.mesh.visible) {
+          chunksVisible++;
+          if (ch.lodActive) chunksLod++;
+          instDrawn += ch.mesh.count;
+        }
         instTotal += ch.count;
         perModeInst[ch.mode] = (perModeInst[ch.mode] || 0) + ch.count;
       }
@@ -1473,8 +1503,8 @@
           + ' inst=' + inst + '}');
       }
       log('[mode dbg] hits=' + _modeDbgHits
-        + ' chunks=' + chunksVisible + '/' + chunksTotal
-        + ' instTotal=' + instTotal
+        + ' chunks(vis/lod/total)=' + chunksVisible + '/' + chunksLod + '/' + chunksTotal
+        + ' inst(drawn/total)=' + instDrawn + '/' + instTotal
         + ' pendingQ=' + _modePendingLocal.length
         + ' lastR=' + r.toFixed(2) + 'm'
         + (parts.length ? ' | ' + parts.join(' ') : ''),
