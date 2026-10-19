@@ -1221,25 +1221,28 @@
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
 
-    // ===== Spray 同期最適化 (A: 送信側バッチ, C: volatile emit) =====
-    //   40Hz × カメラ数 の個別 emit を 50ms 窓でまとめる。
-    //   volatile で送るので受信側が slow な場合は drop → キュー詰まり防止。
-    const SPRAY_BATCH_INTERVAL_MS = 50;
+    // ===== Spray / Mode 同期最適化 (送信側バッチ化、100ms 窓) =====
+    //   40Hz × カメラ数 の spray2 と、ゲート開放時の 491 件 modeSpawn burst を
+    //   100ms 窓で 1 回の emit に集約 → サーバー broadcast loop の回数を数十倍削減。
+    //   consistency 維持のため reliable 配信 (volatile は使わない)。
+    const SPRAY_BATCH_INTERVAL_MS = 100;
     const _sprayOutBuf = [];
+    const _modeSpawnOutBuf = [];
+    const _modeOverwriteOutBuf = [];
     let _sprayOutLastFlushT = 0;
     function _sprayFlushTick() {
-      if (_sprayOutBuf.length === 0) return;
       const now = performance.now();
       if (now - _sprayOutLastFlushT < SPRAY_BATCH_INTERVAL_MS) return;
       _sprayOutLastFlushT = now;
-      if (socket && socket.connected) {
-        // consistency 優先: reliable 配信 (volatile 廃止)
-        const packet = _sprayOutBuf.splice(0);
-        socket.emit('spray2Batch', packet);
-      } else {
-        // 未接続中は buffer を破棄 (再接続後も古い打点は不要)
+      if (!(socket && socket.connected)) {
         _sprayOutBuf.length = 0;
+        _modeSpawnOutBuf.length = 0;
+        _modeOverwriteOutBuf.length = 0;
+        return;
       }
+      if (_sprayOutBuf.length) socket.emit('spray2Batch', _sprayOutBuf.splice(0));
+      if (_modeSpawnOutBuf.length) socket.emit('modeSpawnBatch', _modeSpawnOutBuf.splice(0));
+      if (_modeOverwriteOutBuf.length) socket.emit('modeOverwriteBatch', _modeOverwriteOutBuf.splice(0));
     }
 
     // ===== Spray 受信側合流 (G: rAF 内 1 回に合流) =====
@@ -1695,7 +1698,7 @@
       _renderModeSpawnAt(payload);
       b.spawned = true;
       // sprayer のみ emit (remote は受信して独自に anim スケジュール)
-      if (socket && socket.connected) socket.emit('modeSpawn', payload);
+      if (socket && socket.connected) _modeSpawnOutBuf.push(payload);
     }
     function _modeEnqueueBurst(root) {
       let n = 0;
@@ -1784,7 +1787,7 @@
               if (otherMode === mode) continue;
               _tryFadeOutModeAt(otherMode, ix, iy, iz);
               if (socket && socket.connected) {
-                socket.emit('modeOverwrite', { mode: otherMode, ix, iy, iz });
+                _modeOverwriteOutBuf.push({ mode: otherMode, ix, iy, iz });
               }
             }
           }
@@ -3872,6 +3875,11 @@
       // ペイントモード派生オブジェクト発生 (wood/river/sky) ─ サーバーから配信
       // ライブイベントはフェード付き (local と同じ 2s 遅延 + 1s フェード)
       socket.on('modeSpawn', (data) => { _renderModeSpawnAt(data); });
+      // バッチ版 (送信側 100ms 窓で集約されたもの)
+      socket.on('modeSpawnBatch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) _renderModeSpawnAt(d);
+      });
       // 履歴 (初期ロード) はフェードなしで即描画
       socket.on('modeHistoryBatch', (list) => {
         if (!Array.isArray(list)) return;
@@ -3883,6 +3891,14 @@
         if (!data || typeof data.mode !== 'string') return;
         if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
         _tryFadeOutModeAt(data.mode, data.ix, data.iy, data.iz);
+      });
+      // バッチ版
+      socket.on('modeOverwriteBatch', (list) => {
+        if (!Array.isArray(list)) return;
+        for (const d of list) {
+          if (!d || typeof d.mode !== 'string') continue;
+          _tryFadeOutModeAt(d.mode, d.ix, d.iy, d.iz);
+        }
       });
       // 塗り替え履歴 (新規接続時にサーバーから受信、既存の fade-out 状態を再現)
       //   modeHistoryBatch で全スポーンを生成した後に順次フェード処理を実行する

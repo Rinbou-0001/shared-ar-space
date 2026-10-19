@@ -546,11 +546,11 @@ io.on('connection', (socket) => {
 
   // space2 モード派生オブジェクト発生イベント (wood/river/sky 統合)
   //   data: { mode, x,y,z, nx,ny,nz, r }
-  socket.on('modeSpawn', (data) => {
-    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return;
-    if (typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
-    if (typeof data.r !== 'number' || !(data.r > 0 && data.r < 1)) return;
-    const rec = {
+  function _normalizeModeSpawn(data) {
+    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return null;
+    if (typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return null;
+    if (typeof data.r !== 'number' || !(data.r > 0 && data.r < 1)) return null;
+    return {
       mode: data.mode,
       x: data.x, y: data.y, z: data.z,
       nx: (typeof data.nx === 'number') ? data.nx : 0,
@@ -558,25 +558,61 @@ io.on('connection', (socket) => {
       nz: (typeof data.nz === 'number') ? data.nz : 0,
       r: data.r,
     };
+  }
+  function _pushModeSpawnHistory(rec) {
     modeSpawnHistory2.push(rec);
     if (modeSpawnHistory2.length > MODE_SPAWN_HISTORY_CAP) {
       modeSpawnHistory2.splice(0, modeSpawnHistory2.length - MODE_SPAWN_HISTORY_CAP);
     }
+  }
+  socket.on('modeSpawn', (data) => {
+    const rec = _normalizeModeSpawn(data);
+    if (!rec) return;
+    _pushModeSpawnHistory(rec);
     socket.broadcast.emit('modeSpawn', rec);
+  });
+  // バッチ版 (sprayer が 100ms 窓で集約)
+  socket.on('modeSpawnBatch', (list) => {
+    if (!Array.isArray(list) || list.length === 0) return;
+    if (list.length > 1024) list = list.slice(0, 1024);
+    const accepted = [];
+    for (const d of list) {
+      const rec = _normalizeModeSpawn(d);
+      if (rec) { _pushModeSpawnHistory(rec); accepted.push(rec); }
+    }
+    if (accepted.length) socket.broadcast.emit('modeSpawnBatch', accepted);
   });
 
   // space2 モード塗り替え (他モード voxel フェードアウト)
   //   data: { mode, ix, iy, iz } — 整数ボクセル座標
-  socket.on('modeOverwrite', (data) => {
-    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return;
-    if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
-    if (!isFinite(data.ix) || !isFinite(data.iy) || !isFinite(data.iz)) return;
-    const rec = { mode: data.mode, ix: data.ix | 0, iy: data.iy | 0, iz: data.iz | 0 };
+  function _normalizeModeOverwrite(data) {
+    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return null;
+    if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return null;
+    if (!isFinite(data.ix) || !isFinite(data.iy) || !isFinite(data.iz)) return null;
+    return { mode: data.mode, ix: data.ix | 0, iy: data.iy | 0, iz: data.iz | 0 };
+  }
+  function _pushModeOverwriteHistory(rec) {
     modeOverwriteHistory2.push(rec);
     if (modeOverwriteHistory2.length > MODE_OVERWRITE_HISTORY_CAP) {
       modeOverwriteHistory2.splice(0, modeOverwriteHistory2.length - MODE_OVERWRITE_HISTORY_CAP);
     }
+  }
+  socket.on('modeOverwrite', (data) => {
+    const rec = _normalizeModeOverwrite(data);
+    if (!rec) return;
+    _pushModeOverwriteHistory(rec);
     socket.broadcast.emit('modeOverwrite', rec);
+  });
+  // バッチ版
+  socket.on('modeOverwriteBatch', (list) => {
+    if (!Array.isArray(list) || list.length === 0) return;
+    if (list.length > 1024) list = list.slice(0, 1024);
+    const accepted = [];
+    for (const d of list) {
+      const rec = _normalizeModeOverwrite(d);
+      if (rec) { _pushModeOverwriteHistory(rec); accepted.push(rec); }
+    }
+    if (accepted.length) socket.broadcast.emit('modeOverwriteBatch', accepted);
   });
 
   // master のみ: モード派生オブジェクトを一括リセット
