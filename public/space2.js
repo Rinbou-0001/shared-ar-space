@@ -916,7 +916,7 @@
     //   外側は L 字の凹角反対側 (plate1 の outer=-Z、plate2 の outer=-X)
     const PLATE_W = 0.179;
     const PLATE_H = 0.286;
-    const PLATE_ORIGIN = new THREE.Vector3(0.7, 1, 0);
+    const PLATE_ORIGIN = new THREE.Vector3(0.9, 1, 0);
     const PLATE_APEX_OFFSET = 0.15;    // L 外側 15cm に apex を独自に持つ
     // L 全体の yaw: 旧 (0 → 共有縦辺中心で plate1 が +X / plate2 が +Z) から +45° 回転
     //   = ユーザー指定の "Yaw -90 → -45" に相当
@@ -5178,17 +5178,26 @@
           } catch (_) {}
         }
         if (!ok) camera.updateProjectionMatrix();
-        // 自身の plate を自分視点のレンダーから一時隠蔽 (さもなくば白い板が camera 直前に居て
-        // 視界が全部白くなり、"壁しか見えない" ように映ってしまう)
-        let _hiddenPlateVis = null;
-        if (_plateGrpForDisplay && _plateGrpForDisplay.userData && _plateGrpForDisplay.userData.plateMesh) {
-          const _pm = _plateGrpForDisplay.userData.plateMesh;
-          _hiddenPlateVis = _pm.visible;
-          _pm.visible = false;
+        // 自身の plate を自分視点のレンダーから一時隠蔽
+        //   mesh (白板) だけでなく、枠線 (edges) やその他グレー色の要素も丸ごと非表示にするため
+        //   grp 自体を visible=false にする。他クライアント視点では visible=true なので
+        //   plate は彼らにはそのまま見えつづける (レンダー順はクライアント毎に独立)。
+        //   加えてミニキューブも自分視点の plate 真後ろに居るとグレーの壁のように映るため隠す。
+        let _hiddenGrp = null, _hiddenMini = null;
+        if (_plateGrpForDisplay) {
+          _hiddenGrp = _plateGrpForDisplay.visible;
+          _plateGrpForDisplay.visible = false;
+          if (typeof _miniCube !== 'undefined' && _miniCube) {
+            _hiddenMini = _miniCube.visible;
+            _miniCube.visible = false;
+          }
         }
         renderer.render(scene, camera);
-        if (_hiddenPlateVis !== null && _plateGrpForDisplay && _plateGrpForDisplay.userData && _plateGrpForDisplay.userData.plateMesh) {
-          _plateGrpForDisplay.userData.plateMesh.visible = _hiddenPlateVis;
+        if (_hiddenGrp !== null && _plateGrpForDisplay) {
+          _plateGrpForDisplay.visible = _hiddenGrp;
+          if (_hiddenMini !== null && typeof _miniCube !== 'undefined' && _miniCube) {
+            _miniCube.visible = _hiddenMini;
+          }
         }
         // 復元: ユーザー由来の姿勢を戻す (次フレームの操作が正しく効く)
         camera.position.copy(_oaSavePos);
