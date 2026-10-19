@@ -528,6 +528,16 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('modeSpawn', rec);
   });
 
+  // space2 モード塗り替え (他モード voxel フェードアウト)
+  //   data: { mode, ix, iy, iz } — 整数ボクセル座標
+  socket.on('modeOverwrite', (data) => {
+    if (!data || typeof data.mode !== 'string' || !MODE_SPAWN_ALLOWED.has(data.mode)) return;
+    if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
+    if (!isFinite(data.ix) || !isFinite(data.iy) || !isFinite(data.iz)) return;
+    const rec = { mode: data.mode, ix: data.ix | 0, iy: data.iy | 0, iz: data.iz | 0 };
+    socket.broadcast.emit('modeOverwrite', rec);
+  });
+
   // master のみ: モード派生オブジェクトを一括リセット
   socket.on('resetModeSpawn', () => {
     const sender = users.get(socket.id);

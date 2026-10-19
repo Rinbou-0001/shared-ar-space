@@ -277,6 +277,9 @@
   <script src="/vendor/three.min.js" onload="uiLog('three.js loaded','ok')"></script>
   <!-- TransformControls (UMD build via jsDelivr) — master のオブジェクト操作ギズモ用 -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/TransformControls.js" onload="uiLog('TransformControls loaded','ok')" onerror="uiLog('TransformControls load failed','err')"></script>
+  <!-- fflate (FBXLoader の zlib 展開依存) + FBXLoader (r147 UMD) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/libs/fflate.min.js" onload="uiLog('fflate loaded','ok')" onerror="uiLog('fflate load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/FBXLoader.js" onload="uiLog('FBXLoader loaded','ok')" onerror="uiLog('FBXLoader load failed','err')"></script>
   <script src="/config.js"></script>
   <script>
     (function () {

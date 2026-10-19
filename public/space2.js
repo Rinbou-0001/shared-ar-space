@@ -992,6 +992,66 @@
     //   _makePaintable(cube, baseColor, worldSpanM=1, 128) で各 cube に独立 paint RT を割り当て)
     void movableCubes;
 
+    // ===== Ancient Tree (FBX) =====
+    //   高さ 10m、位置 (10, 0, -10)、モノクロマテリアル、スプレー可能
+    //   base (bbox min Y) が Y=0 となるように配置
+    (function _loadAncientTree() {
+      if (typeof THREE.FBXLoader !== 'function') {
+        log('FBXLoader not loaded, ancientTree skipped', 'warn');
+        return;
+      }
+      const loader = new THREE.FBXLoader();
+      loader.load('/assets/ancientTREE.fbx', (fbx) => {
+        try {
+          // 1. 現在の高さ測定 → 10m にスケール
+          const bbox0 = new THREE.Box3().setFromObject(fbx);
+          const size0 = new THREE.Vector3(); bbox0.getSize(size0);
+          const curH = size0.y || 1;
+          const scale = 10 / curH;
+          fbx.scale.setScalar(scale);
+          // 2. 再測定 → XZ 中心を原点に、Y min を 0 に
+          const bbox1 = new THREE.Box3().setFromObject(fbx);
+          const c1 = new THREE.Vector3(); bbox1.getCenter(c1);
+          fbx.position.sub(new THREE.Vector3(c1.x, bbox1.min.y, c1.z));
+          // 3. 目標位置へ
+          fbx.position.add(new THREE.Vector3(10, 0, -10));
+          fbx.name = 'ancientTree';
+          scene.add(fbx);
+          // 4. 全 sub-mesh をモノクロマテリアルに差し替え + paintable 化
+          let paintableN = 0;
+          let subIdx = 0;
+          fbx.traverse((child) => {
+            if (!child || !child.isMesh) return;
+            // モノクロ (ambient 0.85 + dir 0.35 の既存ライティングで灰色に光る)
+            const monoMat = new THREE.MeshStandardMaterial({
+              color: 0x9a9a9a, roughness: 0.9, metalness: 0.05, side: THREE.DoubleSide,
+            });
+            child.material = monoMat;
+            child.castShadow = true;
+            child.receiveShadow = true;
+            // 一意名を付けて paintable 登録
+            const nm = 'tree-mesh-' + subIdx; subIdx++;
+            child.name = nm;
+            // UV が無い mesh は paintable 不可
+            if (!child.geometry || !child.geometry.attributes || !child.geometry.attributes.uv) {
+              return;
+            }
+            // sub-mesh の bounding box 最大辺を worldSpanM に (スケール済み座標で測定)
+            const sub = new THREE.Box3().setFromObject(child);
+            const subSize = new THREE.Vector3(); sub.getSize(subSize);
+            const worldSpan = Math.max(subSize.x, subSize.y, subSize.z) || 1.0;
+            _makePaintable(child, worldSpan, 256);
+            paintableN++;
+          });
+          log('ancientTree loaded (' + subIdx + ' meshes, ' + paintableN + ' paintable)', 'ok');
+        } catch (e) {
+          log('ancientTree setup error: ' + (e && e.message ? e.message : e), 'err');
+        }
+      }, undefined, (err) => {
+        log('ancientTree load failed: ' + (err && err.message ? err.message : err), 'err');
+      });
+    })();
+
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
     //   位置 (0.5, 1, 0) を L の内角 (= 共有縦辺) として、plate1 が +X 方向、plate2 が +Z 方向に伸びる
     //   それぞれ縦長 (W=0.179 × H=0.286)、長辺 (0.286m) は Y 軸に沿った共有縦線で接する
@@ -1309,7 +1369,8 @@
       group.add(mesh);
       ch = { mode, cx, cy, cz, mesh, count: 0, lodActive: false,
              cxWorld: (cx + 0.5) * MODE_CHUNK_SIZE,
-             cyWorld: (cy + 0.5) * MODE_CHUNK_SIZE, czWorld: (cz + 0.5) * MODE_CHUNK_SIZE };
+             cyWorld: (cy + 0.5) * MODE_CHUNK_SIZE, czWorld: (cz + 0.5) * MODE_CHUNK_SIZE,
+             instanceMeta: [] };  // index 対応: 各 instance の { ix, iy, iz, pos, quat, scaleTarget, fadingOut }
       _modeChunks.set(key, ch);
       return ch;
     }
@@ -1390,6 +1451,12 @@
       if (!ch) return false;
       if (ch.count >= rule.maxPerChunk) return false;
       const startCount = ch.count;
+      // ペイロードから voxel coord を復元 (data.x,y,z はボクセル中心 + 法線オフセット)
+      // 元の voxel の (ix,iy,iz) は data.x,y,z から法線分を引き戻した値を floor したものに等しいが、
+      // 単純に ((x - 0)/VOXEL) を floor + サーフェスオフセット補正で求める
+      const vIx = Math.floor((data.x - (rule.orientUpWithNormal ? (data.nx||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
+      const vIy = Math.floor((data.y - (rule.orientUpWithNormal ? (data.ny||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
+      const vIz = Math.floor((data.z - (rule.orientUpWithNormal ? (data.nz||0) * (MODE_VOXEL*0.5 + 0.001) : 0)) / MODE_VOXEL);
       const r = Math.max(0.01, Math.min(0.5, data.r || MODE_VOXEL * 0.5));
       const n = rule.perVoxel;
       _modeOrientQuat(data.nx || 0, data.ny || 1, data.nz || 0, _modeTmpQ);
@@ -1425,12 +1492,20 @@
         _modeChunkDummy.scale.setScalar(sTarget * initialScaleFactor);
         _modeChunkDummy.updateMatrix();
         ch.mesh.setMatrixAt(ch.count, _modeChunkDummy.matrix);
+        const posClone  = _modeChunkDummy.position.clone();
+        const quatClone = _modeChunkDummy.quaternion.clone();
+        // 全 instance にメタ記録 (overwrite fade-out で検索に使う)
+        ch.instanceMeta[ch.count] = {
+          ix: vIx, iy: vIy, iz: vIz,
+          pos: posClone, quat: quatClone, scaleTarget: sTarget,
+          fadingOut: false,
+        };
         if (collected) {
           collected.push({
             chunk: ch,
             idx: ch.count,
-            pos: _modeChunkDummy.position.clone(),
-            quat: _modeChunkDummy.quaternion.clone(),
+            pos: posClone,
+            quat: quatClone,
             scaleTarget: sTarget,
           });
         }
@@ -1448,6 +1523,7 @@
       for (const ch of _modeChunks.values()) {
         ch.count = 0;
         ch.mesh.count = 0;
+        ch.instanceMeta.length = 0;
         ch.mesh.instanceMatrix.needsUpdate = true;
       }
       _modeVoxels.clear();
@@ -1473,6 +1549,42 @@
       return true;
     }
 
+    // ============ Overwrite fade-out ============
+    //   指定モードの (ix,iy,iz) ボクセルに属する instance 群を 1 秒で scale→0 させる
+    //   他モードが同じ voxel に塗装された時に呼ばれる (塗り替え表現)
+    function _tryFadeOutModeAt(mode, ix, iy, iz) {
+      if (!MODE_RULES[mode]) return;
+      // 対象 chunk 計算
+      const wx = (ix + 0.5) * MODE_VOXEL;
+      const wy = (iy + 0.5) * MODE_VOXEL;
+      const wz = (iz + 0.5) * MODE_VOXEL;
+      const cx = Math.floor(wx / MODE_CHUNK_SIZE);
+      const cy = Math.floor(wy / MODE_CHUNK_SIZE);
+      const cz = Math.floor(wz / MODE_CHUNK_SIZE);
+      const ch = _modeChunks.get(_chunkKey(mode, cx, cy, cz));
+      if (!ch) return;
+      // instanceMeta から該当 voxel の instance を抽出
+      const blades = [];
+      for (let i = 0; i < ch.instanceMeta.length; i++) {
+        const m = ch.instanceMeta[i];
+        if (!m) continue;
+        if (m.fadingOut) continue;
+        if (m.ix === ix && m.iy === iy && m.iz === iz) {
+          m.fadingOut = true;
+          blades.push({ chunk: ch, idx: i, pos: m.pos, quat: m.quat, scaleTarget: m.scaleTarget });
+        }
+      }
+      if (blades.length === 0) return;
+      const now = performance.now();
+      _modeAnimEntries.push({
+        data: null, blades,
+        appearAt: now,
+        fadeEnd: now + MODE_SPAWN_FADE_MS,
+        done: false, retryCount: 0,
+        isFadeOut: true,
+      });
+    }
+
     function _modeAnimTick() {
       if (_modeAnimEntries.length === 0) return;
       const now = performance.now();
@@ -1482,8 +1594,8 @@
         const e = _modeAnimEntries[i];
         if (e.done) { hasDone = true; continue; }
         if (now < e.appearAt) continue;
-        // 初回: allocate (chunk cap 失敗時は retry)
-        if (!e.blades) {
+        // 初回: allocate (chunk cap 失敗時は retry) ─ fade-out は allocate 不要
+        if (!e.blades && !e.isFadeOut) {
           const list = [];
           const ok = _allocateAnimatedBlades(e.data, list);
           if (!ok || list.length === 0) {
@@ -1499,12 +1611,14 @@
           for (const bl of e.blades) dirtyMeshes.add(bl.chunk.mesh);
           continue;  // 同フレームでフェード進行までは待つ
         }
-        // フェード進行
+        if (!e.blades) continue;
+        // フェード進行 (fade-in: 0→1 / fade-out: 1→0)
         const t = Math.min(1, (now - e.appearAt) / MODE_SPAWN_FADE_MS);
+        const sFactor = e.isFadeOut ? (1 - t) : t;
         for (const bl of e.blades) {
           _modeChunkDummy.position.copy(bl.pos);
           _modeChunkDummy.quaternion.copy(bl.quat);
-          _modeChunkDummy.scale.setScalar(bl.scaleTarget * t);
+          _modeChunkDummy.scale.setScalar(bl.scaleTarget * sFactor);
           _modeChunkDummy.updateMatrix();
           bl.chunk.mesh.setMatrixAt(bl.idx, _modeChunkDummy.matrix);
           dirtyMeshes.add(bl.chunk.mesh);
@@ -1622,7 +1736,17 @@
           const iy = Math.floor(py / MODE_VOXEL);
           const iz = Math.floor(pz / MODE_VOXEL);
           const bucket = _modeOccupyVoxel(mode, ix, iy, iz, _tmpNrm.x, _tmpNrm.y, _tmpNrm.z);
-          if (bucket) touchedBuckets.push(bucket);
+          if (bucket) {
+            touchedBuckets.push(bucket);
+            // 塗り替え: 同じ voxel に属する他モードの instance をフェードアウト
+            for (const otherMode of Object.keys(MODE_RULES)) {
+              if (otherMode === mode) continue;
+              _tryFadeOutModeAt(otherMode, ix, iy, iz);
+              if (socket && socket.connected) {
+                socket.emit('modeOverwrite', { mode: otherMode, ix, iy, iz });
+              }
+            }
+          }
         }
       }
       for (const bucket of touchedBuckets) {
@@ -3703,6 +3827,12 @@
         for (const d of list) _renderModeSpawnImmediate(d);
       });
       socket.on('resetModeSpawn', () => { _clearAllModeSpawn(); log('[mode] cleared', 'ok'); });
+      // 塗り替え (他モードの voxel 位置を 1 秒でフェードアウト)
+      socket.on('modeOverwrite', (data) => {
+        if (!data || typeof data.mode !== 'string') return;
+        if (typeof data.ix !== 'number' || typeof data.iy !== 'number' || typeof data.iz !== 'number') return;
+        _tryFadeOutModeAt(data.mode, data.ix, data.iy, data.iz);
+      });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
 
