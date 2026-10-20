@@ -4088,22 +4088,17 @@
       //   塗装 (paintRT) は _applyPaintTo を直接呼出し。mode spawn 分散生成も同時に実行。
       //   payload に world 座標 (wx/wy/wz) + 法線 (nx/ny/nz) + world radius (wr) が含まれるので
       //   送信元と同じ入力で各クライアントが独立に _pushPaintHit を走らせられる。
-      // 一時診断ログ: _applyRemoteSpray の各段階到達件数を 2 秒毎に出力
-      let _dbgSprayLast = 0;
-      let _dbgSprayHits = 0, _dbgSprayGate = 0, _dbgSprayMeshMiss = 0, _dbgSprayRtMiss = 0, _dbgSprayPaint = 0, _dbgSprayMode = 0;
       function _applyRemoteSpray(data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         if (!data.tgt) return;
-        _dbgSprayHits++;
         // 案 X: camera + 効果2 中は他端末からの塗装・mode spawn も一切処理しない
-        if (_isCameraUIMode()) { _dbgSprayGate++; _dbgReport(); return; }
+        if (_isCameraUIMode()) return;
         const mesh = _paintables.get(data.tgt);
-        if (!mesh) { _dbgSprayMeshMiss++; _dbgReport(); return; }
-        const rt = mesh.userData.paintRT; if (!rt) { _dbgSprayRtMiss++; _dbgReport(); return; }
+        if (!mesh) return;
+        const rt = mesh.userData.paintRT; if (!rt) return;
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
         const uvR = (typeof data.r === 'number') ? data.r : 0.01;
         _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
-        _dbgSprayPaint++;
         if (typeof data.wx === 'number' && typeof data.nx === 'number') {
           _pushPaintHit(
             { x: data.wx, y: data.wy, z: data.wz },
@@ -4111,23 +4106,7 @@
             (typeof data.wr === 'number') ? data.wr : 0.1,
             data.c
           );
-          _dbgSprayMode++;
         }
-        _dbgReport();
-      }
-      function _dbgReport() {
-        const nowT = performance.now();
-        if (nowT - _dbgSprayLast < 2000) return;
-        _dbgSprayLast = nowT;
-        log('[spray dbg role=' + ROLE + '] hits=' + _dbgSprayHits
-            + ' uiGate=' + _dbgSprayGate
-            + ' meshMiss=' + _dbgSprayMeshMiss
-            + ' rtMiss=' + _dbgSprayRtMiss
-            + ' paint=' + _dbgSprayPaint
-            + ' mode=' + _dbgSprayMode
-            + ' effect1=' + (window.__effect && window.__effect[1] ? '1' : '0')
-            + ' effect2=' + (window.__effect && window.__effect[2] ? '1' : '0')
-            , 'ok');
       }
       // 単発 spray2 ─ 731c679 と同じ即処理
       socket.on('spray2', _applyRemoteSpray);
