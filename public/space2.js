@@ -1355,6 +1355,98 @@
     const _sprayOrigin = new THREE.Vector3();
     const _sprayDir    = new THREE.Vector3();
 
+    // 効果2 (スマホ UI モード) + camera ロールの時 true。
+    //   true の間、カメラ側ではローカル塗装 RT 書込み・受信 RT 書込み・mode spawn 全系を skip し、
+    //   スプレー送信 (raycast + socket.emit) + スプレーボタン + pose 送信のみを維持する (案 X)。
+    function _isCameraUIMode() {
+      return ROLE === 'camera' && window.__effect && window.__effect[2];
+    }
+
+    // ===== スプレー照準インジケーター (observer / master 限定) =====
+    //   各 camera avatar の視線方向にローカル raycast を打ち、ヒット点にリングを配置。
+    //   SPRAY_HALF_ANGLE + SPRAY_MAX_WORLD_R から sprayer と同じ worldR を算出 → 塗装範囲と一致。
+    //   色は avatar.color (= 塗装色) と連動、camera 側では生成も表示もしない。
+    const _aimIndicators = new Map();  // avatar id → { mesh, mat }
+    const _aimRayAim = new THREE.Raycaster();
+    const _aimAxisZ = new THREE.Vector3(0, 0, 1);
+    const _aimTmpFwd = new THREE.Vector3();
+    const _aimTmpN   = new THREE.Vector3();
+    const _aimTmpPos = new THREE.Vector3();
+    const _aimTmpQ   = new THREE.Quaternion();
+    const _aimTmpCol = new THREE.Color();
+    function _ensureAimIndicator(av) {
+      if (ROLE === 'camera') return null;    // camera 側では一切生成しない
+      if (!av || av.role !== 'camera') return null;
+      let rec = _aimIndicators.get(av.id);
+      if (rec) return rec;
+      // 単位半径リング (後で scale で worldR に合わせる)
+      const geom = new THREE.RingGeometry(0.9, 1.0, 48);
+      const mat  = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.name = 'aim-' + av.id;
+      mesh.renderOrder = 20;      // 透過なので後描画
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      scene.add(mesh);
+      rec = { mesh, mat };
+      _aimIndicators.set(av.id, rec);
+      return rec;
+    }
+    function _removeAimIndicator(id) {
+      const rec = _aimIndicators.get(id);
+      if (!rec) return;
+      if (rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
+      if (rec.mesh.geometry) rec.mesh.geometry.dispose();
+      if (rec.mat) rec.mat.dispose();
+      _aimIndicators.delete(id);
+    }
+    function _aimIndicatorTick() {
+      if (ROLE === 'camera') return;
+      for (const av of avatars.values()) {
+        if (!av || av.role !== 'camera' || !av.grp) continue;
+        const rec = _ensureAimIndicator(av);
+        if (!rec) continue;
+        // avatar 前方 (local -Z) を world へ
+        _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
+        _aimTmpPos.copy(av.grp.position);
+        _aimRayAim.set(_aimTmpPos, _aimTmpFwd);
+        const hits = _aimRayAim.intersectObjects(_sprayables, false);
+        let hit = null;
+        for (const h of hits) {
+          if (h && h.object && h.object.userData && h.object.userData.paintRT) {
+            hit = h; break;
+          }
+        }
+        if (!hit) {
+          rec.mesh.visible = false;
+          continue;
+        }
+        // world radius (sprayer と同じ式)
+        const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
+        // 法線を world へ
+        if (hit.face && hit.face.normal) {
+          _aimTmpN.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
+        } else {
+          _aimTmpN.copy(_aimTmpFwd).multiplyScalar(-1);
+        }
+        // リングを面に合わせる
+        _aimTmpQ.setFromUnitVectors(_aimAxisZ, _aimTmpN);
+        rec.mesh.position.copy(hit.point).addScaledVector(_aimTmpN, 0.002);  // z-fighting 回避
+        rec.mesh.quaternion.copy(_aimTmpQ);
+        rec.mesh.scale.setScalar(worldR);
+        // 色: avatar.color (塗装色) と連動
+        if (typeof av.color === 'string') {
+          _aimTmpCol.set(av.color);
+          rec.mat.color.copy(_aimTmpCol);
+        } else if (typeof av.color === 'number') {
+          rec.mat.color.setHex(av.color);
+        }
+        rec.mesh.visible = true;
+      }
+    }
+
     // ===== Spray 同期最適化 (送信側バッチ化、100ms 窓) =====
     //   40Hz × カメラ数 の spray2 を 100ms 窓で 1 回の emit に集約。
     //   モード派生オブジェクト発生 (modeSpawn/modeOverwrite) は **分散生成** に移行したため
@@ -1987,7 +2079,10 @@
       const worldSpan = (target.userData.worldSpanM) || 1.0;
       const uvR = Math.max(SPRAY_MIN_UV_R, worldR / worldSpan);
       const seed = (Date.now() & 0xFFFFF);
-      _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
+      // 案 X: camera + 効果2 中はローカル RT 書込みを skip (送信は継続)
+      if (!_isCameraUIMode()) {
+        _applyPaintTo(rt, uv.x, uv.y, uvR, '#' + colorHex, seed);
+      }
       // 面法線 world 変換 (ペイロードに乗せる + ローカルの mode spawn にも渡す)
       let wnx = 0, wny = 1, wnz = 0;
       if (hit.face && hit.face.normal && target) {
@@ -2011,7 +2106,10 @@
         });
       }
       // sprayer 側ローカルの mode spawn (他クライアントは spray2Batch 受信後に自分で発火)
-      _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
+      //   案 X: camera + 効果2 中は自身の mode spawn 処理も skip (観測不要、CPU 削減)
+      if (!_isCameraUIMode()) {
+        _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
+      }
     }
 
     // selectables: raycast 対象。movable cube 全部を含める。
@@ -3863,6 +3961,7 @@
           scene.remove(a.grp);
           avatars.delete(u.id);
         }
+        _removeAimIndicator(u.id);   // 照準リングも破棄
         rebuildClientSelect();
         log('leave: ' + u.id.substring(0, 6));
       });
@@ -3992,6 +4091,8 @@
       function _applyRemoteSpray(data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         if (!data.tgt) return;
+        // 案 X: camera + 効果2 中は他端末からの塗装・mode spawn も一切処理しない
+        if (_isCameraUIMode()) return;
         const mesh = _paintables.get(data.tgt);
         if (!mesh) return;
         const rt = mesh.userData.paintRT; if (!rt) return;
@@ -4145,6 +4246,7 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
+    updaters.push(_aimIndicatorTick);
     // _sprayFlushTick は廃止 (バッチ送信から 731c679 の即時 emit に復帰)
     // 関数定義自体は dead code として残置 (ユーザー許可待ち)
     updaters.push(_modeBurstTick);
