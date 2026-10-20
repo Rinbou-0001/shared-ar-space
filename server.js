@@ -501,6 +501,7 @@ io.on('connection', (socket) => {
   //     r = UV radius (0..1 の小数)
   //     s = ノイズ seed
   // 共通: 1 件 spray2 を正規化して history に push、返す (broadcast 用 rec)
+  // mode spawn 分散生成のための world 座標 (wx/wy/wz/nx/ny/nz/wr) も受信者に転送する。
   function _normalizeSpray2(data) {
     if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return null;
     if (!(data.u >= 0 && data.u <= 1 && data.v >= 0 && data.v <= 1)) return null;
@@ -509,6 +510,14 @@ io.on('connection', (socket) => {
     if (typeof data.tgt === 'string' && data.tgt.length > 0 && data.tgt.length < 64) rec.tgt = data.tgt;
     if (typeof data.r === 'number' && data.r > 0 && data.r < 1)   rec.r = data.r;
     if (typeof data.s === 'number' && isFinite(data.s))           rec.s = data.s >>> 0;
+    // world 座標 (mode spawn 分散生成用、各クライアントが独立に _pushPaintHit を走らせる)
+    if (typeof data.wx === 'number' && isFinite(data.wx)) rec.wx = data.wx;
+    if (typeof data.wy === 'number' && isFinite(data.wy)) rec.wy = data.wy;
+    if (typeof data.wz === 'number' && isFinite(data.wz)) rec.wz = data.wz;
+    if (typeof data.nx === 'number' && isFinite(data.nx)) rec.nx = data.nx;
+    if (typeof data.ny === 'number' && isFinite(data.ny)) rec.ny = data.ny;
+    if (typeof data.nz === 'number' && isFinite(data.nz)) rec.nz = data.nz;
+    if (typeof data.wr === 'number' && isFinite(data.wr) && data.wr > 0) rec.wr = data.wr;
     return rec;
   }
   function _pushSpray2History(rec) {
