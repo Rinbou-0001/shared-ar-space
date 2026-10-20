@@ -151,8 +151,9 @@
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(10, 20, 10);
-    // シャドウカメラ設定 (castShadow は effect4 トグル時に ON にする)
+    // シャドウカメラ設定: AncientTree が shadow を受ける/落とすため default-on 化。
     //   FIELD_HALF (= 30) をリテラルで記述 (この行は FIELD_HALF 宣言より前にある)
+    dirLight.castShadow = true;
     dirLight.shadow.mapSize.set(2048, 2048);
     dirLight.shadow.camera.left   = -30;
     dirLight.shadow.camera.right  =  30;
@@ -160,8 +161,13 @@
     dirLight.shadow.camera.bottom = -30;
     dirLight.shadow.camera.near   = 0.5;
     dirLight.shadow.camera.far    = 120;
-    dirLight.shadow.bias = -0.0005;
+    dirLight.shadow.bias       = -0.0005;
+    dirLight.shadow.normalBias = 0.03;    // 曲面の self-shadow アクネ抑制
+    dirLight.shadow.radius     = 6;       // PCF ソフト半径 (点滅を smoothstep で緩和)
     scene.add(dirLight);
+    // renderer 側も shadow map 有効化 (PCFSoftShadowMap で境界ソフト)
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
 
     // ========== 床: 60m × 60m at origin (白) ==========
     const FIELD_SIZE = 60;
@@ -1147,15 +1153,16 @@
           let subIdx = 0;
           fbx.traverse((child) => {
             if (!child || !child.isMesh) return;
-            // 配色: 純白固定。影の点滅を避けるため lighting から独立 (MeshBasicMaterial)。
-            // MeshBasicMaterial は AmbientLight / DirectionalLight / shadow の影響を一切受けないため、
-            // カメラ移動時の shadow map ちらつきが発生しない。
-            const monoMat = new THREE.MeshBasicMaterial({
-              color: 0xffffff, side: THREE.DoubleSide,
+            // 配色: モノクロ (灰色)。環境光 (AmbientLight 0.85) + DirectionalLight (0.35) に照らされて、
+            // 面の向きに応じて自然なグラデーションが出る。
+            // MeshLambertMaterial を採用: Lambertian 拡散のみ (highlight なし)、シェーダー軽量、
+            //   shadow (shadow map) 対応、PCFSoftShadowMap + normalBias/radius 設定で点滅を抑制。
+            const monoMat = new THREE.MeshLambertMaterial({
+              color: 0x888888, side: THREE.DoubleSide,
             });
             child.material = monoMat;
-            child.castShadow = false;
-            child.receiveShadow = false;
+            child.castShadow = true;
+            child.receiveShadow = true;
             // 一意名を付けて paintable 登録
             const nm = 'tree-mesh-' + subIdx; subIdx++;
             child.name = nm;
