@@ -37,6 +37,22 @@
     body.ar-mode #stage        { background: transparent !important; }
     body.ar-mode #stage canvas { background: transparent !important; }
 
+    /* 効果2: スマホ UI モード (camera role のみ)。
+       3D canvas を隠し、1cm×1cm グリッド背景のみを表示 (スプレーボタンは残す)。 */
+    #grid-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background-color: #f8f8f8;
+      background-image:
+        repeating-linear-gradient(0deg,  rgba(0,0,0,0.22) 0 1px, transparent 1px 1cm),
+        repeating-linear-gradient(90deg, rgba(0,0,0,0.22) 0 1px, transparent 1px 1cm);
+      z-index: 2;
+      pointer-events: none;
+    }
+    body.camera-ui-mode #grid-overlay { display: block; }
+    body.camera-ui-mode #stage canvas { visibility: hidden; }
+    body.camera-ui-mode #bg-video     { display: none !important; }
+
     /* ステータスバー — セーフエリア分だけ内側へオフセット (ノッチ/Dynamic Island 避け) */
     #status {
       position: fixed;
@@ -298,6 +314,8 @@
 <!-- AR モード用 背面カメラ映像 (camera role, getUserMedia 成功時のみ表示) -->
 <video id="bg-video" autoplay playsinline muted></video>
 <div id="stage"></div>
+<!-- 効果2: スマホ UI モード背景 (1cm×1cm グリッド、camera role のみ表示) -->
+<div id="grid-overlay"></div>
 
 <!-- スマホ用入室オーバーレイ (camera role のみ表示) -->
 <div id="enter-overlay">

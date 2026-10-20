@@ -4059,9 +4059,17 @@
         }
         // 効果1: モード派生オブジェクト発生 (wood/river/sky) のマスタースイッチ
         //        OFF の間はスプレー塗装のみ、ネット経路に modeSpawn/modeOverwrite 系は乗らない
-        // 効果2: 未割当 (旧 phone pointer 機能は廃止)
+        // 効果2: スマホ UI モード (camera role のみ)。ON の間 3D シーン描画をスキップし、
+        //        1cm×1cm グリッド背景 + スプレーボタンのみを表示。
+        //        塗装状況や他オブジェクトは camera 視点から非表示。
         // 効果3: 廃止 (旧 Fog 原点固定)
         // 効果4: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
+        if (n === 2) {
+          // body class を切替 (CSS 側で canvas 非表示 + grid overlay 表示)
+          // camera role 以外では見た目に差は出ないが、フラグは全端末で共通化しておく
+          document.body.classList.toggle('camera-ui-mode', on && ROLE === 'camera');
+          log('スマホ UI モード (効果2) ' + (on ? 'ON' : 'OFF') + ' (role=' + ROLE + ')', 'ok');
+        }
         if (n === 4) {
           renderer.shadowMap.enabled = on;
           renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -6081,6 +6089,12 @@
         }
       }
 
+      // ========== 効果2: スマホ UI モード (camera role のみ) → シーン描画スキップ ==========
+      //   grid overlay (CSS) のみ表示、スプレーのローカル塗装や他オブジェクトの反映は行わない。
+      //   スプレーボタンや pose 送信は通常通り動作 (ロジックは tick 内の他部分で続行)。
+      if (ROLE === 'camera' && window.__effect && window.__effect[2]) {
+        return;
+      }
       // ========== render: myDisplay.offaxis で分岐 ==========
       // プレートタグ付きオブザーバー: off-axis トグルに関わらず plate を display として恒常採用
       //   (space3 の Canvas 同期と同等思想: タグが設定された瞬間に plate が自身の "表示 canvas" に昇格)
