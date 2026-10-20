@@ -595,7 +595,7 @@
 
     // ===== スプレー基礎パラメータ =====
     const SPRAY_HOLD_MS = 4000;   // 長押し発射までの猶予 (ms)
-    const SPRAY_EMIT_HZ = 20;     // 送信頻度 (ラグ対策で 40Hz→20Hz)
+    const SPRAY_EMIT_HZ = 40;     // 送信頻度 (731c679 実動作確認済み値)
     // raycast 対象リスト (_makePaintable 経由で壁/床/天井が push される)
     const _sprayables = [];
 
@@ -1988,10 +1988,10 @@
         nLocal.transformDirection(target.matrixWorld);
         wnx = nLocal.x; wny = nLocal.y; wnz = nLocal.z;
       }
-      // 送信: payload に world 座標 (wx,wy,wz) + 法線 (nx,ny,nz) + world radius (wr) を同梱。
-      //       これにより受信側が同じ入力から独立に _pushPaintHit を走らせられる (分散生成)。
+      // 送信: 731c679 の即時 emit パターンを復元 (バッチ化を廃止)。
+      //       mode spawn 分散生成用に world 座標 (wx,wy,wz) + 法線 (nx,ny,nz) + world radius (wr) を同梱。
       if (socket && socket.connected) {
-        _sprayOutBuf.push({
+        socket.emit('spray2', {
           tgt: tgtName,
           u: +uv.x.toFixed(3),
           v: +uv.y.toFixed(3),
@@ -3978,37 +3978,42 @@
         }
       });
 
-      // space2 専用スプレー受信: 単発 _applyRemoteSprayImmediate は廃止
-      //   (P4 で全パスを _applyPaintBatch 経由に統一、インスタンス 1-draw で描画)
-      // 分散生成: 受信した各 spray は塗装 (paintRT) + モード派生オブジェクト発生 (_pushPaintHit)
-      // を同時に実行。payload に world 座標 (wx/wy/wz) + 法線 (nx/ny/nz) + world radius (wr)
-      // が含まれるので、送信元と同じ入力で独立に再現できる。
-      function _applyRemoteSprayWithMode(d) {
-        if (!d) return;
-        _scheduleApplyRemote(d);
-        if (typeof d.wx === 'number' && typeof d.nx === 'number') {
+      // space2 専用スプレー受信: 731c679 の即処理パターンを復元 (rAF coalesce を廃止)。
+      //   塗装 (paintRT) は _applyPaintTo を直接呼出し。mode spawn 分散生成も同時に実行。
+      //   payload に world 座標 (wx/wy/wz) + 法線 (nx/ny/nz) + world radius (wr) が含まれるので
+      //   送信元と同じ入力で各クライアントが独立に _pushPaintHit を走らせられる。
+      function _applyRemoteSpray(data) {
+        if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
+        if (!data.tgt) return;
+        const mesh = _paintables.get(data.tgt);
+        if (!mesh) return;
+        const rt = mesh.userData.paintRT; if (!rt) return;
+        const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
+        const uvR = (typeof data.r === 'number') ? data.r : 0.01;
+        _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
+        // mode spawn 分散生成 (payload に world 座標があれば、効果1 ゲートは _pushPaintHit 内部で判定)
+        if (typeof data.wx === 'number' && typeof data.nx === 'number') {
           _pushPaintHit(
-            { x: d.wx, y: d.wy, z: d.wz },
-            { x: d.nx, y: d.ny, z: d.nz },
-            (typeof d.wr === 'number') ? d.wr : 0.1,
-            d.c
+            { x: data.wx, y: data.wy, z: data.wz },
+            { x: data.nx, y: data.ny, z: data.nz },
+            (typeof data.wr === 'number') ? data.wr : 0.1,
+            data.c
           );
         }
       }
-      // 単発 spray2 (後方互換) → 合流キュー + ローカル分散生成
-      socket.on('spray2', _applyRemoteSprayWithMode);
-      // 新規: バッチ (送信側 100ms 窓で集約されたもの)
+      // 単発 spray2 ─ 731c679 と同じ即処理
+      socket.on('spray2', _applyRemoteSpray);
+      // 旧 spray2Batch (後方互換、他端末がバッチ送信してきた場合用) ─ 即処理ループ
       socket.on('spray2Batch', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _applyRemoteSprayWithMode(d);
+        for (const d of list) _applyRemoteSpray(d);
       });
-      // 履歴 (初回接続時の既存塗り再現): 塗装のみ再現 (mode spawn は再生成しない — 大量 burst 回避)
-      //   既存塗装位置に対して mode spawn を再生成するには _pushPaintHit を呼べば良いが、
-      //   接続直後に 2万件の履歴から 491件のクラスタ検出が走ると初期ロード負荷が大きい。
-      //   現段階では「新規接続時は塗装のみ復元、mode spawn は接続後の操作で再発火」とする。
+      // 履歴 (初回接続時の既存塗り再現): 731c679 と同じく _applyRemoteSpray に直接流す。
+      //   新規接続時に 2万件の履歴から mode spawn が同時再生成されると初期負荷が大きいため、
+      //   履歴 payload には world 座標が含まれない前提とし、_pushPaintHit は実質スキップされる。
       socket.on('sprayBatch2', (list) => {
         if (!Array.isArray(list)) return;
-        for (const d of list) _scheduleApplyRemote(d);
+        for (const d of list) _applyRemoteSpray(d);
       });
       // space2 専用アトラスリセット
       socket.on('resetAtlas2', () => {
@@ -4125,7 +4130,8 @@
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
     updaters.push(_sprayTick);
-    updaters.push(_sprayFlushTick);
+    // _sprayFlushTick は廃止 (バッチ送信から 731c679 の即時 emit に復帰)
+    // 関数定義自体は dead code として残置 (ユーザー許可待ち)
     updaters.push(_modeBurstTick);
     updaters.push(_modeAnimTick);
     updaters.push(_modeCullTick);
