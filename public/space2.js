@@ -1387,11 +1387,12 @@
       // ───────── Cone (懐中電灯本体) ─────────
       //   ConeGeometry(radius=1, height=1, 32, 1, openEnded=true) ─ 側面のみ
       //   デフォルト姿勢: apex 頂点が +Y、base 円が -Y
+      //   AdditiveBlending: 前後面の重なりが「光の加算」として自然に見える (不透明重畳による球体錯視を回避)
       const coneGeom = new THREE.ConeGeometry(1, 1, 32, 1, true);
       const coneMat = new THREE.ShaderMaterial({
         uniforms: {
           uColor:   { value: new THREE.Color(0xffffff) },
-          uOpacity: { value: 0.55 },
+          uIntensity: { value: 0.55 },
         },
         vertexShader: `
           varying float vT;
@@ -1403,17 +1404,19 @@
         `,
         fragmentShader: `
           uniform vec3  uColor;
-          uniform float uOpacity;
+          uniform float uIntensity;
           varying float vT;
           void main() {
-            // base で濃く、apex で透明 (pow で裾のフェードを滑らかに)
-            float a = pow(vT, 1.6) * uOpacity;
-            gl_FragColor = vec4(uColor, a);
+            // base で濃く、apex で消える (pow で裾を滑らかに)
+            float a = pow(vT, 1.6) * uIntensity;
+            // Additive blend 前提: RGB を alpha で pre-scale (加算強度を alpha と対応させる)
+            gl_FragColor = vec4(uColor * a, a);
           }
         `,
         transparent: true,
         depthWrite: false,
         side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
       });
       const cone = new THREE.Mesh(coneGeom, coneMat);
       cone.renderOrder = 20;
@@ -1484,19 +1487,32 @@
         } else {
           _aimTmpN.copy(_aimTmpFwd).multiplyScalar(-1);
         }
-        // ───── Cone 配置 (apex=camera, base=hit) ─────
+        // ───── Cone 配置 (apex=camera, base=hit 直前) ─────
         //   方向: apex → base = hit - apex
         //   ConeGeometry は +Y がデフォルト apex なので、+Y を "base→apex 方向" (= apex - hit) に向ける
-        _aimTmpDir.subVectors(_aimTmpApex, hit.point);
+        //   base を壁面から 2cm 手前に短縮 → 壁面と交差して半円で消える現象を回避
+        const CONE_BACK_OFFSET = 0.02;  // 衝突面から手前へ 2cm 退避
+        const _hitAdjX = hit.point.x + _aimTmpN.x * CONE_BACK_OFFSET;
+        const _hitAdjY = hit.point.y + _aimTmpN.y * CONE_BACK_OFFSET;
+        const _hitAdjZ = hit.point.z + _aimTmpN.z * CONE_BACK_OFFSET;
+        _aimTmpDir.set(
+          _aimTmpApex.x - _hitAdjX,
+          _aimTmpApex.y - _hitAdjY,
+          _aimTmpApex.z - _hitAdjZ
+        );
         const L = _aimTmpDir.length();
         if (L < 1e-4) { rec.grp.visible = false; continue; }
         _aimTmpDir.multiplyScalar(1 / L);
         _aimTmpQ.setFromUnitVectors(_aimAxisY, _aimTmpDir);
-        _aimTmpMid.addVectors(_aimTmpApex, hit.point).multiplyScalar(0.5);
+        _aimTmpMid.set(
+          (_aimTmpApex.x + _hitAdjX) * 0.5,
+          (_aimTmpApex.y + _hitAdjY) * 0.5,
+          (_aimTmpApex.z + _hitAdjZ) * 0.5
+        );
         const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
         rec.cone.position.copy(_aimTmpMid);
         rec.cone.quaternion.copy(_aimTmpQ);
-        rec.cone.scale.set(worldR, L, worldR);   // X,Z 半径 = worldR、Y 高さ = 距離
+        rec.cone.scale.set(worldR, L, worldR);   // X,Z 半径 = worldR、Y 高さ = 距離 (短縮済み)
         // ───── Ring 配置 (hit 点、面の法線に沿わせる) ─────
         _aimTmpQ.setFromUnitVectors(_aimAxisZ, _aimTmpN);
         rec.ring.position.copy(hit.point).addScaledVector(_aimTmpN, 0.002);
