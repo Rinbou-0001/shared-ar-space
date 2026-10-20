@@ -3989,11 +3989,6 @@
       //   塗装 (paintRT) は _applyPaintTo を直接呼出し。mode spawn 分散生成も同時に実行。
       //   payload に world 座標 (wx/wy/wz) + 法線 (nx/ny/nz) + world radius (wr) が含まれるので
       //   送信元と同じ入力で各クライアントが独立に _pushPaintHit を走らせられる。
-      // ============ 診断ログ (payload world 座標の有無を測る) ============
-      //   受信時に 1秒ごとに hit 統計を出力。
-      //   worldHits=0 かつ hits>0 なら、サーバー側 _normalizeSpray2 で world 座標が
-      //   broadcast 用 rec から脱落していることが確定する。
-      let _dbgRecvLastT = 0, _dbgRecvHits = 0, _dbgRecvWorldHits = 0, _dbgRecvEffect1 = 0;
       function _applyRemoteSpray(data) {
         if (!data || typeof data.u !== 'number' || typeof data.v !== 'number') return;
         if (!data.tgt) return;
@@ -4003,23 +3998,8 @@
         const color = (typeof data.c === 'string') ? ('#' + data.c) : '#ffffff';
         const uvR = (typeof data.r === 'number') ? data.r : 0.01;
         _applyPaintTo(rt, data.u, data.v, uvR, color, data.s);
-        // ─── 診断 ───
-        _dbgRecvHits++;
-        const hasWorld = (typeof data.wx === 'number' && typeof data.nx === 'number');
-        if (hasWorld) _dbgRecvWorldHits++;
-        if (window.__effect && window.__effect[1]) _dbgRecvEffect1++;
-        const nowT = performance.now();
-        if (nowT - _dbgRecvLastT > 1000) {
-          _dbgRecvLastT = nowT;
-          log('[recv dbg] hits=' + _dbgRecvHits
-              + ' worldHits=' + _dbgRecvWorldHits
-              + ' effect1=' + _dbgRecvEffect1
-              + ' sample={wx:' + (data.wx === undefined ? 'undef' : data.wx)
-              + ', nx:' + (data.nx === undefined ? 'undef' : data.nx) + '}'
-              , 'ok');
-        }
         // mode spawn 分散生成 (payload に world 座標があれば、効果1 ゲートは _pushPaintHit 内部で判定)
-        if (hasWorld) {
+        if (typeof data.wx === 'number' && typeof data.nx === 'number') {
           _pushPaintHit(
             { x: data.wx, y: data.wy, z: data.wz },
             { x: data.nx, y: data.ny, z: data.nz },
