@@ -1284,6 +1284,56 @@
     }
     window.__getMyPlateGrp = _getMyPlateGrp;
 
+    // ===== 面スナップパネル (top / left / right) =====
+    //   原点から外側に向く 15cm×15cm のワイヤーフレーム正方形パネル。
+    //   タグ付与された observer は、自身の視錐台 base 中心がこの正方形中心にスナップする。
+    //   outer 方向 = パネル local -Z (plate と同じ流儀) → eye はパネルの -Z 側に配置。
+    const FACE_PANEL_SIZE = 0.15;
+    const FACE_APEX_OFFSET = 0.15;    // パネル中心から eye までの距離 (m)
+    const FACE_PANELS_DEF = {
+      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), euler: new THREE.Euler(0,            0,            0, 'XYZ') },
+      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   euler: new THREE.Euler(-Math.PI / 2, 0,            0, 'XYZ') },
+      right: { pos: new THREE.Vector3(0,   1.5,  0.5), euler: new THREE.Euler(0,            Math.PI,      0, 'XYZ') },
+    };
+    const _facePanels = {};
+    const _facePanelEdgeMat = new THREE.LineBasicMaterial({ color: 0xeaeded });
+    (function _buildFacePanels() {
+      for (const [tag, def] of Object.entries(FACE_PANELS_DEF)) {
+        const grp = new THREE.Group();
+        grp.position.copy(def.pos);
+        grp.rotation.copy(def.euler);
+        grp.name = 'face-' + tag;
+        // 不可視の面 mesh (スナップ基準として位置計算に使う)
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(FACE_PANEL_SIZE, FACE_PANEL_SIZE),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, visible: false })
+        );
+        mesh.name = 'face-mesh-' + tag;
+        grp.add(mesh);
+        // ワイヤーフレーム枠線
+        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), _facePanelEdgeMat);
+        edges.name = 'face-edges-' + tag;
+        grp.add(edges);
+        // メタデータ
+        grp.userData.faceTag = tag;
+        grp.userData.faceMesh = mesh;
+        scene.add(grp);
+        _facePanels[tag] = grp;
+      }
+    })();
+    window.__facePanels = _facePanels;
+    // 自身のタグに対応する面パネルを返す
+    function _getMyFacePanel() {
+      if (ROLE !== 'observer') return null;
+      const self = (myId != null) ? avatars.get(myId) : null;
+      if (!self || !self.customTags) return null;
+      for (const tag of ['top', 'left', 'right']) {
+        if (self.customTags.indexOf(tag) >= 0) return _facePanels[tag];
+      }
+      return null;
+    }
+    window.__getMyFacePanel = _getMyFacePanel;
+
     // ===== ミニチュア塗り Box (20cm): 空間の塗り状況をライブ反映 =====
     //   位置 (1, 1, 0) 固定、各面に対応する壁/床/天井の paintRT.texture を map。
     //   塗っていない所 (alpha=0) は alphaTest で透過。
@@ -6676,7 +6726,12 @@
       if (ROLE === 'observer' && typeof window.__getMyPlateGrp === 'function') {
         _plateGrpForDisplay = window.__getMyPlateGrp();
       }
-      const _useOffAxis = (_plateGrpForDisplay != null) || myDisplay.offaxis;
+      // 面スナップパネル (top/left/right) ─ plate よりは優先度低、plate が無い場合に採用
+      let _faceGrpForDisplay = null;
+      if (!_plateGrpForDisplay && ROLE === 'observer' && typeof window.__getMyFacePanel === 'function') {
+        _faceGrpForDisplay = window.__getMyFacePanel();
+      }
+      const _useOffAxis = (_plateGrpForDisplay != null) || (_faceGrpForDisplay != null) || myDisplay.offaxis;
       if (_useOffAxis) {
         // ユーザー由来の姿勢を退避
         _oaSavePos.copy(camera.position);
@@ -6702,6 +6757,25 @@
           _oaSavePos.copy(camera.position);
           _oaSaveQuat.copy(camera.quaternion);
           _usedPlate = true;
+        }
+        // 面スナップパネル (top/left/right): plate が無く tag が付いていれば採用
+        if (!_usedPlate && _faceGrpForDisplay && _faceGrpForDisplay.userData && _faceGrpForDisplay.userData.faceMesh) {
+          const fMesh = _faceGrpForDisplay.userData.faceMesh;
+          fMesh.updateMatrixWorld(true);
+          const fCenter = new THREE.Vector3().setFromMatrixPosition(fMesh.matrixWorld);
+          const fQuat   = new THREE.Quaternion().setFromRotationMatrix(fMesh.matrixWorld);
+          // outer 方向 = パネル local -Z を world へ (plate と同じ流儀)
+          const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(fQuat).normalize();
+          _oaDispCenter.copy(fCenter);
+          _oaDispQuat.copy(fQuat);
+          _oaEye.copy(fCenter).addScaledVector(outer, FACE_APEX_OFFSET);
+          _plateW = FACE_PANEL_SIZE;
+          _plateH = FACE_PANEL_SIZE;
+          camera.position.copy(_oaEye);
+          camera.lookAt(fCenter);
+          _oaSavePos.copy(camera.position);
+          _oaSaveQuat.copy(camera.quaternion);
+          _usedPlate = true;   // 以降の fallback 分岐を skip
         }
         if (!_usedPlate) {
           if (ROLE === 'camera') {
