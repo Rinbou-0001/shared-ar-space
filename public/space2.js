@@ -1593,7 +1593,7 @@
       //   X=0 中央、Y は画面を缶でいっぱいに (= 缶の垂直中心を画面中央 y=2.5 に揃える)
       //   缶モデル垂直中心 local y ≈ 1.9 (base 0.145 〜 top 3.68 の中間)
       //   scale 3x 時: target.y = 2.5 - 1.9*3 = -3.2 → 缶が画面上下にはみ出し、下部ギャップ消滅
-      const CAN_ZOOM = 3.0;
+      const CAN_ZOOM = 3.5;
       const CAN_MODEL_CENTER_Y = 1.9;
       const SCREEN_MID_Y = 2.5;
       const targetPos = can.position.clone();
@@ -1612,8 +1612,8 @@
           if (sh && sh.material) sh.material.opacity = (1 - t) * 0.8;
         },
         () => { if (sh) sh.visible = false; },
-        () => { _ui2OpenLabel(); },   // progressCb at 80%
-        0.8                            // progressAt = 80%
+        () => { _ui2OpenLabel(); },   // progressCb at 70%
+        0.7                            // progressAt = 70%
       );
     }
     function _ui2OpenLabel() {
@@ -1751,8 +1751,9 @@
           }
           return;
         }
-        // ─── 上スワイプ (dY < -60px かつ |dY| > |dX|): label mode の "戻る" ───
-        if (dY < -60 && Math.abs(dY) > Math.abs(dX)) {
+        // ─── 縦スワイプ (|dY| > 60px かつ |dY| > |dX|): label mode の "戻る"
+        //      上→下 / 下→上 どちら方向でも発火
+        if (Math.abs(dY) > 60 && Math.abs(dY) > Math.abs(dX)) {
           _ui2SliderVelocity = 0;
           if (_ui2Mode === 'label') _ui2CloseLabelAndReturn();
           return;
