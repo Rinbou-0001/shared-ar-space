@@ -49,9 +49,12 @@
       z-index: 2;
       pointer-events: none;
     }
-    /* 効果2 ON (camera-ui-mode): 3D canvas で UI シーン (スプレー缶) を描画するため canvas を表示、
-       旧 grid overlay は使わない。bg-video (AR 映像) も隠す。 */
-    body.camera-ui-mode #grid-overlay { display: none; }
+    /* 効果2 ON (camera-ui-mode): 3D canvas で UI シーン (スプレー缶) を描画。
+       grid overlay をカンバスの下 (z-index 0) に表示し、canvas を透過にして背景として重ねる。
+       bg-video (AR 映像) は隠す。 */
+    body.camera-ui-mode #grid-overlay { display: block; z-index: 0; }
+    body.camera-ui-mode #stage        { background: transparent !important; }
+    body.camera-ui-mode #stage canvas { background: transparent !important; }
     body.camera-ui-mode #bg-video     { display: none !important; }
 
     /* ステータスバー — セーフエリア分だけ内側へオフセット (ノッチ/Dynamic Island 避け) */

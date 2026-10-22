@@ -1372,7 +1372,8 @@
       if (_ui2Scene) return;
       if (ROLE !== 'camera') return;
       _ui2Scene = new THREE.Scene();
-      _ui2Scene.background = new THREE.Color(0xf4f4f4);
+      // background は null → canvas は透過、下の grid overlay (CSS) が背景として見える
+      _ui2Scene.background = null;
       _ui2Camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 100);
       _ui2Camera.position.set(3.5, 2.8, 6);
       _ui2Camera.lookAt(0, 1.65, 0);
@@ -1402,7 +1403,8 @@
       }
       function _makeCan(colorHex, xOffset) {
         const can = new THREE.Group();
-        const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.32 });
+        // ラベル (本体) は白で統一 ─ 選択色は缶の userData に保持、本体色自体は塗装色と連動しない
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.35, roughness: 0.32 });
         _addCyl(can, 0.5, 0.5, 2.4, bodyMat, 1.35);
         _addCyl(can, 0.25, 0.5, 0.32, metalMat, 2.71);
         _addCyl(can, 0.19, 0.25, 0.14, metalMat, 2.94);
@@ -1424,10 +1426,9 @@
         _ui2Scene.add(can);
         _ui2Cans.push(can);
       }
-      // 3 色の缶 (ランダム割当 palette と一致)
-      const palette = ['#029ecc', '#ffce18', '#df2c1e'];
-      palette.forEach((c, i) => _makeCan(c, (i - 1) * 1.5));
-      log('ui2 scene ready (3 spray cans)', 'ok');
+      // 現段階: 1 本のみ中央に配置 (後で複数色に拡張予定)
+      _makeCan('#029ecc', 0);
+      log('ui2 scene ready (1 spray can)', 'ok');
     }
     function _ui2Resize() {
       if (!_ui2Camera) return;
