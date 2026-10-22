@@ -1161,8 +1161,9 @@
               color: 0x888888, side: THREE.DoubleSide,
             });
             child.material = monoMat;
-            child.castShadow = true;
-            child.receiveShadow = true;
+            // 影の点滅対策: tree は影を落とさず、受けもしない (媒体依存のちらつきを根本除去)
+            child.castShadow = false;
+            child.receiveShadow = false;
             // 一意名を付けて paintable 登録
             const nm = 'tree-mesh-' + subIdx; subIdx++;
             child.name = nm;
@@ -1290,18 +1291,25 @@
     //   outer 方向 = パネル local -Z (plate と同じ流儀) → eye はパネルの -Z 側に配置。
     const FACE_PANEL_SIZE = 0.15;
     const FACE_APEX_OFFSET = 0.15;    // パネル中心から eye までの距離 (m)
+    //   回転指定 (ユーザー仕様): (rx, ry, rz) をラジアンに変換
+    //     left  (0,   0, 0) → identity
+    //     top   (-90, 0, 0) → X 軸で -π/2
+    //     right (180, 0, 0) → X 軸で π   (旧実装の Y 軸 π は誤り、修正)
     const FACE_PANELS_DEF = {
-      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), euler: new THREE.Euler(0,            0,            0, 'XYZ') },
-      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   euler: new THREE.Euler(-Math.PI / 2, 0,            0, 'XYZ') },
-      right: { pos: new THREE.Vector3(0,   1.5,  0.5), euler: new THREE.Euler(0,            Math.PI,      0, 'XYZ') },
+      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), euler: new THREE.Euler(0,            0, 0, 'XYZ') },
+      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   euler: new THREE.Euler(-Math.PI / 2, 0, 0, 'XYZ') },
+      right: { pos: new THREE.Vector3(0,   1.5,  0.5), euler: new THREE.Euler( Math.PI,     0, 0, 'XYZ') },
     };
     const _facePanels = {};
-    const _facePanelEdgeMat = new THREE.LineBasicMaterial({ color: 0xeaeded });
+    // ワイヤーフレーム枠線色: マゼンタ
+    const _facePanelEdgeMat = new THREE.LineBasicMaterial({ color: 0xff00ff });
     (function _buildFacePanels() {
       for (const [tag, def] of Object.entries(FACE_PANELS_DEF)) {
         const grp = new THREE.Group();
         grp.position.copy(def.pos);
-        grp.rotation.copy(def.euler);
+        // Euler を explicit set (copy だと order が引き継がれない場合があるため)
+        grp.rotation.set(def.euler.x, def.euler.y, def.euler.z, 'XYZ');
+        grp.updateMatrixWorld(true);   // 子生成前に matrix を同期
         grp.name = 'face-' + tag;
         // 不可視の面 mesh (スナップ基準として位置計算に使う)
         const mesh = new THREE.Mesh(
@@ -4411,10 +4419,11 @@
         // plate1/plate2 タグ変更 → plate 可視化を更新
         if (data.tag === 'plate1' || data.tag === 'plate2') {
           if (typeof window.__syncPlateVisibility === 'function') window.__syncPlateVisibility();
-          // 自分自身のオブザーバーパネル UI (タグボタン) を更新
-          if (data.id === myId && typeof window.__syncObsPlateButtons === 'function') {
-            window.__syncObsPlateButtons();
-          }
+        }
+        // 自分自身のオブザーバーパネル UI (plate/面タグボタン、Off-Axis トグル) を更新
+        if (data.id === myId) {
+          if (typeof window.__syncObsPlateButtons === 'function') window.__syncObsPlateButtons();
+          if (typeof window.syncObsOaBtn === 'function') window.syncObsOaBtn();
         }
         log('avatarTag: ' + data.id.substring(0,6) + ' ' + data.tag + ' = ' + (data.on ? 'ON' : 'OFF'), 'ok');
       });
@@ -5577,9 +5586,21 @@
       const obsOaBtn = _by('obs-offaxis-toggle');
       window.syncObsOaBtn = function() {
         if (!obsOaBtn) return;
-        obsOaBtn.textContent = myDisplay.offaxis ? 'ON' : 'OFF';
-        obsOaBtn.style.background = myDisplay.offaxis ? '#06b6d4' : '#475569';
-        obsOaBtn.style.color = myDisplay.offaxis ? '#083344' : 'white';
+        // 面タグ or plate タグが付いている場合は実質 off-axis が強制 ON のため、UI も ON 表示
+        let forced = false;
+        if (ROLE === 'observer' && myId) {
+          const self = avatars.get(myId);
+          const tags = (self && self.customTags) ? self.customTags : [];
+          if (tags.indexOf('plate1') >= 0 || tags.indexOf('plate2') >= 0 ||
+              tags.indexOf('top')    >= 0 || tags.indexOf('left')   >= 0 ||
+              tags.indexOf('right')  >= 0) {
+            forced = true;
+          }
+        }
+        const on = myDisplay.offaxis || forced;
+        obsOaBtn.textContent = on ? 'ON' : 'OFF';
+        obsOaBtn.style.background = on ? '#06b6d4' : '#475569';
+        obsOaBtn.style.color = on ? '#083344' : 'white';
       };
       syncObsOaBtn();
       _bind('obs-offaxis-toggle', 'click', () => {
