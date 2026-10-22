@@ -1383,6 +1383,9 @@
       { mode: 'river', labelColor: '#003f7f', spawnColor: '#008cdd' },
     ];
     let _ui2SliderOffsetX = 0;     // スライダーの横オフセット
+    let _ui2SliderVelocity = 0;    // 慣性 (world unit / sec)
+    const UI2_SLIDER_FRICTION = 3.0;  // 慣性減衰率 (指数: 大きいほど急停止)
+    const UI2_SLIDER_MIN_V    = 0.02; // この速度未満で停止
     // ───────── 状態機械 ─────────
     //   'browse' : 一覧表示 (浮遊 + スライダー) / tap で選択へ
     //   'focus'  : 選択缶が中央へ移動 + 拡大中 or 完了状態
@@ -1390,8 +1393,6 @@
     let _ui2Mode = 'browse';
     let _ui2SelectedCan = null;
     let _ui2SelectedIdx = -1;
-    // 現在進行中のトランジション
-    let _ui2Transition = null;
     // 缶の "元の transform" を復帰用に保存
     let _ui2CanStart = null;
     function _ensureUi2Scene() {
@@ -1461,16 +1462,18 @@
         _ui2Cans.push(can);
       }
       // 3 本の缶を slider に配置 (local X = -s, 0, +s)
-      //   本体は白、userData に mode / labelColor / spawnColor を保持
+      //   本体の色 = 割り当てた labelColor (草の緑 / 星の藍 / 川の群青)
       UI2_CANS_DEF.forEach((def, i) => {
-        _makeCan('#ffffff', (i - 1) * UI2_CAN_SPACING);
+        _makeCan(def.labelColor, (i - 1) * UI2_CAN_SPACING);
         const can = _ui2Cans[i];
         can.userData.mode = def.mode;
         can.userData.labelColor = def.labelColor;
         can.userData.spawnColor = def.spawnColor;
       });
-      // 浮遊アニメの基準値を各缶に保存
+      // 画面下部スライダー全体を 5% 上に (画面高さ 5m の 5% = 0.25m)
+      const UI2_LIFT = 5.0 * 0.05;
       _ui2Cans.forEach((can) => {
+        can.position.y += UI2_LIFT;
         can.userData.baseY = can.position.y;
         can.userData.baseRotZ = can.rotation.z;
       });
@@ -1520,22 +1523,37 @@
       log('ui2 scene ready (3 cans slider + label)', 'ok');
     }
 
-    // ───────── トランジション共通 (easeInOutCubic 相当の smoothstep) ─────────
-    function _ui2StartTransition(duration, updateFn, doneFn) {
-      _ui2Transition = { duration, elapsed: 0, update: updateFn, done: doneFn };
+    // ───────── トランジション共通 (easeInOutCubic 相当の smoothstep、並列実行可) ─────────
+    //   progressCb/progressAt: 進捗が progressAt (0..1) に到達した時に 1 回だけ発火
+    //   (focus の 80% で label 展開を overlap 開始する用途)
+    const _ui2Transitions = [];
+    function _ui2StartTransition(duration, updateFn, doneFn, progressCb, progressAt) {
+      _ui2Transitions.push({
+        duration, elapsed: 0, update: updateFn, done: doneFn,
+        progressCb: progressCb || null, progressAt: progressAt || 0, progressFired: false,
+      });
     }
     function _ui2UpdateTransition(dt) {
-      if (!_ui2Transition) return;
-      _ui2Transition.elapsed += dt;
-      const raw = Math.min(_ui2Transition.elapsed / _ui2Transition.duration, 1);
-      const t = raw * raw * (3 - 2 * raw);  // smoothstep
-      _ui2Transition.update(t);
-      if (raw >= 1) {
-        const done = _ui2Transition.done;
-        _ui2Transition = null;
-        if (done) done();
+      if (_ui2Transitions.length === 0) return;
+      for (let i = _ui2Transitions.length - 1; i >= 0; i--) {
+        const tr = _ui2Transitions[i];
+        tr.elapsed += dt;
+        const raw = Math.min(tr.elapsed / tr.duration, 1);
+        const t = raw * raw * (3 - 2 * raw);
+        tr.update(t);
+        if (tr.progressCb && !tr.progressFired && raw >= tr.progressAt) {
+          tr.progressFired = true;
+          tr.progressCb();
+        }
+        if (raw >= 1) {
+          const done = tr.done;
+          _ui2Transitions.splice(i, 1);
+          if (done) done();
+        }
       }
     }
+    // ユーザー入力ガード: 進行中トランジションがあれば block
+    function _ui2TransitionBusy() { return _ui2Transitions.length > 0; }
 
     // ───────── ラベル全画面サイズ算出 ─────────
     function _ui2LabelFullSize() {
@@ -1556,7 +1574,7 @@
 
     // ───────── 選択アクション: 缶中央移動 + 拡大 → ラベル展開まで自動連鎖 ─────────
     function _ui2SelectCan(idx) {
-      if (_ui2Mode !== 'browse' || _ui2Transition) return;
+      if (_ui2Mode !== 'browse' || _ui2TransitionBusy()) return;
       const can = _ui2Cans[idx];
       if (!can) return;
       _ui2SelectedCan = can;
@@ -1575,10 +1593,11 @@
       const targetPos = can.position.clone();
       targetPos.x = 0;
       targetPos.y = can.userData.baseY;
-      const targetScale = can.scale.clone().multiplyScalar(1.8);
+      const targetScale = can.scale.clone().multiplyScalar(1.5);
       const startPos = _ui2CanStart.pos.clone();
       const startScale = _ui2CanStart.scale.clone();
       // ④ 対応する shadow を同期的にフェードアウト
+      //    拡大アニメ 80% の時点で label 展開を発火 (overlap)、終了時に shadow を非表示
       const sh = _ui2Shadows[idx];
       _ui2StartTransition(0.55,
         (t) => {
@@ -1586,10 +1605,9 @@
           can.scale.lerpVectors(startScale, targetScale, t);
           if (sh && sh.material) sh.material.opacity = (1 - t) * 0.8;
         },
-        () => {
-          if (sh) sh.visible = false;
-          _ui2OpenLabel();
-        }
+        () => { if (sh) sh.visible = false; },
+        () => { _ui2OpenLabel(); },   // progressCb at 80%
+        0.8                            // progressAt = 80%
       );
     }
     function _ui2OpenLabel() {
@@ -1609,12 +1627,34 @@
         }
       );
     }
-    // 戻る (swipe up): ラベル縮小 → 缶を元の transform へ復帰 → browse
+    // 戻る (swipe up): ラベル縮小 → 80% で缶復帰を overlap 開始 → browse
     function _ui2CloseLabelAndReturn() {
-      if (_ui2Mode !== 'label' || _ui2Transition) return;
+      if (_ui2Mode !== 'label' || _ui2TransitionBusy()) return;
       if (_ui2Slider) _ui2Slider.visible = true;
       const full = _ui2LabelFullSize();
-      // ① ラベル縮小
+      // 缶復帰用の start/end を事前にキャプチャ
+      const can = _ui2SelectedCan;
+      const sh  = _ui2Shadows[_ui2SelectedIdx];
+      const curPos = can.position.clone();
+      const curScale = can.scale.clone();
+      function _startCanReturn() {
+        if (sh) sh.visible = true;
+        _ui2StartTransition(0.55,
+          (t) => {
+            can.position.lerpVectors(curPos, _ui2CanStart.pos, t);
+            can.scale.lerpVectors(curScale, _ui2CanStart.scale, t);
+            if (sh && sh.material) sh.material.opacity = t * 0.8;
+          },
+          () => {
+            can.rotation.copy(_ui2CanStart.rot);
+            _ui2Mode = 'browse';
+            _ui2SelectedCan = null;
+            _ui2SelectedIdx = -1;
+            _ui2CanStart = null;
+          }
+        );
+      }
+      // ラベル縮小、80% の時点で缶復帰を発火 (overlap)
       _ui2StartTransition(0.45,
         (t) => {
           const k = 1 - t;
@@ -1623,27 +1663,9 @@
         () => {
           _ui2Label.visible = false;
           _ui2Label.scale.set(0, 0, 1);
-          // ② 缶を元に戻す
-          const can = _ui2SelectedCan;
-          const sh  = _ui2Shadows[_ui2SelectedIdx];
-          if (sh) sh.visible = true;
-          const curPos = can.position.clone();
-          const curScale = can.scale.clone();
-          _ui2StartTransition(0.55,
-            (t) => {
-              can.position.lerpVectors(curPos, _ui2CanStart.pos, t);
-              can.scale.lerpVectors(curScale, _ui2CanStart.scale, t);
-              if (sh && sh.material) sh.material.opacity = t * 0.8;
-            },
-            () => {
-              can.rotation.copy(_ui2CanStart.rot);
-              _ui2Mode = 'browse';
-              _ui2SelectedCan = null;
-              _ui2SelectedIdx = -1;
-              _ui2CanStart = null;
-            }
-          );
-        }
+        },
+        _startCanReturn,
+        0.8
       );
     }
 
@@ -1680,22 +1702,30 @@
         }
         return -1;
       }
+      let lastMoveT = 0;   // 慣性算出用: 直近 pointermove の時刻
       el.addEventListener('pointerdown', (ev) => {
         if (!_isCameraUIMode()) return;
-        if (_ui2Transition) return;
+        if (_ui2TransitionBusy()) return;
         dragging = true;
         startX = ev.clientX; startY = ev.clientY;
         startT = performance.now();
         lastX = ev.clientX;
+        lastMoveT = startT;
+        _ui2SliderVelocity = 0;   // 新しいドラッグ開始時に慣性キャンセル
         try { el.setPointerCapture(ev.pointerId); } catch (_) {}
       });
       el.addEventListener('pointermove', (ev) => {
         if (!dragging) return;
-        // slider 横移動は browse mode でのみ
         if (_ui2Mode === 'browse') {
+          const nowT = performance.now();
           const dx = ev.clientX - lastX;
+          const dtMs = Math.max(1, nowT - lastMoveT);
+          const dxWorld = _pxToWorld(dx);
+          _ui2SliderOffsetX += dxWorld;
+          // 瞬間速度 (world unit / sec) を記録 → pointerup で慣性開始に使う
+          _ui2SliderVelocity = dxWorld / (dtMs / 1000);
           lastX = ev.clientX;
-          _ui2SliderOffsetX += _pxToWorld(dx);
+          lastMoveT = nowT;
         }
       });
       function _endDrag(ev) {
@@ -1708,6 +1738,7 @@
         const dist = Math.hypot(dX, dY);
         // ─── tap 判定: 短距離 (<10px) かつ短時間 (<400ms) ───
         if (dist < 10 && dT < 400) {
+          _ui2SliderVelocity = 0;    // タップは慣性を発生させない
           if (_ui2Mode === 'browse') {
             const idx = _ui2FindTappedCan(ev.clientX, ev.clientY);
             if (idx >= 0) _ui2SelectCan(idx);
@@ -1716,9 +1747,11 @@
         }
         // ─── 上スワイプ (dY < -60px かつ |dY| > |dX|): label mode の "戻る" ───
         if (dY < -60 && Math.abs(dY) > Math.abs(dX)) {
+          _ui2SliderVelocity = 0;
           if (_ui2Mode === 'label') _ui2CloseLabelAndReturn();
           return;
         }
+        // 横ドラッグ完了 → _ui2SliderVelocity に最終速度が入っており、anim tick で慣性スライド継続
         // それ以外は browse mode の横ドラッグが incremental で既に適用済み
       }
       el.addEventListener('pointerup', _endDrag);
@@ -1728,10 +1761,16 @@
     // ===== 効果2 UI の毎フレーム更新 (浮遊アニメ + 影連動) =====
     //   既存メインループ内の 'effect2 ON + camera' 分岐で呼ばれる。
     //   clock は tick 側のメインインスタンスを共有参照 (後方で定義されるので window 経由で参照可)。
-    function _ui2AnimUpdate(elapsed) {
+    function _ui2AnimUpdate(elapsed, dt) {
       if (!_ui2Scene) return;
       const n = _ui2Cans.length;
       if (n === 0) return;
+      // ─── スライダー慣性 (指数減衰) ───
+      if (_ui2Mode === 'browse' && Math.abs(_ui2SliderVelocity) > UI2_SLIDER_MIN_V) {
+        _ui2SliderOffsetX += _ui2SliderVelocity * dt;
+        _ui2SliderVelocity *= Math.exp(-UI2_SLIDER_FRICTION * dt);
+        if (Math.abs(_ui2SliderVelocity) < UI2_SLIDER_MIN_V) _ui2SliderVelocity = 0;
+      }
       // スライダーループ用の幅 (3 本の缶を無限に送れるよう modulo)
       const spanW = n * UI2_CAN_SPACING;
       const halfSpan = spanW / 2;
@@ -4578,6 +4617,12 @@
           // body class を切替 (CSS 側で canvas 非表示 + grid overlay 表示)
           // camera role 以外では見た目に差は出ないが、フラグは全端末で共通化しておく
           document.body.classList.toggle('camera-ui-mode', on && ROLE === 'camera');
+          // camera: 効果2 ON と同時に UI 除去 (ui-hidden) を発火
+          //   → status / observer-panel / master-panel / log が非表示、
+          //      body.is-camera.ui-hidden #phone-spray-btn で丸ボタンが大きく表示される
+          if (ROLE === 'camera') {
+            document.body.classList.toggle('ui-hidden', !!on);
+          }
           log('スマホ UI モード (効果2) ' + (on ? 'ON' : 'OFF') + ' (role=' + ROLE + ')', 'ok');
         }
         if (n === 4) {
@@ -6609,7 +6654,7 @@
       if (ROLE === 'camera' && window.__effect && window.__effect[2]) {
         _ensureUi2Scene();
         if (_ui2Scene && _ui2Camera) {
-          _ui2AnimUpdate(clock.getElapsedTime());
+          _ui2AnimUpdate(clock.getElapsedTime(), dt);
           _ui2UpdateTransition(dt);
           _ui2UpdateLabelFollow();
           renderer.render(_ui2Scene, _ui2Camera);
