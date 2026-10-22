@@ -4943,7 +4943,8 @@
     //   ・setupDeviceOrientation で毎フレーム phone 姿勢 → camera.quaternion
     // ============================================================
     function setupCameraEntry() {
-      _bind('enter-btn', 'click', async () => {
+      // 旧 enter-btn 撤廃 → オーバーレイ全体をタップ領域に (click で入室トリガ)
+      _bind('enter-overlay', 'click', async () => {
         // iOS 13+ DeviceOrientation permission
         try {
           if (typeof DeviceOrientationEvent !== 'undefined'

@@ -162,11 +162,12 @@
       opacity: 0.95; max-width: 320px; line-height: 1.5;
       margin: 0 0 20px; color: #333;
     }
-    #enter-overlay button {
-      padding: 16px 36px; font-size: 16px; font-weight: bold;
-      background: #4ade80; color: #0a0a14;
-      border: none; border-radius: 8px; cursor: pointer;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+    /* TAP ラベル: 旧 Start ボタン位置にシアンで表示 */
+    #enter-tap-label {
+      font-size: 24px; font-weight: bold;
+      color: #00bcd4;                 /* シアン */
+      letter-spacing: 0.15em;
+      user-select: none;
     }
 
     /* フルスクリーン時は全 UI 一括非表示 (fs-exit-btn は廃止、Enter キーで解除) */
@@ -342,9 +343,10 @@
 <div id="grid-overlay"></div>
 
 <!-- スマホ用入室オーバーレイ (camera role のみ表示) -->
+<!-- 画面のどこをタップしても入室する (旧 Start ボタン撤廃、オーバーレイ全体をタップ領域に) -->
 <div id="enter-overlay">
-  <h2>space2</h2>
-  <button id="enter-btn">Start</button>
+  <h2>Windows</h2>
+  <div id="enter-tap-label">TAP</div>
 </div>
 
 <!-- スマホ用スプレーボタン (space1 style): UI 非表示 + effect2 ON + camera role の時のみ表示
