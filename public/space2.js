@@ -1286,9 +1286,9 @@
     //     top   (-90, 0, 0) → yaw -90°: +Z normal → -X 方向 (原点方向)
     //     right (180, 0, 0) → yaw 180°: +Z normal → -Z 方向 (原点方向)
     const FACE_PANELS_DEF = {
-      left:  { pos: new THREE.Vector3(0,   1.5, -0.7), yaw: 0,             pitch: 0, roll: 0 },
-      top:   { pos: new THREE.Vector3(0.7, 1.5,  0),   yaw: -Math.PI / 2,  pitch: 0, roll: 0 },
-      right: { pos: new THREE.Vector3(0,   1.5,  0.7), yaw: Math.PI,       pitch: 0, roll: 0 },
+      left:  { pos: new THREE.Vector3(0,    1.5, -2.15), yaw: 0,             pitch: 0, roll: 0 },
+      top:   { pos: new THREE.Vector3(2.15, 1.5,  0),    yaw: -Math.PI / 2,  pitch: 0, roll: 0 },
+      right: { pos: new THREE.Vector3(0,    1.5,  2.15), yaw: Math.PI,       pitch: 0, roll: 0 },
     };
     const _facePanels = {};
     // ワイヤーフレーム枠線色: マゼンタ
