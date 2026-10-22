@@ -5623,13 +5623,14 @@
         log('box 表示 → ' + (boxVisibilityEnabled ? 'ON' : 'OFF') + ' (box + 内面格子 + 選択枠)', 'ok');
       });
 
-      // ========== plate1 / plate2 セルフタグ付与ボタン (観測者用) ==========
-      //   クリックで自分自身に対して avatarTag(plate1 or plate2) を toggle emit
+      // ========== plate1 / plate2 / top / left / right セルフタグ付与ボタン (観測者用) ==========
+      //   クリックで自分自身に対して avatarTag(tag名) を toggle emit
       //   サーバー側は role!=master の自己 plate タグに限り受理するよう緩和済み
+      const _obsSelfTags = ['plate1', 'plate2', 'top', 'left', 'right'];
       function _syncObsPlateButtons() {
         const self = (myId != null) ? avatars.get(myId) : null;
         const tags = (self && self.customTags) ? self.customTags : [];
-        ['plate1', 'plate2'].forEach((tag) => {
+        _obsSelfTags.forEach((tag) => {
           const btn = _by('obs-' + tag + '-toggle');
           if (!btn) return;
           const on = tags.indexOf(tag) >= 0;
@@ -5638,7 +5639,7 @@
         });
       }
       window.__syncObsPlateButtons = _syncObsPlateButtons;
-      ['plate1', 'plate2'].forEach((tag) => {
+      _obsSelfTags.forEach((tag) => {
         _bind('obs-' + tag + '-toggle', 'click', () => {
           if (!myId || !socket || !socket.connected) return;
           const self = avatars.get(myId);

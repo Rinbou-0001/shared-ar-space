@@ -56,7 +56,7 @@ function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60
 //   ・切断しても番号は再利用しない (常にインクリメント)。
 let observerCounter = 0;
 // 付与可能なカスタムタグの一覧 (master が付け外し可能)
-const ALLOWED_CUSTOM_TAGS = new Set(['hole_test', 'plate1', 'plate2']);
+const ALLOWED_CUSTOM_TAGS = new Set(['hole_test', 'plate1', 'plate2', 'top', 'left', 'right']);
 
 // space3 のシーンオブジェクト (master が空間に生成する光源等)
 //   sceneObjects: id → { id, type, tags, x, y, z, config }
@@ -719,10 +719,11 @@ io.on('connection', (socket) => {
     if (!sender) return;
     if (!data || typeof data.targetId !== 'string' || typeof data.tag !== 'string') return;
     if (!ALLOWED_CUSTOM_TAGS.has(data.tag)) return;
-    // master 以外の送信は、自分自身への plate1/plate2 のセルフタグに限定許可
+    // master 以外の送信は、自分自身への plate1/plate2/top/left/right のセルフタグに限定許可
+    const SELF_ALLOWED = new Set(['plate1', 'plate2', 'top', 'left', 'right']);
     if (sender.role !== 'master') {
       if (data.targetId !== socket.id) return;
-      if (data.tag !== 'plate1' && data.tag !== 'plate2') return;
+      if (!SELF_ALLOWED.has(data.tag)) return;
     }
     const target = users.get(data.targetId);
     if (!target) return;
