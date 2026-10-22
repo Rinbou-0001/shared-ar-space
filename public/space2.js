@@ -1362,65 +1362,57 @@
       return ROLE === 'camera' && window.__effect && window.__effect[2];
     }
 
-    // ===== スプレー照準コーン (observer / master 限定) =====
-    //   各 camera avatar に ConeGeometry + MeshBasicMaterial を取り付け、raycast で得た
-    //   ヒット距離に合わせて動的に length / radius を更新。これにより床面を貫通した時の
-    //   アーチ (半円切れ) が発生しない。空中では maxLength まで、ヒット時は距離に短縮。
+    // ===== スプレー照準ディスク (observer / master 限定) =====
+    //   各 camera avatar の視線方向に raycast を打ち、衝突点に **衝突面の法線に沿った円盤** を貼る。
+    //   半径 = sprayer と同じ式 (min(hit.distance × tan(20°), SPRAY_MAX_WORLD_R)) → 塗装範囲を正確に表示。
     //   色は avatar.color (= ランダム割り当ての塗装色) と連動、camera 側では生成しない。
-    //   geometry は unit (base radius 1, height 1) で生成、scale で物理サイズに変換:
-    //     mesh.scale = (radius, radius, length)
-    //     radius = min(length × tan(20°), SPRAY_MAX_WORLD_R)   ← スプレーの実半径と一致
-    //     length = hit.distance - pullback  (ヒットなし時は AIM_MAX_LENGTH)
-    const AIM_MAX_LENGTH   = 4.0;                               // ヒットなし時の最大長 (m)
-    const AIM_HALF_ANGLE   = Math.PI / 9;                       // = 20°、SPRAY_HALF_ANGLE と一致
-    const AIM_MAX_RADIUS   = 1.0;                               // SPRAY_MAX_WORLD_R と一致 (スプレーの radius 上限)
-    const AIM_PULLBACK     = 0.01;                              // 衝突面から 1cm 退避
-    const AIM_UPDATE_MS    = 50;                                // raycast throttle 20Hz
-    const _aimCones = new Map();        // avatar id → { mesh, mat }
-    const _aimRay  = new THREE.Raycaster();
-    const _aimOrigin = new THREE.Vector3();
-    const _aimDir    = new THREE.Vector3();
-    const _aimTmpFwd = new THREE.Vector3();
-    const _aimTmpCol = new THREE.Color();
-    let _aimLastUpdateT = 0;
+    const AIM_HALF_ANGLE   = Math.PI / 9;    // = 20°、SPRAY_HALF_ANGLE と一致
+    const AIM_MAX_RADIUS   = 1.0;            // SPRAY_MAX_WORLD_R と一致
+    const AIM_MAX_LENGTH   = 20.0;           // raycast の far 距離 (m)
+    const AIM_SURFACE_OFF  = 0.003;          // 衝突面から 3mm 法線方向オフセット (z-fighting 回避)
+    const AIM_UPDATE_MS    = 50;             // raycast throttle 20Hz
+    const _aimDisks   = new Map();           // avatar id → { mesh, mat }
+    const _aimRay     = new THREE.Raycaster();
+    const _aimOrigin  = new THREE.Vector3();
+    const _aimTmpFwd  = new THREE.Vector3();
+    const _aimTmpNrm  = new THREE.Vector3();
+    const _aimTmpQ    = new THREE.Quaternion();
+    const _aimAxisZ   = new THREE.Vector3(0, 0, 1);
+    const _aimTmpCol  = new THREE.Color();
+    let   _aimLastUpdateT = 0;
     function _ensureAimIndicator(av) {
       if (ROLE === 'camera') return null;    // camera 側では一切生成しない
       if (!av || av.role !== 'camera') return null;
-      let rec = _aimCones.get(av.id);
+      let rec = _aimDisks.get(av.id);
       if (rec) return rec;
-      // ConeGeometry: unit (半径1, 高さ1) で生成。scale で物理サイズに展開する。
-      //   デフォルトは apex +Y / base -Y → X 軸で +90° 回転 + Z 軸へ translate して apex=原点, base=(0,0,-1)
-      const g = new THREE.ConeGeometry(1, 1, 32, 1, true);
-      g.rotateX(Math.PI / 2);
-      g.translate(0, 0, -0.5);                  // apex を原点に、base を -Z=1
+      // CircleGeometry (半径 1 の unit、法線は +Z)
+      const g = new THREE.CircleGeometry(1, 48);
       const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: 0.35,
-        side: THREE.FrontSide,
+        opacity: 0.5,
+        side: THREE.DoubleSide,
         depthWrite: false,
-        blending: THREE.AdditiveBlending,
       });
       const mesh = new THREE.Mesh(g, mat);
-      mesh.name = 'aim-cone-' + av.id;
+      mesh.name = 'aim-disk-' + av.id;
       mesh.renderOrder = 20;
       mesh.frustumCulled = false;
       mesh.visible = false;
-      // avatar の子として配置 → position/rotation は親で自動追従、ローカル scale のみ毎回更新
-      av.grp.add(mesh);
+      scene.add(mesh);
       rec = { mesh, mat };
-      _aimCones.set(av.id, rec);
+      _aimDisks.set(av.id, rec);
       return rec;
     }
     function _removeAimIndicator(id) {
-      const rec = _aimCones.get(id);
+      const rec = _aimDisks.get(id);
       if (!rec) return;
       if (rec.mesh) {
         if (rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
         if (rec.mesh.geometry) rec.mesh.geometry.dispose();
       }
       if (rec.mat) rec.mat.dispose();
-      _aimCones.delete(id);
+      _aimDisks.delete(id);
     }
     function _aimIndicatorTick() {
       if (ROLE === 'camera') return;
@@ -1436,7 +1428,7 @@
         else if (typeof av.color === 'number') _aimTmpCol.setHex(av.color);
         else _aimTmpCol.setHex(0xffffff);
         rec.mat.color.copy(_aimTmpCol);
-        // Raycast: avatar 位置 → avatar 前方 (local -Z 方向)
+        // Raycast: avatar 位置 → avatar 前方 (local -Z)
         _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
         _aimOrigin.copy(av.grp.position);
         _aimRay.set(_aimOrigin, _aimTmpFwd);
@@ -1448,11 +1440,21 @@
             hit = h; break;
           }
         }
-        // ヒットなし → maxLength (フル展開) / ヒットあり → distance - pullback
-        const length = hit ? Math.max(0.02, hit.distance - AIM_PULLBACK) : AIM_MAX_LENGTH;
-        // radius = スプレーの実塗布半径と一致: length × tan(20°)、ただし SPRAY_MAX_WORLD_R=1m で頭打ち
-        const radius = Math.min(length * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
-        rec.mesh.scale.set(radius, radius, length);
+        if (!hit) { rec.mesh.visible = false; continue; }
+        // 法線を world へ
+        if (hit.face && hit.face.normal) {
+          _aimTmpNrm.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
+        } else {
+          _aimTmpNrm.copy(_aimTmpFwd).multiplyScalar(-1);
+        }
+        // 半径 = sprayer と同じ式
+        const radius = Math.min(hit.distance * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
+        // 位置: 衝突点 + 法線方向に 3mm オフセット (z-fighting 回避)
+        rec.mesh.position.copy(hit.point).addScaledVector(_aimTmpNrm, AIM_SURFACE_OFF);
+        // 向き: CircleGeometry の +Z 軸を法線に合わせる
+        _aimTmpQ.setFromUnitVectors(_aimAxisZ, _aimTmpNrm);
+        rec.mesh.quaternion.copy(_aimTmpQ);
+        rec.mesh.scale.setScalar(radius);
         rec.mesh.visible = true;
       }
     }
