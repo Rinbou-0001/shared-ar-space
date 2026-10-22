@@ -1142,12 +1142,18 @@
           let subIdx = 0;
           fbx.traverse((child) => {
             if (!child || !child.isMesh) return;
-            // 配色: モノクロ (灰色)。環境光 (AmbientLight 0.85) + DirectionalLight (0.35) に照らされて、
-            // 面の向きに応じて自然なグラデーションが出る。
-            // MeshLambertMaterial を採用: Lambertian 拡散のみ (highlight なし)、シェーダー軽量、
-            //   shadow (shadow map) 対応、PCFSoftShadowMap + normalBias/radius 設定で点滅を抑制。
+            // 面構造起因のちらつき対策:
+            //   ・FBX に重複/反転した coincident 面があると z-fighting で backface が勝った瞬間
+            //     ランダムに真っ黒 (Lambert の裏側で光が届かない) が点滅する。
+            //   ・対策1: side=FrontSide にして backface culling を有効化 → 裏向き面を描画しない。
+            //   ・対策2: computeVertexNormals() で法線を再生成 (壊れた/逆向き法線を正す)。
+            //   ・対策3: polygonOffset で coincident 面にわずかなオフセットを付与し z-fight を安定化。
+            if (child.geometry) {
+              child.geometry.computeVertexNormals();
+            }
             const monoMat = new THREE.MeshLambertMaterial({
-              color: 0x888888, side: THREE.DoubleSide,
+              color: 0x888888, side: THREE.FrontSide,
+              polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
             });
             child.material = monoMat;
             // 影の点滅対策: tree は影を落とさず、受けもしない (媒体依存のちらつきを根本除去)
@@ -2508,9 +2514,8 @@
     const _tmpNrm = new THREE.Vector3();
     function _pushPaintHit(worldPt, normal, worldR, colorHex, explicitRole) {
       if (!worldPt || !normal || !colorHex) return;
-      // 効果1 ゲート: モード派生オブジェクト発生機能全体のマスタースイッチ
-      //   OFF の間はスプレー塗装のみ、クラスタ検出・chunk 操作・anim などすべて実行しない
-      if (!window.__effect || !window.__effect[1]) return;
+      // 旧 効果1 ゲートは撤廃 (モード派生オブジェクト発生機能を恒常 ON 化)
+      //   マスターパネルの効果1 トグルは残置するが、本関数の挙動には影響しない。
       // ロール判定: 明示 role があればそれを優先、無ければ色から逆引き (後方互換)
       const mode = (explicitRole && MODE_RULES[explicitRole])
         ? explicitRole
