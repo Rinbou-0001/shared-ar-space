@@ -137,14 +137,16 @@
        ・observer/master は setupObserver 内で hide される */
     #enter-overlay {
       position: fixed; inset: 0;
-      background: rgba(10, 10, 20, 0.7);
-      backdrop-filter: blur(3px);
-      -webkit-backdrop-filter: blur(3px);
+      /* 背景 = camera-ui-mode と同じ 1cm×1cm グリッド (#grid-overlay 相当) */
+      background-color: #f8f8f8;
+      background-image:
+        repeating-linear-gradient(0deg,  rgba(0,0,0,0.22) 0 1px, transparent 1px 1cm),
+        repeating-linear-gradient(90deg, rgba(0,0,0,0.22) 0 1px, transparent 1px 1cm);
       z-index: 20000;
       display: none;
       flex-direction: column;
       align-items: center; justify-content: center;
-      color: white; font-family: sans-serif;
+      color: #111; font-family: sans-serif;
       text-align: center;
       /* セーフエリア分だけコンテンツを内側にオフセット */
       padding:
@@ -155,10 +157,10 @@
       pointer-events: auto;
     }
     body.is-camera #enter-overlay { display: flex; }
-    #enter-overlay h2 { margin: 0 0 8px; text-shadow: 0 2px 8px rgba(0,0,0,0.75); }
+    #enter-overlay h2 { margin: 0 0 8px; color: #111; }
     #enter-overlay p {
-      opacity: 0.9; max-width: 320px; line-height: 1.5;
-      margin: 0 0 20px; text-shadow: 0 1px 4px rgba(0,0,0,0.75);
+      opacity: 0.95; max-width: 320px; line-height: 1.5;
+      margin: 0 0 20px; color: #333;
     }
     #enter-overlay button {
       padding: 16px 36px; font-size: 16px; font-weight: bold;
