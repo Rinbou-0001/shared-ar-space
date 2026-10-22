@@ -1362,73 +1362,94 @@
       return ROLE === 'camera' && window.__effect && window.__effect[2];
     }
 
-    // ===== スプレー照準スポットライト (observer / master 限定) =====
-    //   各 camera avatar に THREE.SpotLight を取り付け、camera 前方 20m 先の target へ照射。
-    //   床・壁・天井・ancient tree (MeshStandardMaterial / MeshLambertMaterial) に
-    //   avatar.color (= 塗装色) の円形光が自然に当たる。空中には何も見えない (物理的に正)。
-    //   camera 側では一切生成しない。
-    const SPOT_DISTANCE   = 20.0;              // 到達距離 (m)
-    const SPOT_TARGET_LEN = 20.0;              // target までの距離 (方向決定用)
-    const SPOT_INTENSITY  = 3.0;
-    const SPOT_PENUMBRA   = 0.35;
-    const _aimSpotlights = new Map();          // avatar id → { light, target }
+    // ===== スプレー照準コーン (observer / master 限定) =====
+    //   各 camera avatar に ConeGeometry + MeshBasicMaterial を取り付け、raycast で得た
+    //   ヒット距離に合わせて動的に length / radius を更新。これにより床面を貫通した時の
+    //   アーチ (半円切れ) が発生しない。空中では maxLength まで、ヒット時は距離に短縮。
+    //   色は avatar.color (= ランダム割り当ての塗装色) と連動、camera 側では生成しない。
+    const AIM_MAX_LENGTH   = 4.0;                               // ヒットなし時の最大長 (m)
+    const AIM_HALF_ANGLE   = Math.PI / 9;                       // = 20°、SPRAY_HALF_ANGLE と一致
+    const AIM_BASE_RADIUS  = AIM_MAX_LENGTH * Math.tan(AIM_HALF_ANGLE);
+    const AIM_PULLBACK     = 0.01;                              // 衝突面から 1cm 退避
+    const AIM_UPDATE_MS    = 50;                                // raycast throttle 20Hz
+    const _aimCones = new Map();        // avatar id → { mesh, mat }
+    const _aimRay  = new THREE.Raycaster();
+    const _aimOrigin = new THREE.Vector3();
+    const _aimDir    = new THREE.Vector3();
     const _aimTmpFwd = new THREE.Vector3();
     const _aimTmpCol = new THREE.Color();
+    let _aimLastUpdateT = 0;
     function _ensureAimIndicator(av) {
       if (ROLE === 'camera') return null;    // camera 側では一切生成しない
       if (!av || av.role !== 'camera') return null;
-      let rec = _aimSpotlights.get(av.id);
+      let rec = _aimCones.get(av.id);
       if (rec) return rec;
-      const light = new THREE.SpotLight(
-        0xffffff,
-        SPOT_INTENSITY,
-        SPOT_DISTANCE,
-        SPRAY_HALF_ANGLE,     // = 20° (塗装円と一致)
-        SPOT_PENUMBRA,
-        1                     // decay
-      );
-      light.castShadow = false;
-      light.name = 'aimspot-' + av.id;
-      const target = new THREE.Object3D();
-      target.name = 'aimspot-target-' + av.id;
-      scene.add(target);
-      light.target = target;
-      scene.add(light);
-      rec = { light, target };
-      _aimSpotlights.set(av.id, rec);
+      // ConeGeometry: デフォルトは apex +Y / base -Y。
+      //   apex を原点に、base を -Z 方向に伸ばすため、X 軸で +90° 回転 + Z 軸へ translate。
+      const g = new THREE.ConeGeometry(AIM_BASE_RADIUS, AIM_MAX_LENGTH, 32, 1, true);
+      g.rotateX(Math.PI / 2);                   // +Y → -Z 向け (apex は +Z にシフト)
+      g.translate(0, 0, -AIM_MAX_LENGTH / 2);   // apex を原点に、base を -Z=maxLength
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.35,
+        side: THREE.FrontSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const mesh = new THREE.Mesh(g, mat);
+      mesh.name = 'aim-cone-' + av.id;
+      mesh.renderOrder = 20;
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      // avatar の子として配置 → position/rotation は親で自動追従、ローカル scale のみ毎回更新
+      av.grp.add(mesh);
+      rec = { mesh, mat };
+      _aimCones.set(av.id, rec);
       return rec;
     }
     function _removeAimIndicator(id) {
-      const rec = _aimSpotlights.get(id);
+      const rec = _aimCones.get(id);
       if (!rec) return;
-      if (rec.light) {
-        if (rec.light.parent) rec.light.parent.remove(rec.light);
-        if (rec.light.dispose) rec.light.dispose();
+      if (rec.mesh) {
+        if (rec.mesh.parent) rec.mesh.parent.remove(rec.mesh);
+        if (rec.mesh.geometry) rec.mesh.geometry.dispose();
       }
-      if (rec.target && rec.target.parent) rec.target.parent.remove(rec.target);
-      _aimSpotlights.delete(id);
+      if (rec.mat) rec.mat.dispose();
+      _aimCones.delete(id);
     }
     function _aimIndicatorTick() {
       if (ROLE === 'camera') return;
+      const nowT = performance.now();
+      if (nowT - _aimLastUpdateT < AIM_UPDATE_MS) return;
+      _aimLastUpdateT = nowT;
       for (const av of avatars.values()) {
         if (!av || av.role !== 'camera' || !av.grp) continue;
         const rec = _ensureAimIndicator(av);
         if (!rec) continue;
-        // ライト位置 = avatar 位置、target = avatar 前方 (local -Z) × SPOT_TARGET_LEN
-        _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
-        rec.light.position.copy(av.grp.position);
-        rec.target.position.copy(av.grp.position).addScaledVector(_aimTmpFwd, SPOT_TARGET_LEN);
-        // target は matrixWorld 更新が必要 (SpotLight が internal で参照)
-        rec.target.updateMatrixWorld(true);
         // 色: avatar.color (塗装色) と連動
-        if (typeof av.color === 'string') {
-          _aimTmpCol.set(av.color);
-        } else if (typeof av.color === 'number') {
-          _aimTmpCol.setHex(av.color);
-        } else {
-          _aimTmpCol.setHex(0xffffff);
+        if (typeof av.color === 'string') _aimTmpCol.set(av.color);
+        else if (typeof av.color === 'number') _aimTmpCol.setHex(av.color);
+        else _aimTmpCol.setHex(0xffffff);
+        rec.mat.color.copy(_aimTmpCol);
+        // Raycast: avatar 位置 → avatar 前方 (local -Z 方向)
+        _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
+        _aimOrigin.copy(av.grp.position);
+        _aimRay.set(_aimOrigin, _aimTmpFwd);
+        _aimRay.far = AIM_MAX_LENGTH;
+        const hits = _aimRay.intersectObjects(_sprayables, false);
+        let hit = null;
+        for (const h of hits) {
+          if (h && h.object && h.object.userData && h.object.userData.paintRT) {
+            hit = h; break;
+          }
         }
-        rec.light.color.copy(_aimTmpCol);
+        // ヒットなし → maxLength (フル展開) / ヒットあり → distance - pullback
+        const length = hit ? Math.max(0.02, hit.distance - AIM_PULLBACK) : AIM_MAX_LENGTH;
+        const s = length / AIM_MAX_LENGTH;
+        // uniform scale: 長さと半径が同比例で変化 (= 角度 20° を維持)
+        rec.mesh.scale.set(s, s, s);
+        rec.mesh.visible = true;
       }
     }
 
