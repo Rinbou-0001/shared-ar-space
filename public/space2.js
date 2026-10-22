@@ -1414,7 +1414,8 @@
             if (r < innerEdge) discard;               // 中身は無色透明
             // t: 内側エッジで 0、外側エッジで 1 → alpha は中心側 (内側) で高、外側でフェード
             float t = (r - innerEdge) / max(uBorderN, 1e-5);
-            float alpha = 1.0 - t;                    // 内側=1、外側=0
+            // 遠距離の壁でも視認できるよう、fade の最小値を 0.4 に底上げ (pow で緩やかに減衰)
+            float alpha = mix(1.0, 0.4, pow(t, 1.5));
             gl_FragColor = vec4(uColor, alpha);
           }
         `,
@@ -1487,17 +1488,11 @@
         } else {
           _aimTmpNrm.copy(_aimTmpFwd).multiplyScalar(-1);
         }
-        const _nrmBefore = _aimTmpNrm.x.toFixed(2) + ',' + _aimTmpNrm.y.toFixed(2) + ',' + _aimTmpNrm.z.toFixed(2);
-        // 法線がレイと同方向を向いているなら (= 面の裏側にヒット = 壁-E 等) 反転してカメラ側へ
-        //   → ディスクが壁の裏に埋没して「壁面に反映されない」問題を修正
-        const dotNF = _aimTmpNrm.dot(_aimTmpFwd);
-        if (dotNF > 0) _aimTmpNrm.multiplyScalar(-1);
+        // 法線がレイと同方向を向いているなら (= 面の裏側にヒット) 反転してカメラ側へ
+        if (_aimTmpNrm.dot(_aimTmpFwd) > 0) _aimTmpNrm.multiplyScalar(-1);
         _aimDbg('tgt=' + (hit.object && hit.object.name)
               + ' d=' + hit.distance.toFixed(2) + 'm'
-              + ' hit=' + hit.point.x.toFixed(1) + ',' + hit.point.y.toFixed(1) + ',' + hit.point.z.toFixed(1)
-              + ' Nraw=' + _nrmBefore
-              + ' dot=' + dotNF.toFixed(2)
-              + ' Nuse=' + _aimTmpNrm.x.toFixed(2) + ',' + _aimTmpNrm.y.toFixed(2) + ',' + _aimTmpNrm.z.toFixed(2));
+              + ' col=' + av.color);
         // 半径 = sprayer と同じ式
         const radius = Math.min(hit.distance * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
         // 位置: 衝突点 + 法線方向に 5mm オフセット (z-fighting 回避)
