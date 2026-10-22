@@ -1638,9 +1638,12 @@
       _ui2SelectedCan = can;
       _ui2SelectedIdx = idx;
       _ui2Mode = 'focus';
-      // ① 即時: state.myColor をスプレーカラーに変更 (次 pose で全端末に伝播)
+      // ① 即時: state.myColor + state.myRole を更新 (次 pose で全端末に伝播)
+      //   ロール付与: マスターで行われていた paintMode と同じ役割を camera 自身で持つ。
+      //   spray2 送信時に payload.role として送信され、受信側で該当 mode の spawn が発火される。
       state.myColor = can.userData.spawnColor;
-      log('spray color → ' + state.myColor + ' (' + can.userData.mode + ')', 'ok');
+      state.myRole  = can.userData.mode || null;
+      log('spray color → ' + state.myColor + ' / role → ' + state.myRole, 'ok');
       // ② 元の transform を保存 (戻し用)
       _ui2CanStart = {
         pos: can.position.clone(),
@@ -2503,12 +2506,15 @@
     const _tmpT1 = new THREE.Vector3();
     const _tmpT2 = new THREE.Vector3();
     const _tmpNrm = new THREE.Vector3();
-    function _pushPaintHit(worldPt, normal, worldR, colorHex) {
+    function _pushPaintHit(worldPt, normal, worldR, colorHex, explicitRole) {
       if (!worldPt || !normal || !colorHex) return;
       // 効果1 ゲート: モード派生オブジェクト発生機能全体のマスタースイッチ
       //   OFF の間はスプレー塗装のみ、クラスタ検出・chunk 操作・anim などすべて実行しない
       if (!window.__effect || !window.__effect[1]) return;
-      const mode = _modeByColor.get(colorHex.toLowerCase());
+      // ロール判定: 明示 role があればそれを優先、無ければ色から逆引き (後方互換)
+      const mode = (explicitRole && MODE_RULES[explicitRole])
+        ? explicitRole
+        : _modeByColor.get(colorHex.toLowerCase());
       if (!mode || !MODE_SPRAY_ACTIVE.has(mode)) return;
       const r = Math.min(MODE_HIT_FILL_MAX_R, Math.max(MODE_VOXEL, worldR || MODE_VOXEL));
       _tmpNrm.set(normal.x, normal.y, normal.z);
@@ -2619,12 +2625,14 @@
           wx: +hit.point.x.toFixed(3), wy: +hit.point.y.toFixed(3), wz: +hit.point.z.toFixed(3),
           nx: +wnx.toFixed(3), ny: +wny.toFixed(3), nz: +wnz.toFixed(3),
           wr: +worldR.toFixed(3),
+          // ペイントロール (per-camera): 受信側は role を優先し、無い場合は色から逆引き
+          role: state.myRole || null,
         });
       }
       // sprayer 側ローカルの mode spawn (他クライアントは spray2Batch 受信後に自分で発火)
       //   案 X: camera + 効果2 中は自身の mode spawn 処理も skip (観測不要、CPU 削減)
       if (!_isCameraUIMode()) {
-        _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex);
+        _pushPaintHit(hit.point, { x: wnx, y: wny, z: wnz }, worldR, colorHex, state.myRole || null);
       }
     }
 
@@ -4041,6 +4049,10 @@
     const state = {
       entered: false,   // pose 送信を開始するかどうか
       myColor: '#ffffff',
+      // ペイントロール (per-camera): null | 'wood' | 'river' | 'sky'
+      //   缶タップ or master paintMode で設定。spray2 送信時に payload.role として送信され、
+      //   受信側はこの role を元に mode spawn を発火する (無い場合は色から逆引き)
+      myRole: null,
     };
     const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
     // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
@@ -4371,11 +4383,13 @@
         if (ROLE === 'camera') {
           if (mode && PAINT_MODE_COLORS[mode]) {
             state.myColor = PAINT_MODE_COLORS[mode];
+            state.myRole  = mode;
             log('paint mode → ' + mode + ' (color=' + state.myColor + ')', 'ok');
           } else {
-            // 上書き解除 → ランダム色にリセット
+            // 上書き解除 → ランダム色にリセット (ロールも解除)
             const _pal = ['#029ecc', '#ffce18', '#df2c1e'];
             state.myColor = _pal[Math.floor(Math.random() * _pal.length)];
+            state.myRole  = null;
             log('paint mode cleared → random color=' + state.myColor, 'ok');
           }
         }
@@ -4623,7 +4637,8 @@
             { x: data.wx, y: data.wy, z: data.wz },
             { x: data.nx, y: data.ny, z: data.nz },
             (typeof data.wr === 'number') ? data.wr : 0.1,
-            data.c
+            data.c,
+            (typeof data.role === 'string') ? data.role : null
           );
         }
       }

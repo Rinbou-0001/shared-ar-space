@@ -522,6 +522,10 @@ io.on('connection', (socket) => {
     if (typeof data.ny === 'number' && isFinite(data.ny)) rec.ny = data.ny;
     if (typeof data.nz === 'number' && isFinite(data.nz)) rec.nz = data.nz;
     if (typeof data.wr === 'number' && isFinite(data.wr) && data.wr > 0) rec.wr = data.wr;
+    // ペイントロール (per-camera): 'wood' | 'river' | 'sky' のみ許可。他は無視
+    if (typeof data.role === 'string' && (data.role === 'wood' || data.role === 'river' || data.role === 'sky')) {
+      rec.role = data.role;
+    }
     return rec;
   }
   function _pushSpray2History(rec) {
