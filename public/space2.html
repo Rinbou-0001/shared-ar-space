@@ -197,6 +197,24 @@
       font-family: monospace; font-size: 12px;
     }
     #observer-panel label { display: inline-block; width: 14px; text-align: center; font-weight: bold; font-family: monospace; }
+    /* 折り畳みタブ (master-panel と同構造、黄色テーマ) */
+    #observer-panel .o-section { border-top: 1px solid #334; margin: 8px 0; padding-top: 6px; }
+    #observer-panel .o-section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+    #observer-panel details { margin: 0; }
+    #observer-panel details > summary {
+      cursor: pointer; user-select: none;
+      padding: 4px 6px; border-radius: 4px;
+      background: rgba(251,191,36,0.15); color: #fde68a;
+      font-weight: bold; font-size: 11px;
+      list-style: none;
+    }
+    #observer-panel details > summary::-webkit-details-marker { display: none; }
+    #observer-panel details > summary::before {
+      content: '▸'; display: inline-block; width: 12px; transition: transform 0.15s;
+    }
+    #observer-panel details[open] > summary::before { transform: rotate(90deg); }
+    #observer-panel details > summary:hover { background: rgba(251,191,36,0.28); }
+    #observer-panel details > .o-body { padding: 6px 4px 2px; }
     #observer-panel button {
       padding: 6px 12px; background: #fbbf24; color: #422006;
       border: none; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer;
@@ -654,42 +672,69 @@
   </div>
   <!-- obs-sel-info は selection hint 用に残置 (updateSelectionHint が参照) -->
   <span id="obs-sel-info" style="display:none;">--</span>
-  <div class="row" style="margin-top: 10px; border-top: 1px solid #475569; padding-top: 8px;">
-    <label>Off-Axis</label>
-    <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
-    <label style="margin-left:12px;">Canvas同期</label>
-    <button id="obs-canvasync-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
-    <label style="margin-left:12px;">Box表示</label>
-    <button id="obs-box-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
-    <button id="obs-plate1-toggle" style="margin-left:12px; background: #475569; color: white; min-width: 70px;">Plate1</button>
-    <button id="obs-plate2-toggle" style="background: #475569; color: white; min-width: 70px;">Plate2</button>
+
+  <!-- タブ: トグル群 -->
+  <div class="o-section">
+    <details open>
+      <summary>トグル (Off-Axis / Canvas同期 / Box表示 / Plate)</summary>
+      <div class="o-body">
+        <div class="row">
+          <label>Off-Axis</label>
+          <button id="obs-offaxis-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+          <label style="margin-left:12px;">Canvas同期</label>
+          <button id="obs-canvasync-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+        </div>
+        <div class="row" style="margin-top:6px;">
+          <label>Box表示</label>
+          <button id="obs-box-toggle" style="background: #475569; color: white; min-width: 60px;">OFF</button>
+          <button id="obs-plate1-toggle" style="margin-left:12px; background: #475569; color: white; min-width: 70px;">Plate1</button>
+          <button id="obs-plate2-toggle" style="background: #475569; color: white; min-width: 70px;">Plate2</button>
+        </div>
+      </div>
+    </details>
   </div>
-  <div class="row" style="margin-top: 6px;">
-    <label>FOV(°)</label>
-    <input type="number" id="obs-fov" value="60" step="1" min="10" max="170" style="width:70px;">
+
+  <!-- タブ: 視野角 -->
+  <div class="o-section">
+    <details>
+      <summary>視野角 (FOV)</summary>
+      <div class="o-body">
+        <div class="row">
+          <label>FOV(°)</label>
+          <input type="number" id="obs-fov" value="60" step="1" min="10" max="170" style="width:70px;">
+        </div>
+      </div>
+    </details>
   </div>
-  <!-- ディスプレイ実寸 (推定結果表示、直接編集も可) -->
-  <div class="row obs-display-pc-only">
-    <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.001" min="0.05" max="3.0">
-    <label>H(m)</label><input type="number" id="obs-display-h" value="0.20" step="0.001" min="0.05" max="3.0">
-  </div>
-  <!-- 対角インチ + ネイティブ解像度 W × H → 再計算 -->
-  <div class="row obs-display-pc-only" style="margin-top:6px;">
-    <label style="width: auto;">対角(in)</label>
-    <input type="number" id="obs-display-diag" placeholder="例: 14" step="0.1" min="3" max="100" style="width:70px;">
-  </div>
-  <div class="row obs-display-pc-only" style="margin-top:2px;">
-    <label style="width: auto;">解像度</label>
-    <input type="number" id="obs-display-res-w" placeholder="例: 3024" step="1" min="200" style="width:78px;">
-    <span style="opacity:0.7; align-self:center;">×</span>
-    <input type="number" id="obs-display-res-h" placeholder="例: 1964" step="1" min="200" style="width:78px;">
-  </div>
-  <div class="row obs-display-pc-only" style="margin-top:2px;">
-    <button id="obs-display-calc" style="background:#06b6d4; color:#083344; font-size:11px;">再計算 (Enter)</button>
-  </div>
-  <div class="hint obs-display-pc-only" style="font-size:10px; opacity:0.7;">
-    入室時に 1 度自動推定 (UA + DPR)。以降は<b>対角インチ + 実解像度</b>を入力 → Enter で精密に再計算。<br>
-    (PPI = √(rw² + rh²) / diag、W = rw / PPI × 25.4mm)
+
+  <!-- タブ: 画面サイズ -->
+  <div class="o-section">
+    <details>
+      <summary>画面サイズ (W×H / 対角 / 解像度)</summary>
+      <div class="o-body">
+        <div class="row obs-display-pc-only">
+          <label>W(m)</label><input type="number" id="obs-display-w" value="0.30" step="0.001" min="0.05" max="3.0">
+          <label>H(m)</label><input type="number" id="obs-display-h" value="0.20" step="0.001" min="0.05" max="3.0">
+        </div>
+        <div class="row obs-display-pc-only" style="margin-top:6px;">
+          <label style="width: auto;">対角(in)</label>
+          <input type="number" id="obs-display-diag" placeholder="例: 14" step="0.1" min="3" max="100" style="width:70px;">
+        </div>
+        <div class="row obs-display-pc-only" style="margin-top:2px;">
+          <label style="width: auto;">解像度</label>
+          <input type="number" id="obs-display-res-w" placeholder="例: 3024" step="1" min="200" style="width:78px;">
+          <span style="opacity:0.7; align-self:center;">×</span>
+          <input type="number" id="obs-display-res-h" placeholder="例: 1964" step="1" min="200" style="width:78px;">
+        </div>
+        <div class="row obs-display-pc-only" style="margin-top:2px;">
+          <button id="obs-display-calc" style="background:#06b6d4; color:#083344; font-size:11px;">再計算 (Enter)</button>
+        </div>
+        <div class="hint obs-display-pc-only" style="font-size:10px; opacity:0.7;">
+          入室時に 1 度自動推定 (UA + DPR)。以降は<b>対角インチ + 実解像度</b>を入力 → Enter で精密に再計算。<br>
+          (PPI = √(rw² + rh²) / diag、W = rw / PPI × 25.4mm)
+        </div>
+      </div>
+    </details>
   </div>
 </div>
 
