@@ -1387,35 +1387,50 @@
       // ───────── Cone (懐中電灯本体) ─────────
       //   ConeGeometry(radius=1, height=1, 32, 1, openEnded=true) ─ 側面のみ
       //   デフォルト姿勢: apex 頂点が +Y、base 円が -Y
-      //   AdditiveBlending: 前後面の重なりが「光の加算」として自然に見える (不透明重畳による球体錯視を回避)
+      //   案 A: side = FrontSide (背面を描画しない → 前後重畳の球体錯視を根本カット)
+      //   案 B: Fresnel 項を加えて接線 (grazing angle) でのみ発光 → ビーム縁がふわっと光る
+      //   AdditiveBlending: 光の加算合成でビーム感を強調
       const coneGeom = new THREE.ConeGeometry(1, 1, 32, 1, true);
       const coneMat = new THREE.ShaderMaterial({
         uniforms: {
           uColor:   { value: new THREE.Color(0xffffff) },
-          uIntensity: { value: 0.55 },
+          uIntensity: { value: 0.9 },      // Fresnel で全体暗くなる分、強度を上げて補正
         },
         vertexShader: `
           varying float vT;
+          varying vec3  vWorldNormal;
+          varying vec3  vWorldPos;
           void main() {
             // local Y = +0.5 (apex=camera) → vT=0 / local Y = -0.5 (base=hit) → vT=1
             vT = clamp(0.5 - position.y, 0.0, 1.0);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            // Fresnel 用: world 空間の法線と頂点位置
+            vWorldNormal = normalize(mat3(modelMatrix) * normal);
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
           }
         `,
         fragmentShader: `
           uniform vec3  uColor;
           uniform float uIntensity;
           varying float vT;
+          varying vec3  vWorldNormal;
+          varying vec3  vWorldPos;
           void main() {
-            // base で濃く、apex で消える (pow で裾を滑らかに)
-            float a = pow(vT, 1.6) * uIntensity;
-            // Additive blend 前提: RGB を alpha で pre-scale (加算強度を alpha と対応させる)
+            // Fresnel: 接線 (grazing) で高 / 正面で低 → ビーム縁のみ発光
+            vec3 N = normalize(vWorldNormal);
+            vec3 V = normalize(cameraPosition - vWorldPos);
+            float ndv = abs(dot(N, V));
+            float fresnel = pow(1.0 - ndv, 1.5);
+            // base で濃く apex で消えるグラデーション × Fresnel × 強度
+            float a = pow(vT, 1.6) * fresnel * uIntensity;
+            // Additive blend 前提: RGB を alpha で pre-scale
             gl_FragColor = vec4(uColor * a, a);
           }
         `,
         transparent: true,
         depthWrite: false,
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide,
         blending: THREE.AdditiveBlending,
       });
       const cone = new THREE.Mesh(coneGeom, coneMat);
