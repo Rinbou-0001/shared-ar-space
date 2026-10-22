@@ -1439,10 +1439,11 @@
     //   [0] wood (草)  : ラベル=深緑  / spray=#1b5e20
     //   [1] sky  (星)  : ラベル=藍    / spray=#002044
     //   [2] river(川)  : ラベル=群青  / spray=#008cdd
+    // 本体色 (labelColor) と選択時拡大色、実際のスプレー色 (spawnColor) を全缶で統一
     const UI2_CANS_DEF = [
       { mode: 'wood',  labelColor: '#1b5e20', spawnColor: '#1b5e20' },
-      { mode: 'sky',   labelColor: '#165e83', spawnColor: '#002044' },
-      { mode: 'river', labelColor: '#003f7f', spawnColor: '#008cdd' },
+      { mode: 'sky',   labelColor: '#002044', spawnColor: '#002044' },
+      { mode: 'river', labelColor: '#008cdd', spawnColor: '#008cdd' },
     ];
     let _ui2SliderOffsetX = 0;     // スライダーの横オフセット
     let _ui2SliderVelocity = 0;    // 慣性 (world unit / sec)
@@ -1457,6 +1458,11 @@
     let _ui2SelectedIdx = -1;
     // 缶の "元の transform" を復帰用に保存
     let _ui2CanStart = null;
+    // ───────── 入室時 fade-in ─────────
+    //   enterAsCamera() 直後に 2 秒かけてスプレー缶・影 Sprite が alpha 0 → 1 でフェード表示
+    const UI2_FADEIN_MS = 2000;
+    let _ui2FadeStart = null;   // null = fade 未開始 (= 入室前)、performance.now() 値 = fade 進行中/完了済
+    const _ui2FadeMats = [];    // fade 対象マテリアル (can body/metal/cap/nozzle/hole + shadow sprite)
     function _ensureUi2Scene() {
       if (_ui2Scene) return;
       if (ROLE !== 'camera') return;
@@ -1477,11 +1483,12 @@
       const fill = new THREE.DirectionalLight(0xffffff, 1.2);
       fill.position.set(-4, 2, -3);
       _ui2Scene.add(fill);
-      // 共通マテリアル (本体色のみ缶毎に差替え)
-      const metalMat = new THREE.MeshStandardMaterial({ color: 0xbfc5ca, metalness: 0.8, roughness: 0.25 });
-      const capMat   = new THREE.MeshStandardMaterial({ color: 0x242424, roughness: 0.48 });
-      const nozzleMat= new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.65, roughness: 0.28 });
-      const holeMat  = new THREE.MeshBasicMaterial({ color: 0x171717 });
+      // 共通マテリアル (本体色のみ缶毎に差替え) ─ 入室 fade-in のため transparent + 初期 opacity 0
+      const metalMat = new THREE.MeshStandardMaterial({ color: 0xbfc5ca, metalness: 0.8, roughness: 0.25, transparent: true, opacity: 0 });
+      const capMat   = new THREE.MeshStandardMaterial({ color: 0x242424, roughness: 0.48, transparent: true, opacity: 0 });
+      const nozzleMat= new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.65, roughness: 0.28, transparent: true, opacity: 0 });
+      const holeMat  = new THREE.MeshBasicMaterial({ color: 0x171717, transparent: true, opacity: 0 });
+      _ui2FadeMats.push(metalMat, capMat, nozzleMat, holeMat);
       function _addCyl(parent, rt, rb, h, mat, y, seg) {
         const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg || 64), mat);
         m.position.y = y;
@@ -1500,7 +1507,9 @@
       function _makeCan(colorHex, xOffset) {
         const can = new THREE.Group();
         // 本体 (ラベル面) は colorHex (= 割り当てられた labelColor) を使用
-        const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.32 });
+        //   入室 fade-in のため transparent + 初期 opacity 0 で生成
+        const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.32, transparent: true, opacity: 0 });
+        _ui2FadeMats.push(bodyMat);
         _addCyl(can, 0.5, 0.5, 2.4, bodyMat, 1.35);
         _addCyl(can, 0.25, 0.5, 0.32, metalMat, 2.71);
         _addCyl(can, 0.19, 0.25, 0.14, metalMat, 2.94);
@@ -1557,10 +1566,12 @@
         const sMat = new THREE.SpriteMaterial({
           map: shadowTex,
           transparent: true,
-          opacity: 0.8,
+          opacity: 0,                 // 入室 fade-in: 初期 0 → target 0.8
           depthWrite: false,
           depthTest: true,
         });
+        sMat.userData = { baseOpacity: 0.8 };
+        _ui2FadeMats.push(sMat);
         const s = new THREE.Sprite(sMat);
         s.position.set(can.userData.baseX, 0.01, 0);   // 缶の真下
         s.scale.set(SHADOW_W0, SHADOW_H0, 1);
@@ -1841,6 +1852,17 @@
       if (!_ui2Scene) return;
       const n = _ui2Cans.length;
       if (n === 0) return;
+      // ─── 入室 fade-in (2 秒) ───
+      //   _ui2FadeStart === null (未入室) の間は opacity 0 のまま。
+      //   fade 中は alpha 補間、t >= 1 で完了フラグに切替えて tick 処理をスキップ。
+      if (_ui2FadeStart !== null && _ui2FadeStart >= 0) {
+        const t = Math.min(1, (performance.now() - _ui2FadeStart) / UI2_FADEIN_MS);
+        for (const m of _ui2FadeMats) {
+          const base = (m.userData && typeof m.userData.baseOpacity === 'number') ? m.userData.baseOpacity : 1.0;
+          m.opacity = base * t;
+        }
+        if (t >= 1) _ui2FadeStart = -1;  // -1 = 完了済 (以降は tick で処理しない)
+      }
       // ─── スライダー慣性 (指数減衰) ───
       if (_ui2Mode === 'browse' && Math.abs(_ui2SliderVelocity) > UI2_SLIDER_MIN_V) {
         _ui2SliderOffsetX += _ui2SliderVelocity * dt;
@@ -5082,6 +5104,8 @@
       log('spawn(camera): (' + CAM_SPAWN.x + ',' + CAM_SPAWN.y + ',' + CAM_SPAWN.z + ') 初期 +X 向き', 'ok');
       const overlay = _by('enter-overlay');
       if (overlay) overlay.style.display = 'none';
+      // 入室時: 2秒かけて UI2 スプレー缶 + 影 Sprite を fade-in
+      _ui2FadeStart = performance.now();
       setupDeviceOrientation();
     }
 
