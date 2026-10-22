@@ -1362,108 +1362,51 @@
       return ROLE === 'camera' && window.__effect && window.__effect[2];
     }
 
-    // ===== スプレー照準インジケーター (observer / master 限定) =====
-    //   懐中電灯 / ライトのような円錐: camera avatar から視線方向にレイを打ち、ヒット点を
-    //   円錐の底面として、camera 側 (頂点) から底面にかけて不透明度がグラデーションするコーンを配置。
-    //   円錐側面は open-ended ShaderMaterial で alpha 補間、底面には薄いリングを重ねて縁を強調。
-    //   色は avatar.color (= 塗装色) と連動、camera 側では生成も表示もしない。
-    const _aimIndicators = new Map();  // avatar id → { grp, cone, coneMat, ring, ringMat }
-    const _aimRayAim = new THREE.Raycaster();
-    const _aimAxisZ = new THREE.Vector3(0, 0, 1);
-    const _aimAxisY = new THREE.Vector3(0, 1, 0);
+    // ===== スプレー照準スポットライト (observer / master 限定) =====
+    //   各 camera avatar に THREE.SpotLight を取り付け、camera 前方 20m 先の target へ照射。
+    //   床・壁・天井・ancient tree (MeshStandardMaterial / MeshLambertMaterial) に
+    //   avatar.color (= 塗装色) の円形光が自然に当たる。空中には何も見えない (物理的に正)。
+    //   camera 側では一切生成しない。
+    const SPOT_DISTANCE   = 20.0;              // 到達距離 (m)
+    const SPOT_TARGET_LEN = 20.0;              // target までの距離 (方向決定用)
+    const SPOT_INTENSITY  = 3.0;
+    const SPOT_PENUMBRA   = 0.35;
+    const _aimSpotlights = new Map();          // avatar id → { light, target }
     const _aimTmpFwd = new THREE.Vector3();
-    const _aimTmpN   = new THREE.Vector3();
-    const _aimTmpPos = new THREE.Vector3();
-    const _aimTmpApex = new THREE.Vector3();
-    const _aimTmpDir  = new THREE.Vector3();
-    const _aimTmpMid  = new THREE.Vector3();
-    const _aimTmpQ    = new THREE.Quaternion();
-    const _aimTmpCol  = new THREE.Color();
+    const _aimTmpCol = new THREE.Color();
     function _ensureAimIndicator(av) {
       if (ROLE === 'camera') return null;    // camera 側では一切生成しない
       if (!av || av.role !== 'camera') return null;
-      let rec = _aimIndicators.get(av.id);
+      let rec = _aimSpotlights.get(av.id);
       if (rec) return rec;
-      // ───────── Cone (懐中電灯本体) ─────────
-      //   ConeGeometry(radius=1, height=1, 32, 1, openEnded=true) ─ 側面のみ
-      //   デフォルト姿勢: apex 頂点が +Y、base 円が -Y
-      //   案 A: side = FrontSide (背面を描画しない → 前後重畳の球体錯視を根本カット)
-      //   案 B: Fresnel 項を加えて接線 (grazing angle) でのみ発光 → ビーム縁がふわっと光る
-      //   AdditiveBlending: 光の加算合成でビーム感を強調
-      const coneGeom = new THREE.ConeGeometry(1, 1, 32, 1, true);
-      const coneMat = new THREE.ShaderMaterial({
-        uniforms: {
-          uColor:   { value: new THREE.Color(0xffffff) },
-          uIntensity: { value: 0.9 },      // Fresnel で全体暗くなる分、強度を上げて補正
-        },
-        vertexShader: `
-          varying float vT;
-          varying vec3  vWorldNormal;
-          varying vec3  vWorldPos;
-          void main() {
-            // local Y = +0.5 (apex=camera) → vT=0 / local Y = -0.5 (base=hit) → vT=1
-            vT = clamp(0.5 - position.y, 0.0, 1.0);
-            // Fresnel 用: world 空間の法線と頂点位置
-            vWorldNormal = normalize(mat3(modelMatrix) * normal);
-            vec4 wp = modelMatrix * vec4(position, 1.0);
-            vWorldPos = wp.xyz;
-            gl_Position = projectionMatrix * viewMatrix * wp;
-          }
-        `,
-        fragmentShader: `
-          uniform vec3  uColor;
-          uniform float uIntensity;
-          varying float vT;
-          varying vec3  vWorldNormal;
-          varying vec3  vWorldPos;
-          void main() {
-            // Fresnel: 接線 (grazing) で高 / 正面で低 → ビーム縁のみ発光
-            vec3 N = normalize(vWorldNormal);
-            vec3 V = normalize(cameraPosition - vWorldPos);
-            float ndv = abs(dot(N, V));
-            float fresnel = pow(1.0 - ndv, 1.5);
-            // base で濃く apex で消えるグラデーション × Fresnel × 強度
-            float a = pow(vT, 1.6) * fresnel * uIntensity;
-            // Additive blend 前提: RGB を alpha で pre-scale
-            gl_FragColor = vec4(uColor * a, a);
-          }
-        `,
-        transparent: true,
-        depthWrite: false,
-        side: THREE.FrontSide,
-        blending: THREE.AdditiveBlending,
-      });
-      const cone = new THREE.Mesh(coneGeom, coneMat);
-      cone.renderOrder = 20;
-      cone.frustumCulled = false;
-      // ───────── Ring (底面リム) ─────────
-      const ringGeom = new THREE.RingGeometry(0.9, 1.0, 48);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false,
-      });
-      const ring = new THREE.Mesh(ringGeom, ringMat);
-      ring.renderOrder = 21;
-      ring.frustumCulled = false;
-      // Group にまとめる
-      const grp = new THREE.Group();
-      grp.name = 'aim-' + av.id;
-      grp.visible = false;
-      grp.add(cone);
-      grp.add(ring);
-      scene.add(grp);
-      rec = { grp, cone, coneMat, ring, ringMat };
-      _aimIndicators.set(av.id, rec);
+      const light = new THREE.SpotLight(
+        0xffffff,
+        SPOT_INTENSITY,
+        SPOT_DISTANCE,
+        SPRAY_HALF_ANGLE,     // = 20° (塗装円と一致)
+        SPOT_PENUMBRA,
+        1                     // decay
+      );
+      light.castShadow = false;
+      light.name = 'aimspot-' + av.id;
+      const target = new THREE.Object3D();
+      target.name = 'aimspot-target-' + av.id;
+      scene.add(target);
+      light.target = target;
+      scene.add(light);
+      rec = { light, target };
+      _aimSpotlights.set(av.id, rec);
       return rec;
     }
     function _removeAimIndicator(id) {
-      const rec = _aimIndicators.get(id);
+      const rec = _aimSpotlights.get(id);
       if (!rec) return;
-      if (rec.grp && rec.grp.parent) rec.grp.parent.remove(rec.grp);
-      if (rec.cone && rec.cone.geometry) rec.cone.geometry.dispose();
-      if (rec.coneMat) rec.coneMat.dispose();
-      if (rec.ring && rec.ring.geometry) rec.ring.geometry.dispose();
-      if (rec.ringMat) rec.ringMat.dispose();
-      _aimIndicators.delete(id);
+      if (rec.light) {
+        if (rec.light.parent) rec.light.parent.remove(rec.light);
+        if (rec.light.dispose) rec.light.dispose();
+      }
+      if (rec.target && rec.target.parent) rec.target.parent.remove(rec.target);
+      _aimSpotlights.delete(id);
     }
     function _aimIndicatorTick() {
       if (ROLE === 'camera') return;
@@ -1471,21 +1414,12 @@
         if (!av || av.role !== 'camera' || !av.grp) continue;
         const rec = _ensureAimIndicator(av);
         if (!rec) continue;
-        // avatar 前方 (local -Z) を world へ、apex (= 発射点) は avatar 位置
+        // ライト位置 = avatar 位置、target = avatar 前方 (local -Z) × SPOT_TARGET_LEN
         _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
-        _aimTmpApex.copy(av.grp.position);
-        _aimRayAim.set(_aimTmpApex, _aimTmpFwd);
-        const hits = _aimRayAim.intersectObjects(_sprayables, false);
-        let hit = null;
-        for (const h of hits) {
-          if (h && h.object && h.object.userData && h.object.userData.paintRT) {
-            hit = h; break;
-          }
-        }
-        if (!hit) {
-          rec.grp.visible = false;
-          continue;
-        }
+        rec.light.position.copy(av.grp.position);
+        rec.target.position.copy(av.grp.position).addScaledVector(_aimTmpFwd, SPOT_TARGET_LEN);
+        // target は matrixWorld 更新が必要 (SpotLight が internal で参照)
+        rec.target.updateMatrixWorld(true);
         // 色: avatar.color (塗装色) と連動
         if (typeof av.color === 'string') {
           _aimTmpCol.set(av.color);
@@ -1494,46 +1428,7 @@
         } else {
           _aimTmpCol.setHex(0xffffff);
         }
-        rec.coneMat.uniforms.uColor.value.copy(_aimTmpCol);
-        rec.ringMat.color.copy(_aimTmpCol);
-        // 法線を world へ
-        if (hit.face && hit.face.normal) {
-          _aimTmpN.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
-        } else {
-          _aimTmpN.copy(_aimTmpFwd).multiplyScalar(-1);
-        }
-        // ───── Cone 配置 (apex=camera, base=hit 直前) ─────
-        //   方向: apex → base = hit - apex
-        //   ConeGeometry は +Y がデフォルト apex なので、+Y を "base→apex 方向" (= apex - hit) に向ける
-        //   base を壁面から 2cm 手前に短縮 → 壁面と交差して半円で消える現象を回避
-        const CONE_BACK_OFFSET = 0.02;  // 衝突面から手前へ 2cm 退避
-        const _hitAdjX = hit.point.x + _aimTmpN.x * CONE_BACK_OFFSET;
-        const _hitAdjY = hit.point.y + _aimTmpN.y * CONE_BACK_OFFSET;
-        const _hitAdjZ = hit.point.z + _aimTmpN.z * CONE_BACK_OFFSET;
-        _aimTmpDir.set(
-          _aimTmpApex.x - _hitAdjX,
-          _aimTmpApex.y - _hitAdjY,
-          _aimTmpApex.z - _hitAdjZ
-        );
-        const L = _aimTmpDir.length();
-        if (L < 1e-4) { rec.grp.visible = false; continue; }
-        _aimTmpDir.multiplyScalar(1 / L);
-        _aimTmpQ.setFromUnitVectors(_aimAxisY, _aimTmpDir);
-        _aimTmpMid.set(
-          (_aimTmpApex.x + _hitAdjX) * 0.5,
-          (_aimTmpApex.y + _hitAdjY) * 0.5,
-          (_aimTmpApex.z + _hitAdjZ) * 0.5
-        );
-        const worldR = Math.min(hit.distance * Math.tan(SPRAY_HALF_ANGLE), SPRAY_MAX_WORLD_R);
-        rec.cone.position.copy(_aimTmpMid);
-        rec.cone.quaternion.copy(_aimTmpQ);
-        rec.cone.scale.set(worldR, L, worldR);   // X,Z 半径 = worldR、Y 高さ = 距離 (短縮済み)
-        // ───── Ring 配置 (hit 点、面の法線に沿わせる) ─────
-        _aimTmpQ.setFromUnitVectors(_aimAxisZ, _aimTmpN);
-        rec.ring.position.copy(hit.point).addScaledVector(_aimTmpN, 0.002);
-        rec.ring.quaternion.copy(_aimTmpQ);
-        rec.ring.scale.setScalar(worldR);
-        rec.grp.visible = true;
+        rec.light.color.copy(_aimTmpCol);
       }
     }
 
