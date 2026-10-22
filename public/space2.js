@@ -4422,6 +4422,13 @@
         }
         // 自分自身のオブザーバーパネル UI (plate/面タグボタン、Off-Axis トグル) を更新
         if (data.id === myId) {
+          // 面タグが ON になった瞬間、off-axis も自動 ON (面スナップを即有効化)。
+          //   ユーザーが OFF 側に切り替えればスナップ解除される (面タグはそのまま)。
+          const faceTagsOn = ['top', 'left', 'right'];
+          if (data.on && faceTagsOn.indexOf(data.tag) >= 0) {
+            myDisplay.offaxis = true;
+            if (socket && socket.connected) socket.emit('displayConfig', { offaxis: true });
+          }
           if (typeof window.__syncObsPlateButtons === 'function') window.__syncObsPlateButtons();
           if (typeof window.syncObsOaBtn === 'function') window.syncObsOaBtn();
         }
@@ -5586,18 +5593,9 @@
       const obsOaBtn = _by('obs-offaxis-toggle');
       window.syncObsOaBtn = function() {
         if (!obsOaBtn) return;
-        // 面タグ or plate タグが付いている場合は実質 off-axis が強制 ON のため、UI も ON 表示
-        let forced = false;
-        if (ROLE === 'observer' && myId) {
-          const self = avatars.get(myId);
-          const tags = (self && self.customTags) ? self.customTags : [];
-          if (tags.indexOf('plate1') >= 0 || tags.indexOf('plate2') >= 0 ||
-              tags.indexOf('top')    >= 0 || tags.indexOf('left')   >= 0 ||
-              tags.indexOf('right')  >= 0) {
-            forced = true;
-          }
-        }
-        const on = myDisplay.offaxis || forced;
+        // myDisplay.offaxis は、面タグ ON 時に自動で true になり、ユーザーが OFF を押せば false。
+        //   plate タグ時は render 側で強制スナップされるが、UI は myDisplay.offaxis 表示を優先。
+        const on = !!myDisplay.offaxis;
         obsOaBtn.textContent = on ? 'ON' : 'OFF';
         obsOaBtn.style.background = on ? '#06b6d4' : '#475569';
         obsOaBtn.style.color = on ? '#083344' : 'white';
@@ -6748,11 +6746,13 @@
         _plateGrpForDisplay = window.__getMyPlateGrp();
       }
       // 面スナップパネル (top/left/right) ─ plate よりは優先度低、plate が無い場合に採用
+      //   face tag が ON でも、ユーザーが off-axis トグルで OFF を選択すれば面スナップは無効化
       let _faceGrpForDisplay = null;
       if (!_plateGrpForDisplay && ROLE === 'observer' && typeof window.__getMyFacePanel === 'function') {
         _faceGrpForDisplay = window.__getMyFacePanel();
       }
-      const _useOffAxis = (_plateGrpForDisplay != null) || (_faceGrpForDisplay != null) || myDisplay.offaxis;
+      const _faceSnapActive = (_faceGrpForDisplay != null) && myDisplay.offaxis;
+      const _useOffAxis = (_plateGrpForDisplay != null) || _faceSnapActive || myDisplay.offaxis;
       if (_useOffAxis) {
         // ユーザー由来の姿勢を退避
         _oaSavePos.copy(camera.position);
@@ -6779,17 +6779,21 @@
           _oaSaveQuat.copy(camera.quaternion);
           _usedPlate = true;
         }
-        // 面スナップパネル (top/left/right): plate が無く tag が付いていれば採用
-        if (!_usedPlate && _faceGrpForDisplay && _faceGrpForDisplay.userData && _faceGrpForDisplay.userData.faceMesh) {
+        // 面スナップパネル (top/left/right): plate が無く tag + off-axis ON の場合採用
+        //   apex (eye) は原点方向にオフセット = フラスタムが原点に向いて開く
+        if (!_usedPlate && _faceSnapActive && _faceGrpForDisplay.userData.faceMesh) {
+          // 親 grp の matrixWorld を先に更新 (回転を即反映)、その後 mesh も更新
+          _faceGrpForDisplay.updateMatrixWorld(true);
           const fMesh = _faceGrpForDisplay.userData.faceMesh;
           fMesh.updateMatrixWorld(true);
           const fCenter = new THREE.Vector3().setFromMatrixPosition(fMesh.matrixWorld);
           const fQuat   = new THREE.Quaternion().setFromRotationMatrix(fMesh.matrixWorld);
-          // outer 方向 = パネル local -Z を world へ (plate と同じ流儀)
-          const outer = new THREE.Vector3(0, 0, -1).applyQuaternion(fQuat).normalize();
+          // apex 方向 = 原点から panel への向きの逆 = panel → 原点 方向
+          //   → 視錐台 apex が原点側に出て、base (= panel) が外側に広がる
+          const toOrigin = new THREE.Vector3().subVectors(new THREE.Vector3(0, 0, 0), fCenter).normalize();
           _oaDispCenter.copy(fCenter);
           _oaDispQuat.copy(fQuat);
-          _oaEye.copy(fCenter).addScaledVector(outer, FACE_APEX_OFFSET);
+          _oaEye.copy(fCenter).addScaledVector(toOrigin, FACE_APEX_OFFSET);
           _plateW = FACE_PANEL_SIZE;
           _plateH = FACE_PANEL_SIZE;
           camera.position.copy(_oaEye);
