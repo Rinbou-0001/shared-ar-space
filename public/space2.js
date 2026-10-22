@@ -151,27 +151,12 @@
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(10, 20, 10);
-    // シャドウカメラ設定: AncientTree が shadow を受ける/落とすため default-on 化。
-    //   FIELD_HALF (= 30) をリテラルで記述 (この行は FIELD_HALF 宣言より前にある)
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.set(2048, 2048);
-    dirLight.shadow.camera.left   = -30;
-    dirLight.shadow.camera.right  =  30;
-    dirLight.shadow.camera.top    =  30;
-    dirLight.shadow.camera.bottom = -30;
-    dirLight.shadow.camera.near   = 0.5;
-    dirLight.shadow.camera.far    = 120;
-    dirLight.shadow.bias       = -0.0005;
-    dirLight.shadow.normalBias = 0.03;    // 曲面の self-shadow アクネ抑制
-    dirLight.shadow.radius     = 6;       // PCF ソフト半径 (点滅を smoothstep で緩和)
+    // シャドウは完全無効化: 別タブ操作→復帰時のシャドウマップ再生成によるちらつきを根絶。
+    //   原因: autoUpdate=false でも WebGL コンテキスト pause/resume 時にシャドウパスが
+    //         再評価されることがある (ブラウザ依存)。シャドウ機能自体を切ることで回避。
+    dirLight.castShadow = false;
     scene.add(dirLight);
-    // renderer 側も shadow map 有効化 (PCFSoftShadowMap で境界ソフト)
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
-    // タブ切替えやデュアルディスプレイ環境で shadow map が再生成されちらつく問題を回避:
-    //   autoUpdate を OFF にして静的シャドウとして運用。シーン変化時のみ needsUpdate = true で再計算。
-    renderer.shadowMap.autoUpdate = false;
-    renderer.shadowMap.needsUpdate = true;   // 初回だけ一度焼き込む
+    renderer.shadowMap.enabled = false;
 
     // ========== 床: 60m × 60m at origin (白) ==========
     const FIELD_SIZE = 60;
@@ -1301,13 +1286,16 @@
     //     top   (-90, 0, 0) → yaw -90°: +Z normal → -X 方向 (原点方向)
     //     right (180, 0, 0) → yaw 180°: +Z normal → -Z 方向 (原点方向)
     const FACE_PANELS_DEF = {
-      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), yaw: 0,             pitch: 0, roll: 0 },
-      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   yaw: -Math.PI / 2,  pitch: 0, roll: 0 },
-      right: { pos: new THREE.Vector3(0,   1.5,  0.5), yaw: Math.PI,       pitch: 0, roll: 0 },
+      left:  { pos: new THREE.Vector3(0,   1.5, -0.7), yaw: 0,             pitch: 0, roll: 0 },
+      top:   { pos: new THREE.Vector3(0.7, 1.5,  0),   yaw: -Math.PI / 2,  pitch: 0, roll: 0 },
+      right: { pos: new THREE.Vector3(0,   1.5,  0.7), yaw: Math.PI,       pitch: 0, roll: 0 },
     };
     const _facePanels = {};
     // ワイヤーフレーム枠線色: マゼンタ
     const _facePanelEdgeMat = new THREE.LineBasicMaterial({ color: 0xff00ff });
+    // Observer から face panel を非表示にする専用レイヤー (master のみ enable)
+    //   PLATE_LAYER=2 と区別するため FACE_LAYER=3 を使う
+    const FACE_LAYER = 3;
     (function _buildFacePanels() {
       for (const [tag, def] of Object.entries(FACE_PANELS_DEF)) {
         const grp = new THREE.Group();
@@ -1332,8 +1320,15 @@
         grp.userData.faceMesh = mesh;
         scene.add(grp);
         _facePanels[tag] = grp;
+        // FACE_LAYER へ再帰的に移動 → observer カメラ (layer 0 のみ) では非表示
+        (function _toLayer(obj) {
+          obj.layers.set(FACE_LAYER);
+          obj.children.forEach(_toLayer);
+        })(grp);
       }
     })();
+    // master だけ FACE_LAYER を enable → wireframe が master 視点でのみ可視
+    if (ROLE === 'master') camera.layers.enable(FACE_LAYER);
     window.__facePanels = _facePanels;
     // 自身のタグに対応する面パネルを返す
     function _getMyFacePanel() {
@@ -5890,6 +5885,16 @@
       _bind('obs-fullscreen', 'click', () => {
         const el = document.documentElement;
         if (el.requestFullscreen) el.requestFullscreen().catch((e) => log('fullscreen err: ' + e.message, 'err'));
+        else log('requestFullscreen 非対応ブラウザ', 'err');
+      });
+      // ⌥ (Option/Alt) + Shift + Enter: obs-fullscreen ショートカット (observer only)
+      window.addEventListener('keydown', (e) => {
+        if (ROLE !== 'observer') return;
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+        if (!(e.altKey && e.shiftKey) || (e.code !== 'Enter' && e.code !== 'NumpadEnter')) return;
+        e.preventDefault();
+        const el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen().catch((err) => log('fullscreen err: ' + err.message, 'err'));
         else log('requestFullscreen 非対応ブラウザ', 'err');
       });
       // Enter キー: フルスクリーン中なら解除 (INPUT/SELECT フォーカス中は無視)
