@@ -1366,8 +1366,11 @@
     //   効果2 ON の間、メインシーンの代わりに専用 UI シーンを描画。
     //   3 本のスプレー缶 (塗装 palette に対応) を 3D 表示。
     //   ロード時 lazy 初期化、効果2 ON のタイミングで scene を構築。
-    let _ui2Scene = null, _ui2Camera = null;
+    let _ui2Scene = null, _ui2Camera = null, _ui2Shadow = null;
     const _ui2Cans = [];
+    const SHADOW_W0 = 1.6;    // 影の初期幅
+    const SHADOW_H0 = 0.65;   // 影の初期高さ (Sprite = 画面平面に貼られるので縦方向)
+    const FLOAT_AMP = 0.12;   // 浮遊振幅
     function _ensureUi2Scene() {
       if (_ui2Scene) return;
       if (ROLE !== 'camera') return;
@@ -1428,7 +1431,60 @@
       }
       // 現段階: 1 本のみ中央に配置 (後で複数色に拡張予定)
       _makeCan('#029ecc', 0);
-      log('ui2 scene ready (1 spray can)', 'ok');
+      // 浮遊アニメの基準値を can.userData に保存
+      const can0 = _ui2Cans[0];
+      can0.userData.baseY = can0.position.y;
+      can0.userData.baseRotZ = can0.rotation.z;
+      // ───────── 影 (Sprite = カメラ正対 → グリッド背景面に対して垂直に落ちる) ─────────
+      const shadowCanvas = document.createElement('canvas');
+      shadowCanvas.width = 256;
+      shadowCanvas.height = 256;
+      const sctx = shadowCanvas.getContext('2d');
+      const grad = sctx.createRadialGradient(128, 128, 8, 128, 128, 120);
+      grad.addColorStop(0,    'rgba(15, 18, 24, 0.40)');
+      grad.addColorStop(0.35, 'rgba(15, 18, 24, 0.24)');
+      grad.addColorStop(0.7,  'rgba(15, 18, 24, 0.08)');
+      grad.addColorStop(1,    'rgba(15, 18, 24, 0.00)');
+      sctx.fillStyle = grad;
+      sctx.fillRect(0, 0, 256, 256);
+      const shadowTex = new THREE.CanvasTexture(shadowCanvas);
+      const shadowMat = new THREE.SpriteMaterial({
+        map: shadowTex,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false,
+        depthTest: true,
+      });
+      _ui2Shadow = new THREE.Sprite(shadowMat);
+      // 影を缶の真下 (y=0.01 で擬似床、X=Z=0) に配置
+      _ui2Shadow.position.set(0, 0.01, 0);
+      _ui2Shadow.scale.set(SHADOW_W0, SHADOW_H0, 1);
+      _ui2Scene.add(_ui2Shadow);
+      log('ui2 scene ready (1 spray can + shadow)', 'ok');
+    }
+
+    // ===== 効果2 UI の毎フレーム更新 (浮遊アニメ + 影連動) =====
+    //   既存メインループ内の 'effect2 ON + camera' 分岐で呼ばれる。
+    //   clock は tick 側のメインインスタンスを共有参照 (後方で定義されるので window 経由で参照可)。
+    function _ui2AnimUpdate(elapsed) {
+      if (!_ui2Scene) return;
+      const can = _ui2Cans[0];
+      if (!can) return;
+      // 1. 缶を上下に浮遊
+      const floatOffset = Math.sin(elapsed * 1.5) * FLOAT_AMP;
+      can.position.y = can.userData.baseY + floatOffset;
+      // 2. 微細な回転でふわふわ感
+      can.rotation.z = can.userData.baseRotZ + Math.sin(elapsed * 0.8) * 0.035;
+      can.rotation.x = Math.sin(elapsed * 0.6) * 0.025;
+      // 3. 浮遊高さを 0〜1 に正規化
+      const heightRatio = Math.max(0, Math.min(1, (floatOffset + FLOAT_AMP) / (FLOAT_AMP * 2)));
+      // 4. 高く浮くほど影を小さく
+      if (_ui2Shadow) {
+        const sFactor = 1.15 - heightRatio * 0.25;
+        _ui2Shadow.scale.set(SHADOW_W0 * sFactor, SHADOW_H0 * sFactor, 1);
+        // 5. 高く浮くほど影を薄く
+        _ui2Shadow.material.opacity = 0.9 - heightRatio * 0.4;
+      }
     }
     function _ui2Resize() {
       if (!_ui2Camera) return;
@@ -6272,10 +6328,12 @@
 
       // ========== 効果2: スマホ UI モード (camera role のみ) → スプレー缶 UI シーンを描画 ==========
       //   メインシーンの代わりに _ui2Scene (スプレー缶の 3D UI) を描画。
+      //   浮遊アニメ + 影連動は _ui2AnimUpdate で毎フレーム適用。
       //   スプレーボタンや pose 送信は updaters 側で通常通り動作。
       if (ROLE === 'camera' && window.__effect && window.__effect[2]) {
         _ensureUi2Scene();
         if (_ui2Scene && _ui2Camera) {
+          _ui2AnimUpdate(clock.getElapsedTime());
           renderer.render(_ui2Scene, _ui2Camera);
         }
         return;
