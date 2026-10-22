@@ -2137,8 +2137,10 @@
           u_time:  { value: 0 },
           u_color: { value: new THREE.Color('#e8f4ff') },
         },
+        // 注: Three.js ShaderMaterial は InstancedBufferGeometry 検出時に
+        //   `attribute mat4 instanceMatrix;` を自動で prefix に挿入する。
+        //   明示宣言すると duplicate でコンパイル失敗するため、宣言しないこと。
         vertexShader: `
-          attribute mat4 instanceMatrix;
           uniform float u_time;
           varying vec2 vUv;
           varying float vPulse;
@@ -2157,6 +2159,8 @@
             gl_Position   = projectionMatrix * (mvCenter + vec4(offset, 0.0, 0.0));
           }
         `,
+        // 白背景 (0xffffff) 上での視認性を確保するため NormalBlending + alpha radial で描画。
+        // AdditiveBlending は白背景だと加算が飽和して見えないため不採用。
         fragmentShader: `
           precision mediump float;
           uniform vec3 u_color;
@@ -2165,13 +2169,13 @@
           void main() {
             vec2 d = vUv - 0.5;
             float r = length(d);
-            float alpha = smoothstep(0.5, 0.0, r);           // 中心=1, 外周=0 の radial gradient
-            float glow  = alpha * (0.5 + 0.5 * vPulse);      // 脈動で明度も変化
-            gl_FragColor = vec4(u_color * glow, glow);
+            float alpha = smoothstep(0.5, 0.0, r);              // 中心=1, 外周=0 の radial gradient
+            float a     = alpha * (0.55 + 0.45 * vPulse);        // 脈動で alpha も変化 (0.55..1.0 倍)
+            gl_FragColor = vec4(u_color, a);
           }
         `,
         transparent: true,
-        blending: THREE.AdditiveBlending,
+        blending: THREE.NormalBlending,
         depthWrite: false,
       });
       _skyShaderMats.push(mat);
