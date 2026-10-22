@@ -2144,18 +2144,23 @@
           uniform float u_time;
           varying vec2 vUv;
           varying float vPulse;
+          varying float vInstScale;
           void main() {
             vUv = uv;
             vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+            // instanceMatrix の基底ベクトル長 = 一様スケール (fade-in / fade-out で CPU 側が 0→1 / 1→0 に書換)
+            //   これを offset と alpha に乗算することで、既存 fade-out パイプラインに乗る
+            float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+            vInstScale = instScale;
             // 位置から擬似ランダム phase (0..2π) を導出 → instance ごとに位相ずらし
             float phase = fract(sin(dot(instancePos, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2831853;
             // 周期 2 秒 → 角速度 π rad/s
             float pulse = 0.5 + 0.5 * sin(u_time * 3.14159265 + phase); // 0..1
-            float scale = 0.6 + 0.8 * pulse;                            // 0.6..1.4
+            float pulseScale = 0.6 + 0.8 * pulse;                       // 0.6..1.4
             vPulse = pulse;
             // billboard: instance 中心を view 空間に変換 → position.xy を view 空間で加算 (常にカメラ正対)
             vec4 mvCenter = modelViewMatrix * vec4(instancePos, 1.0);
-            vec2 offset   = position.xy * scale;
+            vec2 offset   = position.xy * pulseScale * instScale;
             gl_Position   = projectionMatrix * (mvCenter + vec4(offset, 0.0, 0.0));
           }
         `,
@@ -2166,11 +2171,12 @@
           uniform vec3 u_color;
           varying vec2 vUv;
           varying float vPulse;
+          varying float vInstScale;
           void main() {
             vec2 d = vUv - 0.5;
             float r = length(d);
             float alpha = smoothstep(0.5, 0.0, r);              // 中心=1, 外周=0 の radial gradient
-            float a     = alpha * (0.55 + 0.45 * vPulse);        // 脈動で alpha も変化 (0.55..1.0 倍)
+            float a     = alpha * (0.55 + 0.45 * vPulse) * clamp(vInstScale, 0.0, 1.0);
             gl_FragColor = vec4(u_color, a);
           }
         `,
