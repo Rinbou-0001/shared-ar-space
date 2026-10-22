@@ -638,7 +638,7 @@
       },
       sky: {
         color: '002044',
-        perVoxel: 2,
+        perVoxel: 1,
         maxPerChunk: 3000,
         makeGeometry: () => _makeBillboardStarGeometry(0.025),
         makeMaterial: () => _makeSkyStarShaderMaterial(),
