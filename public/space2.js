@@ -641,11 +641,9 @@
         perVoxel: 2,
         maxPerChunk: 3000,
         makeGeometry: () => _makeBillboardStarGeometry(0.025),
-        makeMaterial: () => new THREE.MeshBasicMaterial({
-          color: 0xaacfff, transparent: true, opacity: 0.9, depthWrite: false,
-        }),
+        makeMaterial: () => _makeSkyStarShaderMaterial(),
         scaleJitter: [0.5, 1.5],
-        orientUpWithNormal: false,               // 星は常にカメラ正対 (手動 billboard)
+        orientUpWithNormal: false,               // 星は常にカメラ正対 (shader 側で billboard)
       },
     };
     // チャンク cap 到達時の再試行上限 (保険)
@@ -657,7 +655,7 @@
     //   blades: 配列 [{ chunk, idx, pos:Vector3, quat:Quaternion, scaleTarget:number }]
     const _modeAnimEntries = [];
     // スプレー発火を有効化するモード集合
-    const MODE_SPRAY_ACTIVE = new Set(['wood', 'river']);
+    const MODE_SPRAY_ACTIVE = new Set(['wood', 'river', 'sky']);
     // 色 hex → mode 名の逆引き
     const _modeByColor = new Map();
     for (const [m, r] of Object.entries(MODE_RULES)) _modeByColor.set(r.color.toLowerCase(), m);
@@ -2125,6 +2123,59 @@
     function _makeBillboardStarGeometry(size) {
       const g = new THREE.PlaneGeometry(size, size);
       return g;
+    }
+
+    // ===== sky mode: pulsing star ShaderMaterial =====
+    //   ・各 instance ごとに固有 phase (位置 hash) で位相をずらし、周期 2 秒で scale 0.6〜1.4 倍に脈動
+    //   ・fragment: 中心ほど明るい radial gradient + additive blending で星状の輝きを表現
+    //   ・ベース色は わずか青寄せ (#e8f4ff)
+    //   ・毎フレーム u_time を更新 (sky チャンクが複数生成されても material は 1 個/チャンクなので配列管理)
+    const _skyShaderMats = [];
+    function _makeSkyStarShaderMaterial() {
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          u_time:  { value: 0 },
+          u_color: { value: new THREE.Color('#e8f4ff') },
+        },
+        vertexShader: `
+          attribute mat4 instanceMatrix;
+          uniform float u_time;
+          varying vec2 vUv;
+          varying float vPulse;
+          void main() {
+            vUv = uv;
+            vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+            // 位置から擬似ランダム phase (0..2π) を導出 → instance ごとに位相ずらし
+            float phase = fract(sin(dot(instancePos, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2831853;
+            // 周期 2 秒 → 角速度 π rad/s
+            float pulse = 0.5 + 0.5 * sin(u_time * 3.14159265 + phase); // 0..1
+            float scale = 0.6 + 0.8 * pulse;                            // 0.6..1.4
+            vPulse = pulse;
+            // billboard: instance 中心を view 空間に変換 → position.xy を view 空間で加算 (常にカメラ正対)
+            vec4 mvCenter = modelViewMatrix * vec4(instancePos, 1.0);
+            vec2 offset   = position.xy * scale;
+            gl_Position   = projectionMatrix * (mvCenter + vec4(offset, 0.0, 0.0));
+          }
+        `,
+        fragmentShader: `
+          precision mediump float;
+          uniform vec3 u_color;
+          varying vec2 vUv;
+          varying float vPulse;
+          void main() {
+            vec2 d = vUv - 0.5;
+            float r = length(d);
+            float alpha = smoothstep(0.5, 0.0, r);           // 中心=1, 外周=0 の radial gradient
+            float glow  = alpha * (0.5 + 0.5 * vPulse);      // 脈動で明度も変化
+            gl_FragColor = vec4(u_color * glow, glow);
+          }
+        `,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      _skyShaderMats.push(mat);
+      return mat;
     }
 
     // ============ Union-Find ============
@@ -4800,6 +4851,12 @@
     updaters.push(_modeCullTick);
     // 川 shader の uTime を全チャンク材料で共有 (uniforms 同一参照、1行で全反映)
     updaters.push(() => { _sharedRiverUniforms.uTime.value = performance.now() * 0.001; });
+    // sky star shader: u_time を全マテリアルに同期更新 (脈動アニメーション)
+    updaters.push(() => {
+      if (_skyShaderMats.length === 0) return;
+      const t = performance.now() * 0.001;
+      for (const m of _skyShaderMats) m.uniforms.u_time.value = t;
+    });
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
 
