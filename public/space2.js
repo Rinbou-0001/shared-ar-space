@@ -1437,8 +1437,8 @@
       _ui2Scene.add(_ui2Slider);
       function _makeCan(colorHex, xOffset) {
         const can = new THREE.Group();
-        // ラベル (本体) は白で統一 ─ 選択色は缶の userData に保持、本体色自体は塗装色と連動しない
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.35, roughness: 0.32 });
+        // 本体 (ラベル面) は colorHex (= 割り当てられた labelColor) を使用
+        const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.32 });
         _addCyl(can, 0.5, 0.5, 2.4, bodyMat, 1.35);
         _addCyl(can, 0.25, 0.5, 0.32, metalMat, 2.71);
         _addCyl(can, 0.19, 0.25, 0.14, metalMat, 2.94);
@@ -1593,7 +1593,7 @@
       const targetPos = can.position.clone();
       targetPos.x = 0;
       targetPos.y = can.userData.baseY;
-      const targetScale = can.scale.clone().multiplyScalar(1.5);
+      const targetScale = can.scale.clone().multiplyScalar(3.0);
       const startPos = _ui2CanStart.pos.clone();
       const startScale = _ui2CanStart.scale.clone();
       // ④ 対応する shadow を同期的にフェードアウト
@@ -1615,11 +1615,13 @@
       _ui2Mode = 'label';
       _ui2Label.material.color.set(_ui2SelectedCan.userData.labelColor);
       _ui2Label.visible = true;
-      _ui2Label.scale.set(0, 0, 1);
+      // 画面全体サイズに最初から拡大、opacity を 0→1 でフェードイン
       const full = _ui2LabelFullSize();
+      _ui2Label.scale.set(full.w, full.h, 1);
+      _ui2Label.material.opacity = 0;
       _ui2StartTransition(0.45,
         (t) => {
-          _ui2Label.scale.set(full.w * t, full.h * t, 1);
+          _ui2Label.material.opacity = t;
         },
         () => {
           // 完全展開完了 → 他オブジェクトを隠して描画コスト削減
@@ -1631,7 +1633,6 @@
     function _ui2CloseLabelAndReturn() {
       if (_ui2Mode !== 'label' || _ui2TransitionBusy()) return;
       if (_ui2Slider) _ui2Slider.visible = true;
-      const full = _ui2LabelFullSize();
       // 缶復帰用の start/end を事前にキャプチャ
       const can = _ui2SelectedCan;
       const sh  = _ui2Shadows[_ui2SelectedIdx];
@@ -1654,15 +1655,14 @@
           }
         );
       }
-      // ラベル縮小、80% の時点で缶復帰を発火 (overlap)
+      // ラベル opacity フェードアウト、80% の時点で缶復帰を発火 (overlap)
       _ui2StartTransition(0.45,
         (t) => {
-          const k = 1 - t;
-          _ui2Label.scale.set(full.w * k, full.h * k, 1);
+          _ui2Label.material.opacity = 1 - t;
         },
         () => {
           _ui2Label.visible = false;
-          _ui2Label.scale.set(0, 0, 1);
+          _ui2Label.material.opacity = 0;
         },
         _startCanReturn,
         0.8
