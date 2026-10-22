@@ -168,6 +168,10 @@
     // renderer 側も shadow map 有効化 (PCFSoftShadowMap で境界ソフト)
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+    // タブ切替えやデュアルディスプレイ環境で shadow map が再生成されちらつく問題を回避:
+    //   autoUpdate を OFF にして静的シャドウとして運用。シーン変化時のみ needsUpdate = true で再計算。
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;   // 初回だけ一度焼き込む
 
     // ========== 床: 60m × 60m at origin (白) ==========
     const FIELD_SIZE = 60;
@@ -1741,6 +1745,10 @@
       const el = renderer.domElement;
       if (!el || el.__ui2DragAttached) return;
       el.__ui2DragAttached = true;
+      // Android Chrome 対策: canvas の touch-action を 'none' にして、ブラウザのスクロール/
+      //   ズームジェスチャが pointer イベント列を中断しないようにする (pointermove が
+      //   最後のみに潰されて慣性が計算できない問題を解消)
+      el.style.touchAction = 'none';
       let dragging = false, lastX = 0;
       let startX = 0, startY = 0, startT = 0;
       // X 画面ピクセル → world 単位への変換係数 (perspective, distance ~8m 面で近似)
@@ -6739,14 +6747,26 @@
       if (ROLE === 'observer' && typeof window.__getMyPlateGrp === 'function') {
         _plateGrpForDisplay = window.__getMyPlateGrp();
       }
-      // 面スナップパネル (top/left/right) ─ plate よりは優先度低、plate が無い場合に採用
-      //   face tag が ON でも、ユーザーが off-axis トグルで OFF を選択すれば面スナップは無効化
+      // 面スナップパネル (top/left/right) ─ off-axis とは独立、タグが付いた瞬間に avatar の
+      //   位置/向きを apex へ瞬間移動 (スナップ)。view projection は通常 perspective のまま。
       let _faceGrpForDisplay = null;
       if (!_plateGrpForDisplay && ROLE === 'observer' && typeof window.__getMyFacePanel === 'function') {
         _faceGrpForDisplay = window.__getMyFacePanel();
       }
-      const _faceSnapActive = (_faceGrpForDisplay != null) && myDisplay.offaxis;
-      const _useOffAxis = (_plateGrpForDisplay != null) || _faceSnapActive || myDisplay.offaxis;
+      // 面タグ ON → camera position/quaternion を apex へ毎フレーム snap (off-axis とは無関係)
+      if (_faceGrpForDisplay && _faceGrpForDisplay.userData.faceMesh) {
+        _faceGrpForDisplay.updateMatrixWorld(true);
+        const fMesh = _faceGrpForDisplay.userData.faceMesh;
+        fMesh.updateMatrixWorld(true);
+        const fCenter = new THREE.Vector3().setFromMatrixPosition(fMesh.matrixWorld);
+        // apex 方向 = panel → viewerEye
+        const vEye = new THREE.Vector3(viewerEye.x, viewerEye.y, viewerEye.z);
+        const toViewer = new THREE.Vector3().subVectors(vEye, fCenter).normalize();
+        const apexPos = fCenter.clone().addScaledVector(toViewer, FACE_APEX_OFFSET);
+        camera.position.copy(apexPos);
+        camera.lookAt(fCenter);
+      }
+      const _useOffAxis = (_plateGrpForDisplay != null) || myDisplay.offaxis;
       if (_useOffAxis) {
         // ユーザー由来の姿勢を退避
         _oaSavePos.copy(camera.position);
@@ -6773,30 +6793,7 @@
           _oaSaveQuat.copy(camera.quaternion);
           _usedPlate = true;
         }
-        // 面スナップパネル (top/left/right): plate が無く tag + off-axis ON の場合採用
-        //   apex (eye) は原点方向にオフセット = フラスタムが原点に向いて開く
-        if (!_usedPlate && _faceSnapActive && _faceGrpForDisplay.userData.faceMesh) {
-          // 親 grp の matrixWorld を先に更新 (回転を即反映)、その後 mesh も更新
-          _faceGrpForDisplay.updateMatrixWorld(true);
-          const fMesh = _faceGrpForDisplay.userData.faceMesh;
-          fMesh.updateMatrixWorld(true);
-          const fCenter = new THREE.Vector3().setFromMatrixPosition(fMesh.matrixWorld);
-          const fQuat   = new THREE.Quaternion().setFromRotationMatrix(fMesh.matrixWorld);
-          // apex 方向 = panel → viewerEye (= 共通視点) 方向
-          //   → 視錐台 apex が viewerEye 側に出て、base (= panel) が外側に広がる
-          const vEye = new THREE.Vector3(viewerEye.x, viewerEye.y, viewerEye.z);
-          const toViewer = new THREE.Vector3().subVectors(vEye, fCenter).normalize();
-          _oaDispCenter.copy(fCenter);
-          _oaDispQuat.copy(fQuat);
-          _oaEye.copy(fCenter).addScaledVector(toViewer, FACE_APEX_OFFSET);
-          _plateW = FACE_PANEL_SIZE;
-          _plateH = FACE_PANEL_SIZE;
-          camera.position.copy(_oaEye);
-          camera.lookAt(fCenter);
-          _oaSavePos.copy(camera.position);
-          _oaSaveQuat.copy(camera.quaternion);
-          _usedPlate = true;   // 以降の fallback 分岐を skip
-        }
+        // 面タグ snap は off-axis block の外 (上方) で済ませてあるため、ここでは何もしない
         if (!_usedPlate) {
           if (ROLE === 'camera') {
             // スマホ: eye = 自分の位置、画面 = 視線 20cm 前方、画面姿勢 = camera 姿勢
