@@ -1366,20 +1366,27 @@
     //   効果2 ON の間、メインシーンの代わりに専用 UI シーンを描画。
     //   3 本のスプレー缶 (塗装 palette に対応) を 3D 表示。
     //   ロード時 lazy 初期化、効果2 ON のタイミングで scene を構築。
-    let _ui2Scene = null, _ui2Camera = null, _ui2Shadow = null;
-    const _ui2Cans = [];
-    const SHADOW_W0 = 1.6;    // 影の初期幅
-    const SHADOW_H0 = 0.65;   // 影の初期高さ (Sprite = 画面平面に貼られるので縦方向)
-    const FLOAT_AMP = 0.12;   // 浮遊振幅
+    let _ui2Scene = null, _ui2Camera = null, _ui2Slider = null;
+    const _ui2Cans = [];       // 3 本のスプレー缶
+    const _ui2Shadows = [];    // 各缶に対応するスプライト影
+    const SHADOW_W0 = 1.6;     // 影の初期幅
+    const SHADOW_H0 = 0.65;    // 影の初期高さ
+    const FLOAT_AMP = 0.12;    // 浮遊振幅
+    const UI2_CAN_SPACING = 2.0;   // スライダー横間隔 (m)
+    const UI2_PALETTE = ['#029ecc', '#ffce18', '#df2c1e'];
+    let _ui2SliderOffsetX = 0;     // スライダーの横オフセット (ドラッグで更新、ループ適用)
     function _ensureUi2Scene() {
       if (_ui2Scene) return;
       if (ROLE !== 'camera') return;
       _ui2Scene = new THREE.Scene();
       // background は null → canvas は透過、下の grid overlay (CSS) が背景として見える
       _ui2Scene.background = null;
+      // カメラ: FOV 35°, distance 8 → 画面高さ = 2*8*tan(17.5°) ≒ 5m 相当。
+      //   look-at Y = 2.5 → 画面中央=y2.5、画面下端=y0、画面上端=y5
+      //   → 缶 (高さ約 4m) を y=0 開始にすれば画面高さ 80% (0 〜 4m) を占有、上 20% はスプレーボタン領域
       _ui2Camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 100);
-      _ui2Camera.position.set(3.5, 2.8, 6);
-      _ui2Camera.lookAt(0, 1.65, 0);
+      _ui2Camera.position.set(0, 2.5, 8);
+      _ui2Camera.lookAt(0, 2.5, 0);
       // ライト
       _ui2Scene.add(new THREE.HemisphereLight(0xffffff, 0x777788, 2));
       const key = new THREE.DirectionalLight(0xffffff, 3);
@@ -1404,6 +1411,10 @@
         m.position.y = y;
         parent.add(m);
       }
+      // スライダーグループ (3 本の缶をまとめる、横ドラッグでループ)
+      _ui2Slider = new THREE.Group();
+      _ui2Slider.name = 'ui2-slider';
+      _ui2Scene.add(_ui2Slider);
       function _makeCan(colorHex, xOffset) {
         const can = new THREE.Group();
         // ラベル (本体) は白で統一 ─ 選択色は缶の userData に保持、本体色自体は塗装色と連動しない
@@ -1426,16 +1437,19 @@
         can.rotation.z = -0.04;
         can.position.set(xOffset, 0, 0);
         can.userData.colorHex = colorHex;
-        _ui2Scene.add(can);
+        can.userData.baseX = xOffset;        // ループ計算の基準値
+        _ui2Slider.add(can);
         _ui2Cans.push(can);
       }
-      // 現段階: 1 本のみ中央に配置 (後で複数色に拡張予定)
-      _makeCan('#029ecc', 0);
-      // 浮遊アニメの基準値を can.userData に保存
-      const can0 = _ui2Cans[0];
-      can0.userData.baseY = can0.position.y;
-      can0.userData.baseRotZ = can0.rotation.z;
+      // 3 本の缶を slider に配置 (local X = -s, 0, +s)
+      UI2_PALETTE.forEach((c, i) => _makeCan(c, (i - 1) * UI2_CAN_SPACING));
+      // 浮遊アニメの基準値を各缶に保存
+      _ui2Cans.forEach((can) => {
+        can.userData.baseY = can.position.y;
+        can.userData.baseRotZ = can.rotation.z;
+      });
       // ───────── 影 (Sprite = カメラ正対 → グリッド背景面に対して垂直に落ちる) ─────────
+      //   各缶に 1 つずつ割当て、slider の子として一緒に横移動
       const shadowCanvas = document.createElement('canvas');
       shadowCanvas.width = 256;
       shadowCanvas.height = 256;
@@ -1448,19 +1462,59 @@
       sctx.fillStyle = grad;
       sctx.fillRect(0, 0, 256, 256);
       const shadowTex = new THREE.CanvasTexture(shadowCanvas);
-      const shadowMat = new THREE.SpriteMaterial({
-        map: shadowTex,
-        transparent: true,
-        opacity: 0.8,
-        depthWrite: false,
-        depthTest: true,
+      _ui2Cans.forEach((can) => {
+        const sMat = new THREE.SpriteMaterial({
+          map: shadowTex,
+          transparent: true,
+          opacity: 0.8,
+          depthWrite: false,
+          depthTest: true,
+        });
+        const s = new THREE.Sprite(sMat);
+        s.position.set(can.userData.baseX, 0.01, 0);   // 缶の真下
+        s.scale.set(SHADOW_W0, SHADOW_H0, 1);
+        s.userData.baseX = can.userData.baseX;
+        _ui2Slider.add(s);
+        _ui2Shadows.push(s);
       });
-      _ui2Shadow = new THREE.Sprite(shadowMat);
-      // 影を缶の真下 (y=0.01 で擬似床、X=Z=0) に配置
-      _ui2Shadow.position.set(0, 0.01, 0);
-      _ui2Shadow.scale.set(SHADOW_W0, SHADOW_H0, 1);
-      _ui2Scene.add(_ui2Shadow);
-      log('ui2 scene ready (1 spray can + shadow)', 'ok');
+      // スライダー横ドラッグ (ループ)
+      _ui2AttachSliderDrag();
+      log('ui2 scene ready (3 cans slider + loop)', 'ok');
+    }
+
+    // ===== スライダー横ドラッグ (タッチ/マウス) =====
+    //   pointerdown で start、pointermove で offset を更新、pointerup で終了。
+    //   offset はループなので無限に増減してよいが、各缶の表示位置は modulo 計算でラップする。
+    function _ui2AttachSliderDrag() {
+      const el = renderer.domElement;
+      if (!el || el.__ui2DragAttached) return;
+      el.__ui2DragAttached = true;
+      let dragging = false, lastX = 0;
+      // X 画面ピクセル → world 単位への変換係数 (perspective camera のため距離 d=8 の面で近似)
+      //   画面幅 world = 2 * 8 * tan(17.5°) * aspect ≈ 5 * aspect
+      function _pxToWorld(px) {
+        const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+        const worldWidth = 5 * aspect;
+        return (px / window.innerWidth) * worldWidth;
+      }
+      el.addEventListener('pointerdown', (ev) => {
+        if (!_isCameraUIMode()) return;
+        dragging = true;
+        lastX = ev.clientX;
+        try { el.setPointerCapture(ev.pointerId); } catch (_) {}
+      });
+      el.addEventListener('pointermove', (ev) => {
+        if (!dragging) return;
+        const dx = ev.clientX - lastX;
+        lastX = ev.clientX;
+        _ui2SliderOffsetX += _pxToWorld(dx);
+      });
+      function _endDrag(ev) {
+        dragging = false;
+        try { el.releasePointerCapture(ev.pointerId); } catch (_) {}
+      }
+      el.addEventListener('pointerup', _endDrag);
+      el.addEventListener('pointercancel', _endDrag);
     }
 
     // ===== 効果2 UI の毎フレーム更新 (浮遊アニメ + 影連動) =====
@@ -1468,22 +1522,34 @@
     //   clock は tick 側のメインインスタンスを共有参照 (後方で定義されるので window 経由で参照可)。
     function _ui2AnimUpdate(elapsed) {
       if (!_ui2Scene) return;
-      const can = _ui2Cans[0];
-      if (!can) return;
-      // 1. 缶を上下に浮遊
-      const floatOffset = Math.sin(elapsed * 1.5) * FLOAT_AMP;
-      can.position.y = can.userData.baseY + floatOffset;
-      // 2. 微細な回転でふわふわ感
-      can.rotation.z = can.userData.baseRotZ + Math.sin(elapsed * 0.8) * 0.035;
-      can.rotation.x = Math.sin(elapsed * 0.6) * 0.025;
-      // 3. 浮遊高さを 0〜1 に正規化
-      const heightRatio = Math.max(0, Math.min(1, (floatOffset + FLOAT_AMP) / (FLOAT_AMP * 2)));
-      // 4. 高く浮くほど影を小さく
-      if (_ui2Shadow) {
-        const sFactor = 1.15 - heightRatio * 0.25;
-        _ui2Shadow.scale.set(SHADOW_W0 * sFactor, SHADOW_H0 * sFactor, 1);
-        // 5. 高く浮くほど影を薄く
-        _ui2Shadow.material.opacity = 0.9 - heightRatio * 0.4;
+      const n = _ui2Cans.length;
+      if (n === 0) return;
+      // スライダーループ用の幅 (3 本の缶を無限に送れるよう modulo)
+      const spanW = n * UI2_CAN_SPACING;
+      const halfSpan = spanW / 2;
+      // 全缶を同じ位相でふわふわ浮遊 + 横オフセット (ループ)
+      for (let i = 0; i < n; i++) {
+        const can = _ui2Cans[i];
+        // ─── 横ループ: baseX + sliderOffsetX を wrap して [-halfSpan, +halfSpan) に ───
+        let x = can.userData.baseX + _ui2SliderOffsetX;
+        while (x >  halfSpan) x -= spanW;
+        while (x < -halfSpan) x += spanW;
+        can.position.x = x;
+        // ─── 浮遊 (phase を can 毎に少しずらして同期しすぎないように) ───
+        const phase = elapsed * 1.5 + i * 0.5;
+        const floatOffset = Math.sin(phase) * FLOAT_AMP;
+        can.position.y = can.userData.baseY + floatOffset;
+        can.rotation.z = can.userData.baseRotZ + Math.sin(elapsed * 0.8 + i * 0.4) * 0.035;
+        can.rotation.x = Math.sin(elapsed * 0.6 + i * 0.3) * 0.025;
+        // ─── 対応する影を同じ x に、浮遊で scale / opacity を連動 ───
+        const s = _ui2Shadows[i];
+        if (s) {
+          s.position.x = x;
+          const heightRatio = Math.max(0, Math.min(1, (floatOffset + FLOAT_AMP) / (FLOAT_AMP * 2)));
+          const sFactor = 1.15 - heightRatio * 0.25;
+          s.scale.set(SHADOW_W0 * sFactor, SHADOW_H0 * sFactor, 1);
+          s.material.opacity = 0.9 - heightRatio * 0.4;
+        }
       }
     }
     function _ui2Resize() {
