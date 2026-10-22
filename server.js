@@ -107,7 +107,8 @@ let moveConfig = { sensitivity: 10 };
 //   effect3: Fog 中心 — false=カメラ基準, true=原点固定
 //   effect4: cube しなりモード — false=直結ばね, true=2段ばね+向き追従 (遠心力感)
 //   新規接続時にも initEffects で現在値を送る
-let effectState = { 1: false, 2: false, 3: false, 4: false };
+// 効果2 (camera のスプレー缶 UI モード) はデフォルト ON 恒常化
+let effectState = { 1: false, 2: true, 3: false, 4: false };
 
 // space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。
 //   各要素: { u, v, c (hex 6文字) } — 1 件 ~24 bytes

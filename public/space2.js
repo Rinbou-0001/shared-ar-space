@@ -1362,6 +1362,80 @@
       return ROLE === 'camera' && window.__effect && window.__effect[2];
     }
 
+    // ===== 効果2 UI: スプレー缶シーン (camera ロール限定) =====
+    //   効果2 ON の間、メインシーンの代わりに専用 UI シーンを描画。
+    //   3 本のスプレー缶 (塗装 palette に対応) を 3D 表示。
+    //   ロード時 lazy 初期化、効果2 ON のタイミングで scene を構築。
+    let _ui2Scene = null, _ui2Camera = null;
+    const _ui2Cans = [];
+    function _ensureUi2Scene() {
+      if (_ui2Scene) return;
+      if (ROLE !== 'camera') return;
+      _ui2Scene = new THREE.Scene();
+      _ui2Scene.background = new THREE.Color(0xf4f4f4);
+      _ui2Camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 100);
+      _ui2Camera.position.set(3.5, 2.8, 6);
+      _ui2Camera.lookAt(0, 1.65, 0);
+      // ライト
+      _ui2Scene.add(new THREE.HemisphereLight(0xffffff, 0x777788, 2));
+      const key = new THREE.DirectionalLight(0xffffff, 3);
+      key.position.set(4, 6, 5);
+      _ui2Scene.add(key);
+      const fill = new THREE.DirectionalLight(0xffffff, 1.2);
+      fill.position.set(-4, 2, -3);
+      _ui2Scene.add(fill);
+      // 共通マテリアル (本体色のみ缶毎に差替え)
+      const metalMat = new THREE.MeshStandardMaterial({ color: 0xbfc5ca, metalness: 0.8, roughness: 0.25 });
+      const capMat   = new THREE.MeshStandardMaterial({ color: 0x242424, roughness: 0.48 });
+      const nozzleMat= new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.65, roughness: 0.28 });
+      const holeMat  = new THREE.MeshBasicMaterial({ color: 0x171717 });
+      function _addCyl(parent, rt, rb, h, mat, y, seg) {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg || 64), mat);
+        m.position.y = y;
+        parent.add(m);
+      }
+      function _addRing(parent, r, t, y, mat) {
+        const m = new THREE.Mesh(new THREE.TorusGeometry(r, t, 12, 64), mat);
+        m.rotation.x = Math.PI / 2;
+        m.position.y = y;
+        parent.add(m);
+      }
+      function _makeCan(colorHex, xOffset) {
+        const can = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.32 });
+        _addCyl(can, 0.5, 0.5, 2.4, bodyMat, 1.35);
+        _addCyl(can, 0.25, 0.5, 0.32, metalMat, 2.71);
+        _addCyl(can, 0.19, 0.25, 0.14, metalMat, 2.94);
+        _addRing(can, 0.475, 0.025, 0.17, metalMat);
+        _addRing(can, 0.48, 0.018, 2.53, metalMat);
+        _addCyl(can, 0.31, 0.31, 0.52, capMat, 3.22);
+        const capTop = new THREE.Mesh(new THREE.CircleGeometry(0.31, 64), capMat);
+        capTop.rotation.x = -Math.PI / 2;
+        capTop.position.y = 3.48;
+        can.add(capTop);
+        _addCyl(can, 0.13, 0.16, 0.12, nozzleMat, 3.56, 32);
+        const nozzleHole = new THREE.Mesh(new THREE.CircleGeometry(0.035, 24), holeMat);
+        nozzleHole.position.set(0, 3.625, 0.08);
+        nozzleHole.rotation.x = -Math.PI / 2;
+        can.add(nozzleHole);
+        can.rotation.z = -0.04;
+        can.position.set(xOffset, 0, 0);
+        can.userData.colorHex = colorHex;
+        _ui2Scene.add(can);
+        _ui2Cans.push(can);
+      }
+      // 3 色の缶 (ランダム割当 palette と一致)
+      const palette = ['#029ecc', '#ffce18', '#df2c1e'];
+      palette.forEach((c, i) => _makeCan(c, (i - 1) * 1.5));
+      log('ui2 scene ready (3 spray cans)', 'ok');
+    }
+    function _ui2Resize() {
+      if (!_ui2Camera) return;
+      _ui2Camera.aspect = window.innerWidth / window.innerHeight;
+      _ui2Camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', _ui2Resize);
+
     // ===== スプレー照準リング (observer / master 限定) =====
     //   各 camera avatar の視線方向にローカル raycast を打ち、衝突点に単位半径リングを配置。
     //   以前動作確認済みのロジックを復元: RingGeometry(0.9, 1.0, 48) + MeshBasicMaterial。
@@ -6195,10 +6269,14 @@
         }
       }
 
-      // ========== 効果2: スマホ UI モード (camera role のみ) → シーン描画スキップ ==========
-      //   grid overlay (CSS) のみ表示、スプレーのローカル塗装や他オブジェクトの反映は行わない。
-      //   スプレーボタンや pose 送信は通常通り動作 (ロジックは tick 内の他部分で続行)。
+      // ========== 効果2: スマホ UI モード (camera role のみ) → スプレー缶 UI シーンを描画 ==========
+      //   メインシーンの代わりに _ui2Scene (スプレー缶の 3D UI) を描画。
+      //   スプレーボタンや pose 送信は updaters 側で通常通り動作。
       if (ROLE === 'camera' && window.__effect && window.__effect[2]) {
+        _ensureUi2Scene();
+        if (_ui2Scene && _ui2Camera) {
+          renderer.render(_ui2Scene, _ui2Camera);
+        }
         return;
       }
       // ========== render: myDisplay.offaxis で分岐 ==========

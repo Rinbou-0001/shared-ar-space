@@ -49,8 +49,9 @@
       z-index: 2;
       pointer-events: none;
     }
-    body.camera-ui-mode #grid-overlay { display: block; }
-    body.camera-ui-mode #stage canvas { visibility: hidden; }
+    /* 効果2 ON (camera-ui-mode): 3D canvas で UI シーン (スプレー缶) を描画するため canvas を表示、
+       旧 grid overlay は使わない。bg-video (AR 映像) も隠す。 */
+    body.camera-ui-mode #grid-overlay { display: none; }
     body.camera-ui-mode #bg-video     { display: none !important; }
 
     /* ステータスバー — セーフエリア分だけ内側へオフセット (ノッチ/Dynamic Island 避け) */
@@ -609,7 +610,7 @@
         <div class="hint" style="color:#67e8f9;">実装内容の効果を切り替えて確認するためのトグル</div>
         <div class="row" style="gap:6px; flex-wrap:wrap;">
           <button id="m-effect-1" class="m-effect-btn" data-effect="1" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果1: OFF</button>
-          <button id="m-effect-2" class="m-effect-btn" data-effect="2" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果2: OFF</button>
+          <button id="m-effect-2" class="m-effect-btn" data-effect="2" data-on="1" style="background:#22c55e; color:#052e16; padding:6px 10px;">効果2: ON</button>
           <button id="m-effect-3" class="m-effect-btn" data-effect="3" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果3: OFF</button>
           <button id="m-effect-4" class="m-effect-btn" data-effect="4" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果4: OFF</button>
         </div>
