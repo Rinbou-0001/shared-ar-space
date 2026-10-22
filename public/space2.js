@@ -1367,9 +1367,13 @@
     //   ヒット距離に合わせて動的に length / radius を更新。これにより床面を貫通した時の
     //   アーチ (半円切れ) が発生しない。空中では maxLength まで、ヒット時は距離に短縮。
     //   色は avatar.color (= ランダム割り当ての塗装色) と連動、camera 側では生成しない。
+    //   geometry は unit (base radius 1, height 1) で生成、scale で物理サイズに変換:
+    //     mesh.scale = (radius, radius, length)
+    //     radius = min(length × tan(20°), SPRAY_MAX_WORLD_R)   ← スプレーの実半径と一致
+    //     length = hit.distance - pullback  (ヒットなし時は AIM_MAX_LENGTH)
     const AIM_MAX_LENGTH   = 4.0;                               // ヒットなし時の最大長 (m)
     const AIM_HALF_ANGLE   = Math.PI / 9;                       // = 20°、SPRAY_HALF_ANGLE と一致
-    const AIM_BASE_RADIUS  = AIM_MAX_LENGTH * Math.tan(AIM_HALF_ANGLE);
+    const AIM_MAX_RADIUS   = 1.0;                               // SPRAY_MAX_WORLD_R と一致 (スプレーの radius 上限)
     const AIM_PULLBACK     = 0.01;                              // 衝突面から 1cm 退避
     const AIM_UPDATE_MS    = 50;                                // raycast throttle 20Hz
     const _aimCones = new Map();        // avatar id → { mesh, mat }
@@ -1384,11 +1388,11 @@
       if (!av || av.role !== 'camera') return null;
       let rec = _aimCones.get(av.id);
       if (rec) return rec;
-      // ConeGeometry: デフォルトは apex +Y / base -Y。
-      //   apex を原点に、base を -Z 方向に伸ばすため、X 軸で +90° 回転 + Z 軸へ translate。
-      const g = new THREE.ConeGeometry(AIM_BASE_RADIUS, AIM_MAX_LENGTH, 32, 1, true);
-      g.rotateX(Math.PI / 2);                   // +Y → -Z 向け (apex は +Z にシフト)
-      g.translate(0, 0, -AIM_MAX_LENGTH / 2);   // apex を原点に、base を -Z=maxLength
+      // ConeGeometry: unit (半径1, 高さ1) で生成。scale で物理サイズに展開する。
+      //   デフォルトは apex +Y / base -Y → X 軸で +90° 回転 + Z 軸へ translate して apex=原点, base=(0,0,-1)
+      const g = new THREE.ConeGeometry(1, 1, 32, 1, true);
+      g.rotateX(Math.PI / 2);
+      g.translate(0, 0, -0.5);                  // apex を原点に、base を -Z=1
       const mat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
@@ -1446,9 +1450,9 @@
         }
         // ヒットなし → maxLength (フル展開) / ヒットあり → distance - pullback
         const length = hit ? Math.max(0.02, hit.distance - AIM_PULLBACK) : AIM_MAX_LENGTH;
-        const s = length / AIM_MAX_LENGTH;
-        // uniform scale: 長さと半径が同比例で変化 (= 角度 20° を維持)
-        rec.mesh.scale.set(s, s, s);
+        // radius = スプレーの実塗布半径と一致: length × tan(20°)、ただし SPRAY_MAX_WORLD_R=1m で頭打ち
+        const radius = Math.min(length * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
+        rec.mesh.scale.set(radius, radius, length);
         rec.mesh.visible = true;
       }
     }
