@@ -1291,14 +1291,15 @@
     //   outer 方向 = パネル local -Z (plate と同じ流儀) → eye はパネルの -Z 側に配置。
     const FACE_PANEL_SIZE = 0.15;
     const FACE_APEX_OFFSET = 0.15;    // パネル中心から eye までの距離 (m)
-    //   回転指定 (ユーザー仕様): (rx, ry, rz) をラジアンに変換
-    //     left  (0,   0, 0) → identity
-    //     top   (-90, 0, 0) → X 軸で -π/2
-    //     right (180, 0, 0) → X 軸で π   (旧実装の Y 軸 π は誤り、修正)
+    //   回転指定 (ユーザー仕様): (yaw, pitch, roll) → それぞれ (Y軸, X軸, Z軸) 回転。
+    //     Three.js の Euler を 'YXZ' 順 で定義することで yaw が先に適用される。
+    //     left  (0,   0, 0) → identity (+Z normal 維持)
+    //     top   (-90, 0, 0) → yaw -90°: +Z normal → -X 方向 (原点方向)
+    //     right (180, 0, 0) → yaw 180°: +Z normal → -Z 方向 (原点方向)
     const FACE_PANELS_DEF = {
-      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), euler: new THREE.Euler(0,            0, 0, 'XYZ') },
-      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   euler: new THREE.Euler(-Math.PI / 2, 0, 0, 'XYZ') },
-      right: { pos: new THREE.Vector3(0,   1.5,  0.5), euler: new THREE.Euler( Math.PI,     0, 0, 'XYZ') },
+      left:  { pos: new THREE.Vector3(0,   1.5, -0.5), yaw: 0,             pitch: 0, roll: 0 },
+      top:   { pos: new THREE.Vector3(0.5, 1.5,  0),   yaw: -Math.PI / 2,  pitch: 0, roll: 0 },
+      right: { pos: new THREE.Vector3(0,   1.5,  0.5), yaw: Math.PI,       pitch: 0, roll: 0 },
     };
     const _facePanels = {};
     // ワイヤーフレーム枠線色: マゼンタ
@@ -1307,8 +1308,8 @@
       for (const [tag, def] of Object.entries(FACE_PANELS_DEF)) {
         const grp = new THREE.Group();
         grp.position.copy(def.pos);
-        // Euler を explicit set (copy だと order が引き継がれない場合があるため)
-        grp.rotation.set(def.euler.x, def.euler.y, def.euler.z, 'XYZ');
+        // YXZ 順: yaw (Y) → pitch (X) → roll (Z)。ユーザーの (yaw, pitch, roll) 仕様をマップ。
+        grp.rotation.set(def.pitch, def.yaw, def.roll, 'YXZ');
         grp.updateMatrixWorld(true);   // 子生成前に matrix を同期
         grp.name = 'face-' + tag;
         // 不可視の面 mesh (スナップ基準として位置計算に使う)
@@ -4235,7 +4236,7 @@
         log('display detect err: ' + e.message, 'err');
       }
     }
-    let viewerEye = { x: 0, y: 1.3, z: 0 };
+    let viewerEye = { x: 0, y: 1.5, z: 0 };
     let selectedClientId = ''; // master のみ使用
 
     function waitForIO(cb, n = 100) {
@@ -4422,13 +4423,6 @@
         }
         // 自分自身のオブザーバーパネル UI (plate/面タグボタン、Off-Axis トグル) を更新
         if (data.id === myId) {
-          // 面タグが ON になった瞬間、off-axis も自動 ON (面スナップを即有効化)。
-          //   ユーザーが OFF 側に切り替えればスナップ解除される (面タグはそのまま)。
-          const faceTagsOn = ['top', 'left', 'right'];
-          if (data.on && faceTagsOn.indexOf(data.tag) >= 0) {
-            myDisplay.offaxis = true;
-            if (socket && socket.connected) socket.emit('displayConfig', { offaxis: true });
-          }
           if (typeof window.__syncObsPlateButtons === 'function') window.__syncObsPlateButtons();
           if (typeof window.syncObsOaBtn === 'function') window.syncObsOaBtn();
         }
@@ -6788,12 +6782,13 @@
           fMesh.updateMatrixWorld(true);
           const fCenter = new THREE.Vector3().setFromMatrixPosition(fMesh.matrixWorld);
           const fQuat   = new THREE.Quaternion().setFromRotationMatrix(fMesh.matrixWorld);
-          // apex 方向 = 原点から panel への向きの逆 = panel → 原点 方向
-          //   → 視錐台 apex が原点側に出て、base (= panel) が外側に広がる
-          const toOrigin = new THREE.Vector3().subVectors(new THREE.Vector3(0, 0, 0), fCenter).normalize();
+          // apex 方向 = panel → viewerEye (= 共通視点) 方向
+          //   → 視錐台 apex が viewerEye 側に出て、base (= panel) が外側に広がる
+          const vEye = new THREE.Vector3(viewerEye.x, viewerEye.y, viewerEye.z);
+          const toViewer = new THREE.Vector3().subVectors(vEye, fCenter).normalize();
           _oaDispCenter.copy(fCenter);
           _oaDispQuat.copy(fQuat);
-          _oaEye.copy(fCenter).addScaledVector(toOrigin, FACE_APEX_OFFSET);
+          _oaEye.copy(fCenter).addScaledVector(toViewer, FACE_APEX_OFFSET);
           _plateW = FACE_PANEL_SIZE;
           _plateH = FACE_PANEL_SIZE;
           camera.position.copy(_oaEye);

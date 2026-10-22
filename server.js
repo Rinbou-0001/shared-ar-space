@@ -81,7 +81,7 @@ let sceneAmbientConfig = { intensity: 0.85 };
 const orbState = { s: 0, y: 2.5 };
 
 // マルチディスプレイのオフアクシス投影用 共通視点位置
-let viewerEye = { x: 0, y: 1.3, z: 0 };
+let viewerEye = { x: 0, y: 1.5, z: 0 };
 
 // GPU 波動シミュレーション共有パラメータ (master が変更、全クライアントへ配信)
 //   rippleMinM / rippleMaxM: 発生する波紋の直径 min / max (メートル)
