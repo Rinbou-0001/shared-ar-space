@@ -1364,13 +1364,16 @@
 
     // ===== スプレー照準ディスク (observer / master 限定) =====
     //   各 camera avatar の視線方向に raycast を打ち、衝突点に **衝突面の法線に沿った円盤** を貼る。
-    //   半径 = sprayer と同じ式 (min(hit.distance × tan(20°), SPRAY_MAX_WORLD_R)) → 塗装範囲を正確に表示。
+    //   円盤本体は無色透明、円周に沿った幅 7cm のリングで塗装範囲を表示。
+    //   リングは内側 (中心側) から外側に向かって不透明度がフェードする。
+    //   半径 = sprayer と同じ式 → 塗装範囲を正確に表示。
     //   色は avatar.color (= ランダム割り当ての塗装色) と連動、camera 側では生成しない。
     const AIM_HALF_ANGLE   = Math.PI / 9;    // = 20°、SPRAY_HALF_ANGLE と一致
     const AIM_MAX_RADIUS   = 1.0;            // SPRAY_MAX_WORLD_R と一致
     const AIM_MAX_LENGTH   = 20.0;           // raycast の far 距離 (m)
-    const AIM_SURFACE_OFF  = 0.003;          // 衝突面から 3mm 法線方向オフセット (z-fighting 回避)
+    const AIM_SURFACE_OFF  = 0.005;          // 衝突面から 5mm 法線方向オフセット (z-fighting 回避)
     const AIM_UPDATE_MS    = 50;             // raycast throttle 20Hz
+    const AIM_BORDER_W     = 0.07;           // ボーダー幅 7cm
     const _aimDisks   = new Map();           // avatar id → { mesh, mat }
     const _aimRay     = new THREE.Raycaster();
     const _aimOrigin  = new THREE.Vector3();
@@ -1385,14 +1388,39 @@
       if (!av || av.role !== 'camera') return null;
       let rec = _aimDisks.get(av.id);
       if (rec) return rec;
-      // CircleGeometry (半径 1 の unit、法線は +Z)
-      const g = new THREE.CircleGeometry(1, 48);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
+      // 単位半径の円盤 (法線 +Z)。中身は discard、円周 7cm 相当のリングのみを fragment で描画
+      const g = new THREE.CircleGeometry(1, 64);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: {
+          uColor:    { value: new THREE.Color(0xffffff) },
+          uBorderN:  { value: 0.1 },     // 正規化ボーダー幅 (= AIM_BORDER_W / radius)、毎 tick 更新
+        },
+        vertexShader: `
+          varying vec2 vLocal;
+          void main() {
+            // CircleGeometry は半径 1、position.xy が [-1, 1] の範囲
+            vLocal = position.xy;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3  uColor;
+          uniform float uBorderN;      // ボーダー幅 (正規化、円の半径=1 を 1.0 として)
+          varying vec2 vLocal;
+          void main() {
+            float r = length(vLocal);                 // 中心=0、外周=1
+            if (r > 1.0) discard;
+            float innerEdge = 1.0 - uBorderN;
+            if (r < innerEdge) discard;               // 中身は無色透明
+            // t: 内側エッジで 0、外側エッジで 1 → alpha は中心側 (内側) で高、外側でフェード
+            float t = (r - innerEdge) / max(uBorderN, 1e-5);
+            float alpha = 1.0 - t;                    // 内側=1、外側=0
+            gl_FragColor = vec4(uColor, alpha);
+          }
+        `,
         transparent: true,
-        opacity: 0.5,
-        side: THREE.DoubleSide,
         depthWrite: false,
+        side: THREE.DoubleSide,
       });
       const mesh = new THREE.Mesh(g, mat);
       mesh.name = 'aim-disk-' + av.id;
@@ -1427,7 +1455,7 @@
         if (typeof av.color === 'string') _aimTmpCol.set(av.color);
         else if (typeof av.color === 'number') _aimTmpCol.setHex(av.color);
         else _aimTmpCol.setHex(0xffffff);
-        rec.mat.color.copy(_aimTmpCol);
+        rec.mat.uniforms.uColor.value.copy(_aimTmpCol);
         // Raycast: avatar 位置 → avatar 前方 (local -Z)
         _aimTmpFwd.set(0, 0, -1).applyQuaternion(av.grp.quaternion).normalize();
         _aimOrigin.copy(av.grp.position);
@@ -1447,14 +1475,19 @@
         } else {
           _aimTmpNrm.copy(_aimTmpFwd).multiplyScalar(-1);
         }
+        // 法線がレイと同方向を向いているなら (= 面の裏側にヒット = 壁-E 等) 反転してカメラ側へ
+        //   → ディスクが壁の裏に埋没して「壁面に反映されない」問題を修正
+        if (_aimTmpNrm.dot(_aimTmpFwd) > 0) _aimTmpNrm.multiplyScalar(-1);
         // 半径 = sprayer と同じ式
         const radius = Math.min(hit.distance * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
-        // 位置: 衝突点 + 法線方向に 3mm オフセット (z-fighting 回避)
+        // 位置: 衝突点 + 法線方向に 5mm オフセット (z-fighting 回避)
         rec.mesh.position.copy(hit.point).addScaledVector(_aimTmpNrm, AIM_SURFACE_OFF);
         // 向き: CircleGeometry の +Z 軸を法線に合わせる
         _aimTmpQ.setFromUnitVectors(_aimAxisZ, _aimTmpNrm);
         rec.mesh.quaternion.copy(_aimTmpQ);
         rec.mesh.scale.setScalar(radius);
+        // ボーダー幅を正規化: ワールド 7cm を半径で割る、半径が小さい時は 1.0 (= 全部ボーダー) で clamp
+        rec.mat.uniforms.uBorderN.value = Math.min(1.0, AIM_BORDER_W / Math.max(0.001, radius));
         rec.mesh.visible = true;
       }
     }
