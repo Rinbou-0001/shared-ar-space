@@ -1460,7 +1460,7 @@
     let _ui2CanStart = null;
     // ───────── 入室時 fade-in ─────────
     //   enterAsCamera() 直後に 2 秒かけてスプレー缶・影 Sprite が alpha 0 → 1 でフェード表示
-    const UI2_FADEIN_MS = 2000;
+    const UI2_FADEIN_MS = 1000;
     let _ui2FadeStart = null;   // null = fade 未開始 (= 入室前)、performance.now() 値 = fade 進行中/完了済
     const _ui2FadeMats = [];    // fade 対象マテリアル (can body/metal/cap/nozzle/hole + shadow sprite)
     function _ensureUi2Scene() {
