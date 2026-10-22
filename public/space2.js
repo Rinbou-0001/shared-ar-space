@@ -1366,15 +1366,34 @@
     //   効果2 ON の間、メインシーンの代わりに専用 UI シーンを描画。
     //   3 本のスプレー缶 (塗装 palette に対応) を 3D 表示。
     //   ロード時 lazy 初期化、効果2 ON のタイミングで scene を構築。
-    let _ui2Scene = null, _ui2Camera = null, _ui2Slider = null;
+    let _ui2Scene = null, _ui2Camera = null, _ui2Slider = null, _ui2Label = null;
     const _ui2Cans = [];       // 3 本のスプレー缶
     const _ui2Shadows = [];    // 各缶に対応するスプライト影
     const SHADOW_W0 = 1.6;     // 影の初期幅
     const SHADOW_H0 = 0.65;    // 影の初期高さ
     const FLOAT_AMP = 0.12;    // 浮遊振幅
     const UI2_CAN_SPACING = 2.0;   // スライダー横間隔 (m)
-    const UI2_PALETTE = ['#029ecc', '#ffce18', '#df2c1e'];
-    let _ui2SliderOffsetX = 0;     // スライダーの横オフセット (ドラッグで更新、ループ適用)
+    // 缶 ↔ モード対応 (配列インデックス順、固定):
+    //   [0] wood (草)  : ラベル=深緑  / spray=#1b5e20
+    //   [1] sky  (星)  : ラベル=藍    / spray=#002044
+    //   [2] river(川)  : ラベル=群青  / spray=#008cdd
+    const UI2_CANS_DEF = [
+      { mode: 'wood',  labelColor: '#1b5e20', spawnColor: '#1b5e20' },
+      { mode: 'sky',   labelColor: '#165e83', spawnColor: '#002044' },
+      { mode: 'river', labelColor: '#003f7f', spawnColor: '#008cdd' },
+    ];
+    let _ui2SliderOffsetX = 0;     // スライダーの横オフセット
+    // ───────── 状態機械 ─────────
+    //   'browse' : 一覧表示 (浮遊 + スライダー) / tap で選択へ
+    //   'focus'  : 選択缶が中央へ移動 + 拡大中 or 完了状態
+    //   'label'  : 画面全体にラベル色面展開中 or 完了状態
+    let _ui2Mode = 'browse';
+    let _ui2SelectedCan = null;
+    let _ui2SelectedIdx = -1;
+    // 現在進行中のトランジション
+    let _ui2Transition = null;
+    // 缶の "元の transform" を復帰用に保存
+    let _ui2CanStart = null;
     function _ensureUi2Scene() {
       if (_ui2Scene) return;
       if (ROLE !== 'camera') return;
@@ -1442,7 +1461,14 @@
         _ui2Cans.push(can);
       }
       // 3 本の缶を slider に配置 (local X = -s, 0, +s)
-      UI2_PALETTE.forEach((c, i) => _makeCan(c, (i - 1) * UI2_CAN_SPACING));
+      //   本体は白、userData に mode / labelColor / spawnColor を保持
+      UI2_CANS_DEF.forEach((def, i) => {
+        _makeCan('#ffffff', (i - 1) * UI2_CAN_SPACING);
+        const can = _ui2Cans[i];
+        can.userData.mode = def.mode;
+        can.userData.labelColor = def.labelColor;
+        can.userData.spawnColor = def.spawnColor;
+      });
       // 浮遊アニメの基準値を各缶に保存
       _ui2Cans.forEach((can) => {
         can.userData.baseY = can.position.y;
@@ -1477,9 +1503,148 @@
         _ui2Slider.add(s);
         _ui2Shadows.push(s);
       });
-      // スライダー横ドラッグ (ループ)
+      // ───────── ラベル plane (色面のみ、camera 追従で画面覆い) ─────────
+      const labelMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 1.0,
+        depthTest: false, depthWrite: false,
+      });
+      _ui2Label = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), labelMat);
+      _ui2Label.name = 'ui2-label';
+      _ui2Label.renderOrder = 999;
+      _ui2Label.scale.set(0, 0, 1);
+      _ui2Label.visible = false;
+      _ui2Label.frustumCulled = false;
+      _ui2Scene.add(_ui2Label);
+      // スライダー横ドラッグ + tap 選択 + 上スワイプ戻る
       _ui2AttachSliderDrag();
-      log('ui2 scene ready (3 cans slider + loop)', 'ok');
+      log('ui2 scene ready (3 cans slider + label)', 'ok');
+    }
+
+    // ───────── トランジション共通 (easeInOutCubic 相当の smoothstep) ─────────
+    function _ui2StartTransition(duration, updateFn, doneFn) {
+      _ui2Transition = { duration, elapsed: 0, update: updateFn, done: doneFn };
+    }
+    function _ui2UpdateTransition(dt) {
+      if (!_ui2Transition) return;
+      _ui2Transition.elapsed += dt;
+      const raw = Math.min(_ui2Transition.elapsed / _ui2Transition.duration, 1);
+      const t = raw * raw * (3 - 2 * raw);  // smoothstep
+      _ui2Transition.update(t);
+      if (raw >= 1) {
+        const done = _ui2Transition.done;
+        _ui2Transition = null;
+        if (done) done();
+      }
+    }
+
+    // ───────── ラベル全画面サイズ算出 ─────────
+    function _ui2LabelFullSize() {
+      const distance = 1.5;
+      const h = 2 * distance * Math.tan(THREE.MathUtils.degToRad(_ui2Camera.fov / 2));
+      const w = h * _ui2Camera.aspect;
+      return { w, h };
+    }
+
+    // ───────── ラベル位置更新 (毎フレーム、camera 前方 1.5m にクランプ) ─────────
+    const _ui2LabelFwd = new THREE.Vector3();
+    function _ui2UpdateLabelFollow() {
+      if (!_ui2Label || !_ui2Label.visible) return;
+      _ui2LabelFwd.set(0, 0, -1).applyQuaternion(_ui2Camera.quaternion);
+      _ui2Label.position.copy(_ui2Camera.position).addScaledVector(_ui2LabelFwd, 1.5);
+      _ui2Label.quaternion.copy(_ui2Camera.quaternion);
+    }
+
+    // ───────── 選択アクション: 缶中央移動 + 拡大 → ラベル展開まで自動連鎖 ─────────
+    function _ui2SelectCan(idx) {
+      if (_ui2Mode !== 'browse' || _ui2Transition) return;
+      const can = _ui2Cans[idx];
+      if (!can) return;
+      _ui2SelectedCan = can;
+      _ui2SelectedIdx = idx;
+      _ui2Mode = 'focus';
+      // ① 即時: state.myColor をスプレーカラーに変更 (次 pose で全端末に伝播)
+      state.myColor = can.userData.spawnColor;
+      log('spray color → ' + state.myColor + ' (' + can.userData.mode + ')', 'ok');
+      // ② 元の transform を保存 (戻し用)
+      _ui2CanStart = {
+        pos: can.position.clone(),
+        rot: can.rotation.clone(),
+        scale: can.scale.clone(),
+      };
+      // ③ 目標 transform: X=0 中央、Y はスライダー高さ基準、scale 1.8 倍
+      const targetPos = can.position.clone();
+      targetPos.x = 0;
+      targetPos.y = can.userData.baseY;
+      const targetScale = can.scale.clone().multiplyScalar(1.8);
+      const startPos = _ui2CanStart.pos.clone();
+      const startScale = _ui2CanStart.scale.clone();
+      // ④ 対応する shadow を同期的にフェードアウト
+      const sh = _ui2Shadows[idx];
+      _ui2StartTransition(0.55,
+        (t) => {
+          can.position.lerpVectors(startPos, targetPos, t);
+          can.scale.lerpVectors(startScale, targetScale, t);
+          if (sh && sh.material) sh.material.opacity = (1 - t) * 0.8;
+        },
+        () => {
+          if (sh) sh.visible = false;
+          _ui2OpenLabel();
+        }
+      );
+    }
+    function _ui2OpenLabel() {
+      if (_ui2Mode !== 'focus' || !_ui2SelectedCan) return;
+      _ui2Mode = 'label';
+      _ui2Label.material.color.set(_ui2SelectedCan.userData.labelColor);
+      _ui2Label.visible = true;
+      _ui2Label.scale.set(0, 0, 1);
+      const full = _ui2LabelFullSize();
+      _ui2StartTransition(0.45,
+        (t) => {
+          _ui2Label.scale.set(full.w * t, full.h * t, 1);
+        },
+        () => {
+          // 完全展開完了 → 他オブジェクトを隠して描画コスト削減
+          if (_ui2Slider) _ui2Slider.visible = false;
+        }
+      );
+    }
+    // 戻る (swipe up): ラベル縮小 → 缶を元の transform へ復帰 → browse
+    function _ui2CloseLabelAndReturn() {
+      if (_ui2Mode !== 'label' || _ui2Transition) return;
+      if (_ui2Slider) _ui2Slider.visible = true;
+      const full = _ui2LabelFullSize();
+      // ① ラベル縮小
+      _ui2StartTransition(0.45,
+        (t) => {
+          const k = 1 - t;
+          _ui2Label.scale.set(full.w * k, full.h * k, 1);
+        },
+        () => {
+          _ui2Label.visible = false;
+          _ui2Label.scale.set(0, 0, 1);
+          // ② 缶を元に戻す
+          const can = _ui2SelectedCan;
+          const sh  = _ui2Shadows[_ui2SelectedIdx];
+          if (sh) sh.visible = true;
+          const curPos = can.position.clone();
+          const curScale = can.scale.clone();
+          _ui2StartTransition(0.55,
+            (t) => {
+              can.position.lerpVectors(curPos, _ui2CanStart.pos, t);
+              can.scale.lerpVectors(curScale, _ui2CanStart.scale, t);
+              if (sh && sh.material) sh.material.opacity = t * 0.8;
+            },
+            () => {
+              can.rotation.copy(_ui2CanStart.rot);
+              _ui2Mode = 'browse';
+              _ui2SelectedCan = null;
+              _ui2SelectedIdx = -1;
+              _ui2CanStart = null;
+            }
+          );
+        }
+      );
     }
 
     // ===== スライダー横ドラッグ (タッチ/マウス) =====
@@ -1490,28 +1655,71 @@
       if (!el || el.__ui2DragAttached) return;
       el.__ui2DragAttached = true;
       let dragging = false, lastX = 0;
-      // X 画面ピクセル → world 単位への変換係数 (perspective camera のため距離 d=8 の面で近似)
-      //   画面幅 world = 2 * 8 * tan(17.5°) * aspect ≈ 5 * aspect
+      let startX = 0, startY = 0, startT = 0;
+      // X 画面ピクセル → world 単位への変換係数 (perspective, distance ~8m 面で近似)
       function _pxToWorld(px) {
         const aspect = window.innerWidth / Math.max(1, window.innerHeight);
         const worldWidth = 5 * aspect;
         return (px / window.innerWidth) * worldWidth;
       }
+      // 画面 X → world X (slider 平面上) で近い can を特定
+      const _ui2Ray = new THREE.Raycaster();
+      const _ui2Pointer = new THREE.Vector2();
+      function _ui2FindTappedCan(clientX, clientY) {
+        const rect = el.getBoundingClientRect();
+        _ui2Pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+        _ui2Pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+        _ui2Ray.setFromCamera(_ui2Pointer, _ui2Camera);
+        const hits = _ui2Ray.intersectObjects(_ui2Cans, true);
+        if (hits.length === 0) return -1;
+        // ヒットした mesh の最も浅い祖先 can を特定
+        for (const h of hits) {
+          let o = h.object;
+          while (o && !_ui2Cans.includes(o)) o = o.parent;
+          if (o) return _ui2Cans.indexOf(o);
+        }
+        return -1;
+      }
       el.addEventListener('pointerdown', (ev) => {
         if (!_isCameraUIMode()) return;
+        if (_ui2Transition) return;
         dragging = true;
+        startX = ev.clientX; startY = ev.clientY;
+        startT = performance.now();
         lastX = ev.clientX;
         try { el.setPointerCapture(ev.pointerId); } catch (_) {}
       });
       el.addEventListener('pointermove', (ev) => {
         if (!dragging) return;
-        const dx = ev.clientX - lastX;
-        lastX = ev.clientX;
-        _ui2SliderOffsetX += _pxToWorld(dx);
+        // slider 横移動は browse mode でのみ
+        if (_ui2Mode === 'browse') {
+          const dx = ev.clientX - lastX;
+          lastX = ev.clientX;
+          _ui2SliderOffsetX += _pxToWorld(dx);
+        }
       });
       function _endDrag(ev) {
+        if (!dragging) return;
         dragging = false;
         try { el.releasePointerCapture(ev.pointerId); } catch (_) {}
+        const dX = ev.clientX - startX;
+        const dY = ev.clientY - startY;
+        const dT = performance.now() - startT;
+        const dist = Math.hypot(dX, dY);
+        // ─── tap 判定: 短距離 (<10px) かつ短時間 (<400ms) ───
+        if (dist < 10 && dT < 400) {
+          if (_ui2Mode === 'browse') {
+            const idx = _ui2FindTappedCan(ev.clientX, ev.clientY);
+            if (idx >= 0) _ui2SelectCan(idx);
+          }
+          return;
+        }
+        // ─── 上スワイプ (dY < -60px かつ |dY| > |dX|): label mode の "戻る" ───
+        if (dY < -60 && Math.abs(dY) > Math.abs(dX)) {
+          if (_ui2Mode === 'label') _ui2CloseLabelAndReturn();
+          return;
+        }
+        // それ以外は browse mode の横ドラッグが incremental で既に適用済み
       }
       el.addEventListener('pointerup', _endDrag);
       el.addEventListener('pointercancel', _endDrag);
@@ -1530,6 +1738,8 @@
       // 全缶を同じ位相でふわふわ浮遊 + 横オフセット (ループ)
       for (let i = 0; i < n; i++) {
         const can = _ui2Cans[i];
+        // 選択缶は browse 以外のモード中はトランジション/固定で位置管理されるのでスキップ
+        if (can === _ui2SelectedCan && _ui2Mode !== 'browse') continue;
         // ─── 横ループ: baseX + sliderOffsetX を wrap して [-halfSpan, +halfSpan) に ───
         let x = can.userData.baseX + _ui2SliderOffsetX;
         while (x >  halfSpan) x -= spanW;
@@ -6400,6 +6610,8 @@
         _ensureUi2Scene();
         if (_ui2Scene && _ui2Camera) {
           _ui2AnimUpdate(clock.getElapsedTime());
+          _ui2UpdateTransition(dt);
+          _ui2UpdateLabelFollow();
           renderer.render(_ui2Scene, _ui2Camera);
         }
         return;
