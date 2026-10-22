@@ -1442,6 +1442,13 @@
       if (rec.mat) rec.mat.dispose();
       _aimDisks.delete(id);
     }
+    let _aimDbgLastT = 0;
+    function _aimDbg(msg) {
+      const n = performance.now();
+      if (n - _aimDbgLastT < 1000) return;
+      _aimDbgLastT = n;
+      log('[aim dbg] ' + msg, 'ok');
+    }
     function _aimIndicatorTick() {
       if (ROLE === 'camera') return;
       const nowT = performance.now();
@@ -1468,16 +1475,29 @@
             hit = h; break;
           }
         }
-        if (!hit) { rec.mesh.visible = false; continue; }
+        if (!hit) {
+          rec.mesh.visible = false;
+          _aimDbg('no hit  pos=' + _aimOrigin.x.toFixed(1) + ',' + _aimOrigin.y.toFixed(1) + ',' + _aimOrigin.z.toFixed(1)
+                + ' fwd=' + _aimTmpFwd.x.toFixed(2) + ',' + _aimTmpFwd.y.toFixed(2) + ',' + _aimTmpFwd.z.toFixed(2));
+          continue;
+        }
         // 法線を world へ
         if (hit.face && hit.face.normal) {
           _aimTmpNrm.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
         } else {
           _aimTmpNrm.copy(_aimTmpFwd).multiplyScalar(-1);
         }
+        const _nrmBefore = _aimTmpNrm.x.toFixed(2) + ',' + _aimTmpNrm.y.toFixed(2) + ',' + _aimTmpNrm.z.toFixed(2);
         // 法線がレイと同方向を向いているなら (= 面の裏側にヒット = 壁-E 等) 反転してカメラ側へ
         //   → ディスクが壁の裏に埋没して「壁面に反映されない」問題を修正
-        if (_aimTmpNrm.dot(_aimTmpFwd) > 0) _aimTmpNrm.multiplyScalar(-1);
+        const dotNF = _aimTmpNrm.dot(_aimTmpFwd);
+        if (dotNF > 0) _aimTmpNrm.multiplyScalar(-1);
+        _aimDbg('tgt=' + (hit.object && hit.object.name)
+              + ' d=' + hit.distance.toFixed(2) + 'm'
+              + ' hit=' + hit.point.x.toFixed(1) + ',' + hit.point.y.toFixed(1) + ',' + hit.point.z.toFixed(1)
+              + ' Nraw=' + _nrmBefore
+              + ' dot=' + dotNF.toFixed(2)
+              + ' Nuse=' + _aimTmpNrm.x.toFixed(2) + ',' + _aimTmpNrm.y.toFixed(2) + ',' + _aimTmpNrm.z.toFixed(2));
         // 半径 = sprayer と同じ式
         const radius = Math.min(hit.distance * Math.tan(AIM_HALF_ANGLE), AIM_MAX_RADIUS);
         // 位置: 衝突点 + 法線方向に 5mm オフセット (z-fighting 回避)
@@ -3868,6 +3888,8 @@
         a.grp.position.set(u.x, u.y, u.z);
         a.grp.quaternion.set(u.qx, u.qy, u.qz, u.qw);
         if (u.role) a.role = u.role;
+        // 塗装色更新 (sprayer のランダム色・paint mode 変更が反映される)
+        if (typeof u.c === 'string' && u.c) a.color = u.c;
         // observer に遷移した瞬間 server が entryTag を配信するので反映
         if (u.entryTag && a.entryTag !== u.entryTag) {
           a.entryTag = u.entryTag;
@@ -4277,6 +4299,8 @@
         x: camera.position.x, y: camera.position.y, z: camera.position.z,
         qx: camera.quaternion.x, qy: camera.quaternion.y,
         qz: camera.quaternion.z, qw: camera.quaternion.w,
+        // 塗装色 (スプレーのランダム色) を同梱 → 他端末の avatar.color 更新 + 照準ディスク色連動
+        c: state.myColor || '#ffffff',
       });
     }
 

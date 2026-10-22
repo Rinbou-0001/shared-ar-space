@@ -279,6 +279,8 @@ io.on('connection', (socket) => {
     if (typeof pose.qy === 'number') u.qy = pose.qy;
     if (typeof pose.qz === 'number') u.qz = pose.qz;
     if (typeof pose.qw === 'number') u.qw = pose.qw;
+    // 塗装色更新 (sprayer のランダム色 / paint mode 変更の同期用)
+    if (typeof pose.c === 'string' && pose.c.length > 0 && pose.c.length < 16) u.color = pose.c;
     u.hasPose = true;
 
     // 入室時に 1 度だけ entryTag を割り当てる (#1, #2, ...)
@@ -304,6 +306,7 @@ io.on('connection', (socket) => {
         entryTag: u.entryTag,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
+        c: u.color,  // 塗装色の継続同期
       });
     }
   });
