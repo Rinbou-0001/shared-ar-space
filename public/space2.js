@@ -1589,11 +1589,17 @@
         rot: can.rotation.clone(),
         scale: can.scale.clone(),
       };
-      // ③ 目標 transform: X=0 中央、Y はスライダー高さ基準、scale 1.8 倍
+      // ③ 目標 transform:
+      //   X=0 中央、Y は画面を缶でいっぱいに (= 缶の垂直中心を画面中央 y=2.5 に揃える)
+      //   缶モデル垂直中心 local y ≈ 1.9 (base 0.145 〜 top 3.68 の中間)
+      //   scale 3x 時: target.y = 2.5 - 1.9*3 = -3.2 → 缶が画面上下にはみ出し、下部ギャップ消滅
+      const CAN_ZOOM = 3.0;
+      const CAN_MODEL_CENTER_Y = 1.9;
+      const SCREEN_MID_Y = 2.5;
       const targetPos = can.position.clone();
       targetPos.x = 0;
-      targetPos.y = can.userData.baseY;
-      const targetScale = can.scale.clone().multiplyScalar(3.0);
+      targetPos.y = SCREEN_MID_Y - CAN_MODEL_CENTER_Y * CAN_ZOOM;
+      const targetScale = can.scale.clone().multiplyScalar(CAN_ZOOM);
       const startPos = _ui2CanStart.pos.clone();
       const startScale = _ui2CanStart.scale.clone();
       // ④ 対応する shadow を同期的にフェードアウト
