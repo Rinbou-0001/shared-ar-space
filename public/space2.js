@@ -203,22 +203,33 @@
       uPointIntensity:  { value: 0.43 },
       uPointRange:      { value: 20.0 },
       uPointColor:      { value: new THREE.Color(0xffffee) },
+      // 床ペイント RT 参照: 床グリッドだけがこれを使って塗装部分を透過させる (= グリッドが塗りの下)
+      uFloorPaint:      { value: null },
+      uFieldHalf:       { value: 100.0 },   // = FIELD_HALF、_makePaintable(floor) 後に更新
     };
     _gridLightUni.uDirDir.value.copy(dirLight.position).normalize();
     // 線の色 + 面の local normal を受け取り、照明応答 shader を返す
-    function _makeGridLightMaterial(colorHex, normalLocal) {
+    function _makeGridLightMaterial(colorHex, normalLocal, useFloorPaintMask) {
+      const defines = useFloorPaintMask ? { USE_FLOOR_PAINT_MASK: 1 } : {};
+      const uniforms = {
+        uAmbient:        _gridLightUni.uAmbient,
+        uDirIntensity:   _gridLightUni.uDirIntensity,
+        uDirDir:         _gridLightUni.uDirDir,
+        uPointPos:       _gridLightUni.uPointPos,
+        uPointIntensity: _gridLightUni.uPointIntensity,
+        uPointRange:     _gridLightUni.uPointRange,
+        uPointColor:     _gridLightUni.uPointColor,
+        uColor:          { value: new THREE.Color(colorHex) },
+        uNormalLocal:    { value: new THREE.Vector3().copy(normalLocal) },
+      };
+      if (useFloorPaintMask) {
+        uniforms.uFloorPaint = _gridLightUni.uFloorPaint;
+        uniforms.uFieldHalf  = _gridLightUni.uFieldHalf;
+      }
       return new THREE.ShaderMaterial({
-        uniforms: {
-          uAmbient:        _gridLightUni.uAmbient,
-          uDirIntensity:   _gridLightUni.uDirIntensity,
-          uDirDir:         _gridLightUni.uDirDir,
-          uPointPos:       _gridLightUni.uPointPos,
-          uPointIntensity: _gridLightUni.uPointIntensity,
-          uPointRange:     _gridLightUni.uPointRange,
-          uPointColor:     _gridLightUni.uPointColor,
-          uColor:          { value: new THREE.Color(colorHex) },
-          uNormalLocal:    { value: new THREE.Vector3().copy(normalLocal) },
-        },
+        defines,
+        uniforms,
+        transparent: !!useFloorPaintMask,   // mask 使用時のみ alpha blending を有効化
         vertexShader: `
           uniform vec3 uNormalLocal;
           varying vec3 vNormalWorld;
@@ -240,13 +251,15 @@
           uniform float uPointRange;
           uniform vec3  uPointColor;
           uniform vec3  uColor;
+          #ifdef USE_FLOOR_PAINT_MASK
+            uniform sampler2D uFloorPaint;
+            uniform float     uFieldHalf;
+          #endif
           varying vec3  vNormalWorld;
           varying vec3  vWorldPos;
           void main() {
-            // directional
             float diffDir = max(0.0, dot(vNormalWorld, uDirDir));
             vec3 col = uColor * clamp(uAmbient + diffDir * uDirIntensity, 0.0, 2.0);
-            // point: lambert + 線形距離減衰
             vec3 toLight = uPointPos - vWorldPos;
             float dist = length(toLight);
             vec3 toLightN = toLight / max(dist, 1e-4);
@@ -254,7 +267,15 @@
             float falloff = max(0.0, 1.0 - dist / uPointRange);
             float ptContrib = diffPt * falloff * uPointIntensity;
             col += uPointColor * ptContrib;
-            gl_FragColor = vec4(col, 1.0);
+            float alpha = 1.0;
+            #ifdef USE_FLOOR_PAINT_MASK
+              vec2 fuv = (vWorldPos.xz + vec2(uFieldHalf)) / (uFieldHalf * 2.0);
+              float pA = texture2D(uFloorPaint, fuv).a;
+              // 塗装された所ではグリッドの alpha を 0 に (= 下層扱い、塗りが上に見える)
+              alpha *= (1.0 - pA);
+              if (alpha < 0.01) discard;
+            #endif
+            gl_FragColor = vec4(col, alpha);
           }
         `,
       });
@@ -289,14 +310,15 @@
     //   タイル機能は廃止。1m グレー + 5m 濃グレー格子を常時表示する。
     //   AR passthrough 中は従来通り非表示に。
     // 床グリッド: 色 = 白、1px、照明応答 ShaderMaterial (local normal +Y)
+    //   floorPaintMask ON → 塗装された世界座標でグリッドの alpha を 0 にして塗りを上に見せる
     const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0xffffff, 0xffffff);
     if (grid.material) { try { grid.material.dispose(); } catch (_) {} }
-    grid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0));
+    grid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0), true);
     grid.position.set(0, 0.015, 0);
     scene.add(grid);
     const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xffffff, 0xffffff);
     if (majorGrid.material) { try { majorGrid.material.dispose(); } catch (_) {} }
-    majorGrid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0));
+    majorGrid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0), true);
     majorGrid.position.set(0, 0.018, 0);
     scene.add(majorGrid);
     const monoGrid = grid;             // 参照互換 (dummy)
@@ -1222,6 +1244,11 @@
     //   grid / majorGrid / boundary は床の上 (y=0.015〜0.025) にあるので塗料の上に線が見える。
     floor.name = 'floor-paint';
     _makePaintable(floor, FIELD_SIZE, 512);   // 床は 60m x 60m
+    // 床グリッド shader (uFloorPaint / uFieldHalf) に paintRT 参照を注入 → 塗装部分で grid を透過
+    if (floor.userData && floor.userData.paintRT && _gridLightUni) {
+      _gridLightUni.uFloorPaint.value = floor.userData.paintRT.texture;
+      _gridLightUni.uFieldHalf.value  = FIELD_HALF;
+    }
 
     // ===== 天面 (天井) 40m × 40m, 高さ WALL_H_M =====
     //   ・床と同じ形状を天高に配置し、内側 (下向き) 向きにする
@@ -1341,9 +1368,11 @@
         const fish = new THREE.Group();
         const bodyMaterial = new THREE.MeshStandardMaterial({
           color: 0xffff00, roughness: 0.85,
+          emissive: 0xffff00, emissiveIntensity: 0.5,
         });
         const tailMaterial = new THREE.MeshStandardMaterial({
           color: 0xffff00, roughness: 0.85, side: THREE.DoubleSide,
+          emissive: 0xffff00, emissiveIntensity: 0.5,
         });
         // 1. 滑らかな楕円形の胴体
         const bodyGeometry = new THREE.SphereGeometry(1, 32, 24);
