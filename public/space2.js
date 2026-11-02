@@ -1290,51 +1290,50 @@
 
     // ===== Low-poly fish =====
     //   位置 (1, 1.5, 0)、長辺 15cm、配色 yellow、yaw -90°
-    //   モデル内部の X 範囲: -1.70 (尾先) 〜 +1.00 (胴体前端) = 2.70 units → 15cm/2.70 ≈ 0.0556 scale
+    //   モデル内部の X 範囲: -1.76 (尾先) 〜 +1.00 (胴体前端) = 2.76 units → 15cm/2.76 ≈ 0.0543 scale
     (function _spawnLowPolyFish() {
       function createLowPolyFish() {
         const fish = new THREE.Group();
         const bodyMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffff00, flatShading: true, roughness: 0.9,
+          color: 0xffff00, roughness: 0.85,
         });
         const tailMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffff00, flatShading: true, side: THREE.DoubleSide,
+          color: 0xffff00, roughness: 0.85, side: THREE.DoubleSide,
         });
-        const eyeMaterial = new THREE.MeshStandardMaterial({
-          color: 0xffffff, roughness: 0.5,
+        const eyeMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffffff, side: THREE.DoubleSide,
         });
-        // 1. 楕円形の胴体
-        const bodyGeometry = new THREE.SphereGeometry(1, 10, 6);
+        // 1. 滑らかな楕円形の胴体
+        const bodyGeometry = new THREE.SphereGeometry(1, 32, 24);
         bodyGeometry.scale(1.0, 0.42, 0.28);
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
         fish.add(body);
-        // 2. 双葉型の尾びれ
-        function createTailLobe(points) {
+        // 2. 丸みのある双葉型の尾びれ
+        function createTailLobe(upper = true) {
+          const sign = upper ? 1 : -1;
           const shape = new THREE.Shape();
-          shape.moveTo(points[0][0], points[0][1]);
-          for (let i = 1; i < points.length; i++) shape.lineTo(points[i][0], points[i][1]);
-          shape.closePath();
-          const geometry = new THREE.ShapeGeometry(shape);
-          const mesh = new THREE.Mesh(geometry, tailMaterial);
-          return mesh;
+          shape.moveTo(-0.82, 0);
+          shape.quadraticCurveTo(-1.15, sign * 0.05,  -1.35, sign * 0.27);
+          shape.quadraticCurveTo(-1.57, sign * 0.48,  -1.70, sign * 0.48);
+          shape.quadraticCurveTo(-1.76, sign * 0.48,  -1.74, sign * 0.39);
+          shape.quadraticCurveTo(-1.67, sign * 0.18,  -1.42, sign * 0.07);
+          shape.quadraticCurveTo(-1.18, 0,            -0.82, 0);
+          const geometry = new THREE.ShapeGeometry(shape, 20);
+          return new THREE.Mesh(geometry, tailMaterial);
         }
-        const upperTail = createTailLobe([
-          [-0.82,  0.00], [-1.25,  0.28], [-1.70,  0.48], [-1.43,  0.12], [-1.18,  0.00],
-        ]);
-        const lowerTail = createTailLobe([
-          [-0.82,  0.00], [-1.18,  0.00], [-1.43, -0.12], [-1.70, -0.48], [-1.25, -0.28],
-        ]);
+        const upperTail = createTailLobe(true);
+        const lowerTail = createTailLobe(false);
         fish.add(upperTail);
         fish.add(lowerTail);
-        // 3. 白い球体の目
-        const eyeGeometry = new THREE.SphereGeometry(0.085, 8, 6);
+        // 3. シール状の白い円形の目
+        const eyeGeometry = new THREE.CircleGeometry(0.085, 32);
         const eye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        eye.position.set(0.65, 0.08, 0.255);
+        eye.position.set(0.65, 0.08, 0.21);
         fish.add(eye);
         return fish;
       }
       const fish = createLowPolyFish();
-      fish.scale.setScalar(0.15 / 2.70);     // 長辺 15cm
+      fish.scale.setScalar(0.15 / 2.76);     // 長辺 15cm
       fish.rotation.y = -Math.PI / 2;        // yaw -90°
       fish.position.set(1, 1.5, 0);
       fish.name = 'low-poly-fish';
