@@ -1300,9 +1300,6 @@
         const tailMaterial = new THREE.MeshStandardMaterial({
           color: 0xffff00, roughness: 0.85, side: THREE.DoubleSide,
         });
-        const eyeMaterial = new THREE.MeshBasicMaterial({
-          color: 0xffffff, side: THREE.DoubleSide,
-        });
         // 1. 滑らかな楕円形の胴体
         const bodyGeometry = new THREE.SphereGeometry(1, 32, 24);
         bodyGeometry.scale(1.0, 0.42, 0.28);
@@ -1325,11 +1322,25 @@
         const lowerTail = createTailLobe(false);
         fish.add(upperTail);
         fish.add(lowerTail);
-        // 3. シール状の白い円形の目
+        // 3. 胴体に沿わせたシール状の目
         const eyeGeometry = new THREE.CircleGeometry(0.085, 32);
-        const eye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        eye.position.set(0.65, 0.08, 0.21);
-        fish.add(eye);
+        const eyeMaterial = new THREE.MeshBasicMaterial({
+          color: 0xffffff, side: THREE.DoubleSide, depthWrite: false,
+        });
+        function createEye(x, y, side = 1) {
+          const rx = 1.0, ry = 0.42, rz = 0.28;
+          const z = side * rz * Math.sqrt(1 - (x * x) / (rx * rx) - (y * y) / (ry * ry));
+          const normal = new THREE.Vector3(
+            x / (rx * rx), y / (ry * ry), z / (rz * rz)
+          ).normalize();
+          const eye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+          const surfacePosition = new THREE.Vector3(x, y, z);
+          eye.position.copy(surfacePosition.addScaledVector(normal, 0.003));
+          eye.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+          return eye;
+        }
+        fish.add(createEye(0.65, 0.08,  1));
+        fish.add(createEye(0.65, 0.08, -1));
         return fish;
       }
       const fish = createLowPolyFish();
