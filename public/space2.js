@@ -1289,22 +1289,26 @@
     })();
 
     // ===== Low-poly fish =====
-    //   位置 (1, 1.5, 0) に配置
+    //   位置 (1, 1.5, 0)、長辺 15cm、配色 yellow、yaw -90°
+    //   モデル内部の X 範囲: -1.70 (尾先) 〜 +1.00 (胴体前端) = 2.70 units → 15cm/2.70 ≈ 0.0556 scale
     (function _spawnLowPolyFish() {
       function createLowPolyFish() {
         const fish = new THREE.Group();
         const bodyMaterial = new THREE.MeshStandardMaterial({
-          color: 0x287fba, flatShading: true, roughness: 0.9,
+          color: 0xffff00, flatShading: true, roughness: 0.9,
         });
         const tailMaterial = new THREE.MeshStandardMaterial({
-          color: 0x55b5df, flatShading: true, side: THREE.DoubleSide,
+          color: 0xffff00, flatShading: true, side: THREE.DoubleSide,
+        });
+        const eyeMaterial = new THREE.MeshStandardMaterial({
+          color: 0xffffff, roughness: 0.5,
         });
         // 1. 楕円形の胴体
         const bodyGeometry = new THREE.SphereGeometry(1, 10, 6);
         bodyGeometry.scale(1.0, 0.42, 0.28);
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
         fish.add(body);
-        // 2. 多角形の尾びれを生成
+        // 2. 双葉型の尾びれ
         function createTailLobe(points) {
           const shape = new THREE.Shape();
           shape.moveTo(points[0][0], points[0][1]);
@@ -1312,22 +1316,26 @@
           shape.closePath();
           const geometry = new THREE.ShapeGeometry(shape);
           const mesh = new THREE.Mesh(geometry, tailMaterial);
-          mesh.position.z = 0;
           return mesh;
         }
-        // 3. 上側の尾びれ
         const upperTail = createTailLobe([
           [-0.82,  0.00], [-1.25,  0.28], [-1.70,  0.48], [-1.43,  0.12], [-1.18,  0.00],
         ]);
-        // 4. 下側の尾びれ
         const lowerTail = createTailLobe([
           [-0.82,  0.00], [-1.18,  0.00], [-1.43, -0.12], [-1.70, -0.48], [-1.25, -0.28],
         ]);
         fish.add(upperTail);
         fish.add(lowerTail);
+        // 3. 白い球体の目
+        const eyeGeometry = new THREE.SphereGeometry(0.085, 8, 6);
+        const eye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+        eye.position.set(0.65, 0.08, 0.255);
+        fish.add(eye);
         return fish;
       }
       const fish = createLowPolyFish();
+      fish.scale.setScalar(0.15 / 2.70);     // 長辺 15cm
+      fish.rotation.y = -Math.PI / 2;        // yaw -90°
       fish.position.set(1, 1.5, 0);
       fish.name = 'low-poly-fish';
       scene.add(fish);
