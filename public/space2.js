@@ -158,7 +158,7 @@
     //   グリッド (独自 shader) は _gridLightUni に uSpot* uniform を追加して対応
     const SPOT_POS    = new THREE.Vector3(0, 2, 0);
     const SPOT_TARGET = new THREE.Vector3(0, 0, 0);
-    const SPOT_ANGLE  = Math.atan(1.5 / 2.0);   // 半角 (= 円半径 1.5m / 高さ 2m) → 床で直径 3m
+    const SPOT_ANGLE  = Math.atan(5.0 / 2.0);   // 半角 (= 円半径 5.0m / 高さ 2m) → 床で直径 10m
     const spot = new THREE.SpotLight(0xffffee, 2.0, 10, SPOT_ANGLE, 0.2, 1.0);
     spot.position.copy(SPOT_POS);
     spot.target.position.copy(SPOT_TARGET);
