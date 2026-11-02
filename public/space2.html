@@ -321,6 +321,13 @@
   <!-- fflate (FBXLoader の zlib 展開依存) + FBXLoader (r147 UMD) -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/libs/fflate.min.js" onload="uiLog('fflate loaded','ok')" onerror="uiLog('fflate load failed','err')"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/FBXLoader.js" onload="uiLog('FBXLoader loaded','ok')" onerror="uiLog('FBXLoader load failed','err')"></script>
+  <!-- Postprocessing (Bloom) — 試験: スプレー塗装を発光させる emissive+bloom パイプライン -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/EffectComposer.js" onload="uiLog('EffectComposer loaded','ok')" onerror="uiLog('EffectComposer load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/RenderPass.js" onload="uiLog('RenderPass loaded','ok')" onerror="uiLog('RenderPass load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/ShaderPass.js" onload="uiLog('ShaderPass loaded','ok')" onerror="uiLog('ShaderPass load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/UnrealBloomPass.js" onload="uiLog('UnrealBloomPass loaded','ok')" onerror="uiLog('UnrealBloomPass load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/shaders/CopyShader.js" onload="uiLog('CopyShader loaded','ok')" onerror="uiLog('CopyShader load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/shaders/LuminosityHighPassShader.js" onload="uiLog('LuminosityHighPassShader loaded','ok')" onerror="uiLog('LuminosityHighPassShader load failed','err')"></script>
   <script src="/config.js"></script>
   <script>
     (function () {

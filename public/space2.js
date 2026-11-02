@@ -138,6 +138,38 @@
       camera.aspect = winW / winH;
       camera.updateProjectionMatrix();
       renderer.setSize(winW, winH);
+      if (_bloomComposer) {
+        _bloomComposer.setSize(winW, winH);
+      }
+    }
+
+    // ===== 試験: スプレー塗装 Emissive + UnrealBloom =====
+    //   有効化/無効化の切替フラグ (console から window.__paintBloomEnabled = false で即時無効化)
+    //   true: 塗装を HDR 値で出力し、UnrealBloomPass で周囲に halo (発光) を広げる
+    //   false: 従来通り gl_FragColor 直書き (単純上書き、発光効果なし)
+    //   注: このフラグは _makePaintable (shader 注入) と render ループ (composer 使用) の両方で参照
+    window.__paintBloomEnabled = (typeof window.__paintBloomEnabled === 'boolean') ? window.__paintBloomEnabled : true;
+    // Composer 遅延生成: three postprocessing スクリプトのロードを待つため
+    let _bloomComposer = null;
+    let _bloomPass = null;
+    function _ensureBloomComposer() {
+      if (_bloomComposer) return _bloomComposer;
+      if (typeof THREE.EffectComposer !== 'function' || typeof THREE.UnrealBloomPass !== 'function' || typeof THREE.RenderPass !== 'function') {
+        return null;
+      }
+      const w = window.innerWidth, h = window.innerHeight;
+      _bloomComposer = new THREE.EffectComposer(renderer);
+      _bloomComposer.setSize(w, h);
+      _bloomComposer.addPass(new THREE.RenderPass(scene, camera));
+      _bloomPass = new THREE.UnrealBloomPass(
+        new THREE.Vector2(w, h),
+        1.4,    // strength
+        0.5,    // radius
+        0.85    // threshold (0.85 以上の輝度のみ bloom 対象)
+      );
+      _bloomComposer.addPass(_bloomPass);
+      log('[paintBloom] composer initialized (strength=1.4, radius=0.5, threshold=0.85)', 'ok');
+      return _bloomComposer;
     }
 
     window.addEventListener('resize', () => {
@@ -1084,9 +1116,9 @@
             'void main() {',
             'void main() {\n  vPaintUv = uv;'
           );
-          // 案A (試験): paint を diffuseColor (albedo) に置換 → 標準ライトパイプラインで
-          //   paint が ambient / dir / point の寄与を自然に受ける。
-          //   光の反射色はスプレー色 (= paint.rgb) を参照する形になる。
+          // 試験: 塗装を発光させる (HDR 値で出力 → UnrealBloomPass が周囲に halo を広げる)。
+          //   window.__paintBloomEnabled=true  → HDR 発光 (bloom 前提)
+          //   window.__paintBloomEnabled=false → 従来通りの直書き上書き (bloom なしでも視認可能)
           if (shader.fragmentShader.indexOf('#include <common>') !== -1) {
             shader.fragmentShader = shader.fragmentShader.replace(
               '#include <common>',
@@ -1095,40 +1127,38 @@
           } else {
             shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
           }
-          // diffuseColor に対して OVER 合成 (ライト計算前に差し替え)
-          const paintAlbedo = `
-          {
-            vec4 _paint = texture2D(u_paint, vPaintUv);
-            diffuseColor.rgb = diffuseColor.rgb * (1.0 - _paint.a) + _paint.rgb;
-          }`;
+          // bloom ON 時: paint を HDR で加算 (gl_FragColor.rgb += paint.rgb * paint.a * HDR_MULT)
+          // bloom OFF 時: 従来通りの OVER 合成 (gl_FragColor.rgb = mix(lit, paint, paint.a))
+          const paintBloom = `
+          vec4 _paint = texture2D(u_paint, vPaintUv);
+          #ifdef PAINT_BLOOM_ON
+            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb * 2.5;
+          #else
+            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;
+          #endif`;
           let fs = shader.fragmentShader;
-          // MeshStandardMaterial / MeshLambertMaterial / MeshBasicMaterial すべてに <color_fragment> 存在
-          const colorMarker = '#include <color_fragment>';
-          if (fs.indexOf(colorMarker) !== -1) {
-            fs = fs.replace(colorMarker, colorMarker + '\n' + paintAlbedo);
-          } else {
-            // fallback: 旧挙動 (output 合成) — color_fragment が見つからない shader 用
-            const legacy = `
-            vec4 _paint = texture2D(u_paint, vPaintUv);
-            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
-            const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
-            let injected = false;
-            for (const m of markers) {
-              if (fs.indexOf(m) !== -1) {
-                fs = fs.replace(m, m + '\n' + legacy);
-                injected = true;
-                break;
-              }
+          const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
+          let injected = false;
+          for (const m of markers) {
+            if (fs.indexOf(m) !== -1) {
+              fs = fs.replace(m, m + '\n' + paintBloom);
+              injected = true;
+              break;
             }
-            if (!injected) fs = fs.replace(/\}\s*$/, legacy + '\n}');
           }
+          if (!injected) fs = fs.replace(/\}\s*$/, paintBloom + '\n}');
           shader.fragmentShader = fs;
         };
         const _key = 'paintable_' + mat.uuid;
-        mat.customProgramCacheKey = function () { return _key; };
+        mat.customProgramCacheKey = function () { return _key + (window.__paintBloomEnabled ? '_bloom' : ''); };
         if (!mat.defines) mat.defines = {};
         const _uidHex = mat.uuid.replace(/-/g, '').toUpperCase().substring(0, 16);
         mat.defines['PAINTABLE_MAT_' + _uidHex] = 1;
+        if (window.__paintBloomEnabled) {
+          mat.defines['PAINT_BLOOM_ON'] = 1;
+        } else {
+          delete mat.defines['PAINT_BLOOM_ON'];
+        }
         mat.userData.paintInjected = true;
         mat.needsUpdate = true;
       }
@@ -7291,7 +7321,7 @@
         if (!ok) camera.updateProjectionMatrix();
         // observer のカメラは PLATE_LAYER を enable していないため、プレート群は自動的に
         //   自身視点のレンダーから除外される。追加の mesh.visible 操作は不要。
-        renderer.render(scene, camera);
+        _renderMain();
         // 復元: ユーザー由来の姿勢を戻す (次フレームの操作が正しく効く)
         camera.position.copy(_oaSavePos);
         camera.quaternion.copy(_oaSaveQuat);
@@ -7302,6 +7332,17 @@
           camera.aspect = window.innerWidth / window.innerHeight;
           camera.updateProjectionMatrix();
           log('off-axis OFF (通常 perspective 復帰)', 'ok');
+        }
+        _renderMain();
+      }
+      // 試験: bloom 有効なら composer 経由、無効なら従来通り renderer.render
+      function _renderMain() {
+        if (window.__paintBloomEnabled) {
+          const composer = _ensureBloomComposer();
+          if (composer) {
+            composer.render();
+            return;
+          }
         }
         renderer.render(scene, camera);
       }
