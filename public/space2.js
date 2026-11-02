@@ -1394,6 +1394,37 @@
       fish.position.set(1, 1.5, 0);
       fish.name = 'low-poly-fish';
       scene.add(fish);
+
+      // ===== 泳ぎアニメ: 頂点変形で尾を左右に揺らす =====
+      //   頂点 shader で smoothstep(-0.1, 1.0, -position.x) の重みを計算 → 頭は静止、尾側へ波が伝播
+      //   目の CircleGeometry は position.x 範囲が ±0.085 → ほぼ揺れない (顔に貼り付き)
+      function addFishSwimAnimation(fish) {
+        const uniforms = { uTime: { value: 0 } };
+        fish.traverse((object) => {
+          if (!object.isMesh) return;
+          const material = object.material.clone();
+          material.onBeforeCompile = (shader) => {
+            shader.uniforms.uTime = uniforms.uTime;
+            shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader;
+            shader.vertexShader = shader.vertexShader.replace(
+              '#include <begin_vertex>',
+              `#include <begin_vertex>
+               // 頭 (x=+1) は小さく、尾 (x=-1.76) ほど大きく変形
+               float weight = smoothstep(-0.1, 1.0, -position.x);
+               // 頭から尾へ伝わる波
+               float wave = sin(uTime * 4.0 - position.x * 3.0);
+               // Z 方向に左右の揺れを加える
+               transformed.z += wave * weight * 0.08;`
+            );
+          };
+          material.customProgramCacheKey = () => 'fish-swim';
+          object.material = material;
+        });
+        return uniforms;
+      }
+      const fishUniforms = addFishSwimAnimation(fish);
+      // 既存 updaters が後方で初期化されるので、グローバル経由で登録 (後の updaters セットアップが拾う)
+      window.__fishSwimUpdater = () => { fishUniforms.uTime.value = performance.now() * 0.001; };
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
@@ -5191,6 +5222,7 @@
     });
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
+    if (typeof window.__fishSwimUpdater === 'function') updaters.push(window.__fishSwimUpdater);
 
     // ========== 効果2: スマホ リモコン型ポインター + スプレーボタン ==========
     //   ・effect2 ON + ROLE=camera の時のみ有効化
