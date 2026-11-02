@@ -158,7 +158,7 @@
     //   グリッド (独自 shader) は _gridLightUni に uSpot* uniform を追加して対応
     const SPOT_POS    = new THREE.Vector3(0, 2, 0);
     const SPOT_TARGET = new THREE.Vector3(0, 0, 0);
-    const SPOT_ANGLE  = Math.atan(0.5 / 2.0);   // 半角 (= 円半径 0.5m / 高さ 2m)
+    const SPOT_ANGLE  = Math.atan(1.5 / 2.0);   // 半角 (= 円半径 1.5m / 高さ 2m) → 床で直径 3m
     const spot = new THREE.SpotLight(0xffffee, 2.0, 10, SPOT_ANGLE, 0.2, 1.0);
     spot.position.copy(SPOT_POS);
     spot.target.position.copy(SPOT_TARGET);
@@ -4758,6 +4758,14 @@
         if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
         if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
       });
+      // SpotLight (原点 直径 3m) 強度 (0-5)
+      socket.on('sceneSpot', (data) => {
+        if (!data || typeof data.intensity !== 'number') return;
+        const v = Math.max(0, Math.min(5, data.intensity));
+        if (spot) spot.intensity = v;
+        if (_gridLightUni) _gridLightUni.uSpotIntensity.value = v;
+        if (window.__syncMasterSpotSlider) window.__syncMasterSpotSlider(v);
+      });
 
       socket.on('leave', (u) => {
         const a = avatars.get(u.id);
@@ -6703,6 +6711,38 @@
         });
       }
       if (window.__syncMasterDirSlider) window.__syncMasterDirSlider();
+
+      // ==================================================
+      // SpotLight (原点 直径 3m) 強度スライダー (0-5)
+      // ==================================================
+      const _spotInp = _by('m-scene-spot');
+      const _spotVal = _by('m-scene-spot-val');
+      window.__syncMasterSpotSlider = function(intensity) {
+        if (!_spotInp || !_spotVal) return;
+        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 2.0;
+        _spotInp.value = String(intensity);
+        _spotVal.textContent = intensity.toFixed(2);
+      };
+      let _spotThrottle = 0;
+      if (_spotInp) {
+        _spotInp.addEventListener('input', () => {
+          const v = parseFloat(_spotInp.value);
+          if (!isFinite(v)) return;
+          if (spot) spot.intensity = v;
+          if (_gridLightUni) _gridLightUni.uSpotIntensity.value = v;
+          if (_spotVal) _spotVal.textContent = v.toFixed(2);
+          const now = performance.now();
+          if (now - _spotThrottle < 50) return;
+          _spotThrottle = now;
+          if (socket && socket.connected) socket.emit('sceneSpot', { intensity: v });
+        });
+        _spotInp.addEventListener('change', () => {
+          const v = parseFloat(_spotInp.value);
+          if (!isFinite(v)) return;
+          if (socket && socket.connected) socket.emit('sceneSpot', { intensity: v });
+        });
+      }
+      if (window.__syncMasterSpotSlider) window.__syncMasterSpotSlider();
 
       // ==================================================
       // 移動 Box 質量 (cube 選択 + 数値入力、Enter で即時適用)

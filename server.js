@@ -75,6 +75,7 @@ const cubeOpacities = new Map();
 //   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
 let sceneAmbientConfig = { intensity: 0.85 };
 let sceneDirConfig     = { intensity: 0.35 };   // DirectionalLight 強度
+let sceneSpotConfig    = { intensity: 2.0  };   // SpotLight 強度
 
 // 壁を這う球体 (全クライアント共有)
 // s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
@@ -248,6 +249,7 @@ io.on('connection', (socket) => {
   // space3 グローバル環境光の現在値
   socket.emit('sceneAmbient', sceneAmbientConfig);
   socket.emit('sceneDirLight', sceneDirConfig);
+  socket.emit('sceneSpot', sceneSpotConfig);
   // 既存の cube 質量設定を配信
   for (const [name, mass] of cubeMasses.entries()) {
     socket.emit('cubeMass', { name, mass });
@@ -815,6 +817,15 @@ io.on('connection', (socket) => {
     if (!data || typeof data.intensity !== 'number' || !isFinite(data.intensity)) return;
     sceneDirConfig.intensity = Math.max(0, Math.min(3, data.intensity));
     io.emit('sceneDirLight', sceneDirConfig);
+  });
+
+  // Master が SpotLight (原点 1m 直径) の強度を設定 (0-5)
+  socket.on('sceneSpot', (data) => {
+    const sender = users.get(socket.id);
+    if (!sender || sender.role !== 'master') return;
+    if (!data || typeof data.intensity !== 'number' || !isFinite(data.intensity)) return;
+    sceneSpotConfig.intensity = Math.max(0, Math.min(5, data.intensity));
+    io.emit('sceneSpot', sceneSpotConfig);
   });
 
   // Master が移動 Box の質量を設定
