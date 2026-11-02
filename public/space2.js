@@ -159,7 +159,9 @@
     const SPOT_POS    = new THREE.Vector3(0, 2, 0);
     const SPOT_TARGET = new THREE.Vector3(0, 0, 0);
     const SPOT_ANGLE  = Math.atan(5.0 / 2.0);   // 半角 (= 円半径 5.0m / 高さ 2m) → 床で直径 10m
-    const spot = new THREE.SpotLight(0xffffee, 2.0, 10, SPOT_ANGLE, 0.2, 1.0);
+    // 案C: penumbra=1.0 で cone 全体を smoothstep 補間 (中心 → 外周 の radial gradient)
+    //      強度は初期値 1.0 に下げて白飛び回避 (スライダー 0〜5 で変更可)
+    const spot = new THREE.SpotLight(0xffffee, 1.0, 20, SPOT_ANGLE, 1.0, 1.0);
     spot.position.copy(SPOT_POS);
     spot.target.position.copy(SPOT_TARGET);
     spot.castShadow = false;   // 効果3 で後から ON 可能
@@ -176,8 +178,8 @@
       uSpotPos:         { value: new THREE.Vector3().copy(SPOT_POS) },
       uSpotTarget:      { value: new THREE.Vector3().copy(SPOT_TARGET) },
       uSpotAngleCos:    { value: Math.cos(SPOT_ANGLE) },
-      uSpotIntensity:   { value: 2.0 },
-      uSpotRange:       { value: 10.0 },
+      uSpotIntensity:   { value: 1.0 },
+      uSpotRange:       { value: 20.0 },
       uSpotColor:       { value: new THREE.Color(0xffffee) },
     };
     _gridLightUni.uDirDir.value.copy(dirLight.position).normalize();
@@ -232,7 +234,8 @@
             vec3 toFragN = toFrag / max(dist, 1e-4);
             vec3 spotForward = normalize(uSpotTarget - uSpotPos);
             float ang = dot(toFragN, spotForward);
-            float coneMask = smoothstep(uSpotAngleCos, uSpotAngleCos + 0.02, ang);
+            // 案C: 中心 → 外周 の radial smoothstep (penumbra=1.0 相当)
+            float coneMask = smoothstep(uSpotAngleCos, 1.0, ang);
             vec3 toLight = -toFragN;
             float diffSpot = max(0.0, dot(vNormalWorld, toLight));
             float falloff = max(0.0, 1.0 - dist / uSpotRange);
@@ -6719,7 +6722,7 @@
       const _spotVal = _by('m-scene-spot-val');
       window.__syncMasterSpotSlider = function(intensity) {
         if (!_spotInp || !_spotVal) return;
-        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 2.0;
+        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 1.0;
         _spotInp.value = String(intensity);
         _spotVal.textContent = intensity.toFixed(2);
       };
