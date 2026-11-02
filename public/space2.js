@@ -152,47 +152,93 @@
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(100, 20, 0);
 
+    // ===== 原点中心 直径約 1m のスポットライト =====
+    //   高さ 2m から真下に照射、角度 atan(0.5/2) ≈ 0.245 rad で床に直径 1m の光斑
+    //   物体 (MeshStandardMaterial) は Three.js 標準パイプラインで反応、
+    //   グリッド (独自 shader) は _gridLightUni に uSpot* uniform を追加して対応
+    const SPOT_POS    = new THREE.Vector3(0, 2, 0);
+    const SPOT_TARGET = new THREE.Vector3(0, 0, 0);
+    const SPOT_ANGLE  = Math.atan(0.5 / 2.0);   // 半角 (= 円半径 0.5m / 高さ 2m)
+    const spot = new THREE.SpotLight(0xffffee, 2.0, 10, SPOT_ANGLE, 0.2, 1.0);
+    spot.position.copy(SPOT_POS);
+    spot.target.position.copy(SPOT_TARGET);
+    spot.castShadow = false;   // 効果3 で後から ON 可能
+    scene.add(spot);
+    scene.add(spot.target);
+
     // ===== グリッド用照明応答 ShaderMaterial 共有 uniform =====
-    //   LineBasicMaterial は非応答のため、ambient/dir 強度に合わせて暗化しない。
-    //   独自 shader で local normal uniform × directional light 方向 (world) を参照し、
-    //   ambient + max(0, dot(N, L)) * dirIntensity で色を変調する。
-    //   dirLight.position は固定 → 起動時に一度 uDirDir を計算、以降更新不要。
+    //   LineBasicMaterial は非応答のため、ambient / dir / spot 強度に合わせて暗化しない。
+    //   独自 shader で local normal + spot cone 計算を行う。
     const _gridLightUni = {
-      uAmbient:      { value: 0.85 },
-      uDirIntensity: { value: 0.35 },
-      uDirDir:       { value: new THREE.Vector3(1, 0, 0) },
+      uAmbient:         { value: 0.85 },
+      uDirIntensity:    { value: 0.35 },
+      uDirDir:          { value: new THREE.Vector3(1, 0, 0) },
+      uSpotPos:         { value: new THREE.Vector3().copy(SPOT_POS) },
+      uSpotTarget:      { value: new THREE.Vector3().copy(SPOT_TARGET) },
+      uSpotAngleCos:    { value: Math.cos(SPOT_ANGLE) },
+      uSpotIntensity:   { value: 2.0 },
+      uSpotRange:       { value: 10.0 },
+      uSpotColor:       { value: new THREE.Color(0xffffee) },
     };
-    // uDirDir = normalize(light.position - target.position)。target.position はデフォ (0,0,0)。
     _gridLightUni.uDirDir.value.copy(dirLight.position).normalize();
     // 線の色 + 面の local normal を受け取り、照明応答 shader を返す
     function _makeGridLightMaterial(colorHex, normalLocal) {
       return new THREE.ShaderMaterial({
         uniforms: {
-          uAmbient:      _gridLightUni.uAmbient,
-          uDirIntensity: _gridLightUni.uDirIntensity,
-          uDirDir:       _gridLightUni.uDirDir,
-          uColor:        { value: new THREE.Color(colorHex) },
-          uNormalLocal:  { value: new THREE.Vector3().copy(normalLocal) },
+          uAmbient:        _gridLightUni.uAmbient,
+          uDirIntensity:   _gridLightUni.uDirIntensity,
+          uDirDir:         _gridLightUni.uDirDir,
+          uSpotPos:        _gridLightUni.uSpotPos,
+          uSpotTarget:     _gridLightUni.uSpotTarget,
+          uSpotAngleCos:   _gridLightUni.uSpotAngleCos,
+          uSpotIntensity:  _gridLightUni.uSpotIntensity,
+          uSpotRange:      _gridLightUni.uSpotRange,
+          uSpotColor:      _gridLightUni.uSpotColor,
+          uColor:          { value: new THREE.Color(colorHex) },
+          uNormalLocal:    { value: new THREE.Vector3().copy(normalLocal) },
         },
         vertexShader: `
           uniform vec3 uNormalLocal;
           varying vec3 vNormalWorld;
+          varying vec3 vWorldPos;
           void main() {
             vNormalWorld = normalize((modelMatrix * vec4(uNormalLocal, 0.0)).xyz);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
           }
         `,
         fragmentShader: `
           precision mediump float;
           uniform float uAmbient;
           uniform float uDirIntensity;
-          uniform vec3 uDirDir;
-          uniform vec3 uColor;
-          varying vec3 vNormalWorld;
+          uniform vec3  uDirDir;
+          uniform vec3  uSpotPos;
+          uniform vec3  uSpotTarget;
+          uniform float uSpotAngleCos;
+          uniform float uSpotIntensity;
+          uniform float uSpotRange;
+          uniform vec3  uSpotColor;
+          uniform vec3  uColor;
+          varying vec3  vNormalWorld;
+          varying vec3  vWorldPos;
           void main() {
-            float diff = max(0.0, dot(vNormalWorld, uDirDir));
-            float b = clamp(uAmbient + diff * uDirIntensity, 0.0, 2.0);
-            gl_FragColor = vec4(uColor * b, 1.0);
+            // directional
+            float diffDir = max(0.0, dot(vNormalWorld, uDirDir));
+            vec3 col = uColor * clamp(uAmbient + diffDir * uDirIntensity, 0.0, 2.0);
+            // spot: cone + lambert + 距離減衰
+            vec3 toFrag = vWorldPos - uSpotPos;
+            float dist = length(toFrag);
+            vec3 toFragN = toFrag / max(dist, 1e-4);
+            vec3 spotForward = normalize(uSpotTarget - uSpotPos);
+            float ang = dot(toFragN, spotForward);
+            float coneMask = smoothstep(uSpotAngleCos, uSpotAngleCos + 0.02, ang);
+            vec3 toLight = -toFragN;
+            float diffSpot = max(0.0, dot(vNormalWorld, toLight));
+            float falloff = max(0.0, 1.0 - dist / uSpotRange);
+            float spotContrib = coneMask * diffSpot * falloff * uSpotIntensity;
+            col += uSpotColor * spotContrib;
+            gl_FragColor = vec4(col, 1.0);
           }
         `,
       });
@@ -712,15 +758,9 @@
     //   初期値は -1 (= 未スポーン / fade-out 未発火) で shader 側が scale 1.0 として扱う。
     function _attachModeInstanceAttrs(chunk) {
       try {
-        if (!chunk || !chunk.mesh || !chunk.mesh.geometry) {
-          log('[modeFade/phase1] attach ERR: chunk/mesh/geom missing', 'err');
-          return;
-        }
+        if (!chunk || !chunk.mesh || !chunk.mesh.geometry) return;
         const n = chunk.mesh.count || chunk.mesh.instanceMatrix.count;
-        if (!n || n <= 0) {
-          log('[modeFade/phase1] attach ERR: maxPerChunk=' + n, 'err');
-          return;
-        }
+        if (!n || n <= 0) return;
         if (chunk.mesh.geometry.getAttribute('aSpawnTime')) return;   // 二重付与防止
         const spawnArr = new Float32Array(n);
         const fadeArr  = new Float32Array(n);
@@ -733,9 +773,7 @@
         chunk.mesh.geometry.setAttribute('aFadeOutTime', aFade);
         chunk._aSpawn = aSpawn;
         chunk._aFade  = aFade;
-      } catch (e) {
-        log('[modeFade/phase1] attach EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
-      }
+      } catch (_) {}
     }
     // スプレー発火を有効化するモード集合
     const MODE_SPRAY_ACTIVE = new Set(['wood', 'river', 'sky']);
@@ -2522,8 +2560,6 @@
           ch._aFade.array[ch.count]  = -1;   // fade-out 未発火
           ch._aSpawn.needsUpdate = true;
           ch._aFade.needsUpdate  = true;
-        } else {
-          log('[modeFade/phase5] WARN: chunk ' + ch.mode + ' lacks fade attrs', 'err');
         }
         const posClone  = _modeChunkDummy.position.clone();
         const quatClone = _modeChunkDummy.quaternion.clone();
@@ -2601,10 +2637,7 @@
       const cz = Math.floor(wz / MODE_CHUNK_SIZE);
       const ch = _modeChunks.get(_chunkKey(mode, cx, cy, cz));
       if (!ch) return;
-      if (!ch._aFade) {
-        log('[modeFade/phase5] fade-out ERR: chunk lacks aFadeOutTime attr', 'err');
-        return;
-      }
+      if (!ch._aFade) return;
       const nowSec = _modeTimeUniform.value;
       let hits = 0;
       for (let i = 0; i < ch.instanceMeta.length; i++) {
@@ -5048,9 +5081,7 @@
         if (renderer && typeof renderer.compile === 'function') {
           renderer.compile(scene, camera);
         }
-      } catch (e) {
-        log('[modeFade/phase6] warmup EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
-      }
+      } catch (_) {}
     }, 500);
     // sky star shader: u_time を全マテリアルに同期更新 (脈動アニメーション)
     updaters.push(() => {
