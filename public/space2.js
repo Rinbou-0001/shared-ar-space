@@ -622,9 +622,7 @@
         perVoxel: 4,                             // 1 ボクセルあたりの本数
         maxPerChunk: 3000,                       // 1 チャンク InstancedMesh の上限 (2m×2m 面 625 vox × 4 本 = 2500 + 余裕)
         makeGeometry: () => _makeGrassGeometry(),
-        makeMaterial: () => new THREE.MeshBasicMaterial({
-          color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
-        }),
+        makeMaterial: () => _makeWoodGrassMaterial(),
         scaleJitter: [0.7, 1.3],
         orientUpWithNormal: true,
       },
@@ -656,6 +654,43 @@
     // アニメーション中のエントリ: { blades, appearAt, fadeEnd, done }
     //   blades: 配列 [{ chunk, idx, pos:Vector3, quat:Quaternion, scaleTarget:number }]
     const _modeAnimEntries = [];
+    // ===== 改善案B: GPU-driven fade-in/out 用の共有 uniform / 属性 =====
+    //   毎フレーム u_modeTime (秒) を更新 → 各モードの vertex shader が
+    //   per-instance の aSpawnTime / aFadeOutTime と比較して scale を自律計算する。
+    //   CPU 側の毎フレーム setMatrixAt を廃止するためのインフラ。
+    const MODE_FADE_SEC = 1.0;   // = MODE_SPAWN_FADE_MS / 1000
+    const _modeTimeUniform = { value: 0 };
+    log('[modeFade/phase1] shared time uniform init (MODE_FADE_SEC=' + MODE_FADE_SEC + ')', 'ok');
+    // chunk 生成直後に per-instance 属性 aSpawnTime (sec), aFadeOutTime (sec) を付与。
+    //   初期値は -1 (= 未スポーン / fade-out 未発火) で shader 側が scale 1.0 として扱う。
+    function _attachModeInstanceAttrs(chunk) {
+      try {
+        if (!chunk || !chunk.mesh || !chunk.mesh.geometry) {
+          log('[modeFade/phase1] attach ERR: chunk/mesh/geom missing', 'err');
+          return;
+        }
+        const n = chunk.mesh.count || chunk.mesh.instanceMatrix.count;
+        if (!n || n <= 0) {
+          log('[modeFade/phase1] attach ERR: maxPerChunk=' + n, 'err');
+          return;
+        }
+        if (chunk.mesh.geometry.getAttribute('aSpawnTime')) return;   // 二重付与防止
+        const spawnArr = new Float32Array(n);
+        const fadeArr  = new Float32Array(n);
+        for (let i = 0; i < n; i++) { spawnArr[i] = -1; fadeArr[i] = -1; }
+        const aSpawn = new THREE.InstancedBufferAttribute(spawnArr, 1);
+        const aFade  = new THREE.InstancedBufferAttribute(fadeArr,  1);
+        aSpawn.setUsage(THREE.DynamicDrawUsage);
+        aFade.setUsage(THREE.DynamicDrawUsage);
+        chunk.mesh.geometry.setAttribute('aSpawnTime',   aSpawn);
+        chunk.mesh.geometry.setAttribute('aFadeOutTime', aFade);
+        chunk._aSpawn = aSpawn;
+        chunk._aFade  = aFade;
+        log('[modeFade/phase1] attached aSpawnTime/aFadeOutTime (mode=' + chunk.mode + ', cap=' + n + ')', 'ok');
+      } catch (e) {
+        log('[modeFade/phase1] attach EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }
     // スプレー発火を有効化するモード集合
     const MODE_SPRAY_ACTIVE = new Set(['wood', 'river', 'sky']);
     // 色 hex → mode 名の逆引き
@@ -2097,22 +2132,68 @@
       uBaseColor: { value: null },
       uOpacity:   { value: 0.75 },
     };
+    // ===== 改善案B: wood (草) 用 MeshBasicMaterial + onBeforeCompile fade injection =====
+    //   per-instance aSpawnTime/aFadeOutTime 属性と u_modeTime uniform を元に scale を自律計算。
+    //   CPU 側の毎フレーム setMatrixAt を廃止するためのマテリアル。
+    const _woodShaderMats = [];
+    function _makeWoodGrassMaterial() {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x2d8f3a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
+      });
+      mat.onBeforeCompile = (shader) => {
+        shader.uniforms.u_modeTime = _modeTimeUniform;
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>',
+            '#include <common>\nattribute float aSpawnTime;\nattribute float aFadeOutTime;\nuniform float u_modeTime;\nvarying float vModeFade;')
+          .replace('#include <begin_vertex>',
+            '#include <begin_vertex>\n' +
+            'float _fin  = (aSpawnTime  < 0.0) ? 0.0 : clamp((u_modeTime - aSpawnTime)  / ' + MODE_FADE_SEC.toFixed(3) + ', 0.0, 1.0);\n' +
+            'float _fout = (aFadeOutTime < 0.0) ? 1.0 : (1.0 - clamp((u_modeTime - aFadeOutTime) / ' + MODE_FADE_SEC.toFixed(3) + ', 0.0, 1.0));\n' +
+            'float _modeScale = _fin * _fout;\n' +
+            'vModeFade = _modeScale;\n' +
+            'transformed *= _modeScale;');
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nvarying float vModeFade;')
+          .replace('#include <output_fragment>',
+            'gl_FragColor.a *= vModeFade;\n#include <output_fragment>')
+          // 新 Three.js 版が <opaque_fragment> を使うケースに対応
+          .replace('#include <opaque_fragment>',
+            'gl_FragColor.a *= vModeFade;\n#include <opaque_fragment>');
+        _woodShaderMats.push(shader);
+        log('[modeFade/phase2] wood shader compiled (fade attrs injected)', 'ok');
+      };
+      return mat;
+    }
+
     function _makeRiverShaderMaterial() {
       if (!_sharedRiverUniforms.uNoise.value) _sharedRiverUniforms.uNoise.value = _ensureSharedRiverNoise();
       if (!_sharedRiverUniforms.uBaseColor.value) _sharedRiverUniforms.uBaseColor.value = new THREE.Color(0x1aa0e8);
       // World-space UV サンプリング: 隣接タイル同士で位相連続 (格子感を消す)
       // 頂点変位・bgRT 廃止、fragment だけでさざ波 (ノイズ2枚スクロール + Fresnel 風ハイライト)
+      // 改善案B: 共有時刻 uniform を追加 (fade 計算用)
+      const _riverUni = Object.assign({ u_modeTime: _modeTimeUniform }, _sharedRiverUniforms);
+      log('[modeFade/phase3] river shader material built (fade attrs injected)', 'ok');
       return new THREE.ShaderMaterial({
-        uniforms: _sharedRiverUniforms,
+        uniforms: _riverUni,
         vertexShader: `
+          attribute float aSpawnTime;
+          attribute float aFadeOutTime;
+          uniform float u_modeTime;
           varying vec2 vWxz;
           varying vec3 vViewDir;
           varying vec3 vNormal;
+          varying float vModeFade;
           void main() {
+            // 改善案B: per-instance fade 計算 (shader 内で scale 自律)
+            float _fin  = (aSpawnTime  < 0.0) ? 0.0 : clamp((u_modeTime - aSpawnTime)  / ${MODE_FADE_SEC.toFixed(3)}, 0.0, 1.0);
+            float _fout = (aFadeOutTime < 0.0) ? 1.0 : (1.0 - clamp((u_modeTime - aFadeOutTime) / ${MODE_FADE_SEC.toFixed(3)}, 0.0, 1.0));
+            float _modeScale = _fin * _fout;
+            vModeFade = _modeScale;
+            vec3 scaledPos = position * _modeScale;
             // InstancedMesh: instanceMatrix を適用
-            vec4 wPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+            vec4 wPos = modelMatrix * instanceMatrix * vec4(scaledPos, 1.0);
             vWxz = wPos.xz;
-            vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+            vec4 mvPos = modelViewMatrix * instanceMatrix * vec4(scaledPos, 1.0);
             vViewDir = normalize(-mvPos.xyz);
             vNormal  = normalize(normalMatrix * normal);
             gl_Position = projectionMatrix * mvPos;
@@ -2126,18 +2207,16 @@
           varying vec2 vWxz;
           varying vec3 vViewDir;
           varying vec3 vNormal;
+          varying float vModeFade;
           void main() {
-            // World-space ノイズサンプリング (タイル境界で phase 連続)
             vec2 n1 = texture2D(uNoise, vWxz * 1.2 + vec2(uTime * 0.07,  uTime * 0.04)).rg;
             vec2 n2 = texture2D(uNoise, vWxz * 0.8 - vec2(uTime * 0.05, -uTime * 0.06)).rg;
             float wave = (n1.r + n2.r - 1.0);
-            // Fresnel 風エッジ: 視線と法線の角度で縁を強調
             float fres = pow(1.0 - max(dot(vNormal, vViewDir), 0.0), 2.5);
-            // ハイライト: ノイズピークを閾値越えで光らせる
             float sparkle = pow(max(0.0, wave + 0.3), 4.0) * 0.6;
             vec3 col = uBaseColor + wave * 0.12 + vec3(sparkle);
             col = mix(col, vec3(1.0), fres * 0.25);
-            gl_FragColor = vec4(col, uOpacity);
+            gl_FragColor = vec4(col, uOpacity * vModeFade);   // 改善案B: fade を alpha に反映
           }
         `,
         transparent: true,
@@ -2159,23 +2238,28 @@
     function _makeSkyStarShaderMaterial() {
       const mat = new THREE.ShaderMaterial({
         uniforms: {
-          u_time:  { value: 0 },
-          u_color: { value: new THREE.Color('#e8f4ff') },
+          u_time:     { value: 0 },
+          u_modeTime: _modeTimeUniform,
+          u_color:    { value: new THREE.Color('#e8f4ff') },
         },
         // 注: Three.js ShaderMaterial は InstancedBufferGeometry 検出時に
         //   `attribute mat4 instanceMatrix;` を自動で prefix に挿入する。
         //   明示宣言すると duplicate でコンパイル失敗するため、宣言しないこと。
         vertexShader: `
+          attribute float aSpawnTime;
+          attribute float aFadeOutTime;
           uniform float u_time;
+          uniform float u_modeTime;
           varying vec2 vUv;
           varying float vPulse;
           varying float vInstScale;
           void main() {
             vUv = uv;
             vec3 instancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
-            // instanceMatrix の基底ベクトル長 = 一様スケール (fade-in / fade-out で CPU 側が 0→1 / 1→0 に書換)
-            //   これを offset と alpha に乗算することで、既存 fade-out パイプラインに乗る
-            float instScale = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+            // 改善案B: per-instance fade (旧 instanceMatrix.scale 読取から置換)
+            float _fin  = (aSpawnTime  < 0.0) ? 0.0 : clamp((u_modeTime - aSpawnTime)  / ${MODE_FADE_SEC.toFixed(3)}, 0.0, 1.0);
+            float _fout = (aFadeOutTime < 0.0) ? 1.0 : (1.0 - clamp((u_modeTime - aFadeOutTime) / ${MODE_FADE_SEC.toFixed(3)}, 0.0, 1.0));
+            float instScale = _fin * _fout;
             vInstScale = instScale;
             // 位置から擬似ランダム phase (0..2π) を導出 → instance ごとに位相ずらし
             float phase = fract(sin(dot(instancePos, vec3(12.9898, 78.233, 37.719))) * 43758.5453) * 6.2831853;
@@ -2210,6 +2294,7 @@
         depthWrite: false,
       });
       _skyShaderMats.push(mat);
+      log('[modeFade/phase4] sky shader material built (fade attrs injected)', 'ok');
       return mat;
     }
 
@@ -2259,6 +2344,8 @@
              cyWorld: (cy + 0.5) * MODE_CHUNK_SIZE, czWorld: (cz + 0.5) * MODE_CHUNK_SIZE,
              instanceMeta: [] };  // index 対応: 各 instance の { ix, iy, iz, pos, quat, scaleTarget, fadingOut }
       _modeChunks.set(key, ch);
+      // 改善案B: per-instance fade 属性を付与
+      _attachModeInstanceAttrs(ch);
       return ch;
     }
     function _chunkOfWorld(mode, wx, wy, wz) {
@@ -2377,9 +2464,22 @@
           _modeChunkDummy.quaternion.identity();
         }
         const sTarget = sMin + Math.random() * (sMax - sMin);
-        _modeChunkDummy.scale.setScalar(sTarget * initialScaleFactor);
+        // 改善案B: scale は常に target 固定で設定 (CPU 側で縮小しない)。shader が時刻ベースで fade。
+        _modeChunkDummy.scale.setScalar(sTarget);
         _modeChunkDummy.updateMatrix();
         ch.mesh.setMatrixAt(ch.count, _modeChunkDummy.matrix);
+        // 改善案B: per-instance 時刻属性を書込
+        //   - initialScaleFactor=0.0 (= fade-in 経由) → aSpawnTime = 現在時刻
+        //   - initialScaleFactor=1.0 (= 即時表示: history replay) → aSpawnTime = 遠い過去 (= 既に fade 完了済み扱い)
+        if (ch._aSpawn && ch._aFade) {
+          const nowSec = _modeTimeUniform.value;
+          ch._aSpawn.array[ch.count] = (initialScaleFactor >= 1.0) ? (nowSec - 1000.0) : nowSec;
+          ch._aFade.array[ch.count]  = -1;   // fade-out 未発火
+          ch._aSpawn.needsUpdate = true;
+          ch._aFade.needsUpdate  = true;
+        } else {
+          log('[modeFade/phase5] WARN: chunk ' + ch.mode + ' lacks fade attrs', 'err');
+        }
         const posClone  = _modeChunkDummy.position.clone();
         const quatClone = _modeChunkDummy.quaternion.clone();
         // 全 instance にメタ記録 (overwrite fade-out で検索に使う)
@@ -2413,10 +2513,18 @@
         ch.mesh.count = 0;
         ch.instanceMeta.length = 0;
         ch.mesh.instanceMatrix.needsUpdate = true;
+        // 改善案B: fade 属性もリセット (全 instance を "未スポーン" に戻す)
+        if (ch._aSpawn && ch._aFade) {
+          ch._aSpawn.array.fill(-1);
+          ch._aFade.array.fill(-1);
+          ch._aSpawn.needsUpdate = true;
+          ch._aFade.needsUpdate  = true;
+        }
       }
       _modeVoxels.clear();
       _modePendingLocal.length = 0;
       _modeAnimEntries.length = 0;
+      log('[modeFade] clearAll done (attrs reset)', 'ok');
     }
 
     // ============ 発生アニメーション ============
@@ -2438,11 +2546,9 @@
     }
 
     // ============ Overwrite fade-out ============
-    //   指定モードの (ix,iy,iz) ボクセルに属する instance 群を 1 秒で scale→0 させる
-    //   他モードが同じ voxel に塗装された時に呼ばれる (塗り替え表現)
+    //   改善案B: shader 側で aFadeOutTime 読取 → 1 秒で alpha/scale 0 補間。CPU は属性書込のみ。
     function _tryFadeOutModeAt(mode, ix, iy, iz) {
       if (!MODE_RULES[mode]) return;
-      // 対象 chunk 計算
       const wx = (ix + 0.5) * MODE_VOXEL;
       const wy = (iy + 0.5) * MODE_VOXEL;
       const wz = (iz + 0.5) * MODE_VOXEL;
@@ -2451,39 +2557,41 @@
       const cz = Math.floor(wz / MODE_CHUNK_SIZE);
       const ch = _modeChunks.get(_chunkKey(mode, cx, cy, cz));
       if (!ch) return;
-      // instanceMeta から該当 voxel の instance を抽出
-      const blades = [];
+      if (!ch._aFade) {
+        log('[modeFade/phase5] fade-out ERR: chunk lacks aFadeOutTime attr', 'err');
+        return;
+      }
+      const nowSec = _modeTimeUniform.value;
+      let hits = 0;
       for (let i = 0; i < ch.instanceMeta.length; i++) {
         const m = ch.instanceMeta[i];
         if (!m) continue;
         if (m.fadingOut) continue;
         if (m.ix === ix && m.iy === iy && m.iz === iz) {
           m.fadingOut = true;
-          blades.push({ chunk: ch, idx: i, pos: m.pos, quat: m.quat, scaleTarget: m.scaleTarget });
+          ch._aFade.array[i] = nowSec;   // shader が u_modeTime と比較して scale 0 に向かう
+          hits++;
         }
       }
-      if (blades.length === 0) return;
-      const now = performance.now();
-      _modeAnimEntries.push({
-        data: null, blades,
-        appearAt: now,
-        fadeEnd: now + MODE_SPAWN_FADE_MS,
-        done: false, retryCount: 0,
-        isFadeOut: true,
-      });
+      if (hits > 0) {
+        ch._aFade.needsUpdate = true;
+      }
     }
 
     function _modeAnimTick() {
       if (_modeAnimEntries.length === 0) return;
+      // 改善案B: entry は "allocate scheduler" のみに縮退。
+      //   - delay 経過後に _allocateAnimatedBlades で一度 instance を確保 (aSpawnTime 書込済)
+      //   - allocate 以降は shader が fade を担うため CPU 側 per-frame 書換なし
+      //   - entry は fadeEnd 時刻で done 扱いにして配列から除去
       const now = performance.now();
-      const dirtyMeshes = new Set();
       let hasDone = false;
       for (let i = 0; i < _modeAnimEntries.length; i++) {
         const e = _modeAnimEntries[i];
         if (e.done) { hasDone = true; continue; }
         if (now < e.appearAt) continue;
-        // 初回: allocate (chunk cap 失敗時は retry) ─ fade-out は allocate 不要
-        if (!e.blades && !e.isFadeOut) {
+        // allocate (chunk cap 失敗時は retry)。fade-out entry は改善案Bで廃止したので data 必須
+        if (!e.blades) {
           const list = [];
           const ok = _allocateAnimatedBlades(e.data, list);
           if (!ok || list.length === 0) {
@@ -2496,25 +2604,11 @@
             continue;
           }
           e.blades = list;
-          for (const bl of e.blades) dirtyMeshes.add(bl.chunk.mesh);
-          continue;  // 同フレームでフェード進行までは待つ
         }
-        if (!e.blades) continue;
-        // フェード進行 (fade-in: 0→1 / fade-out: 1→0)
-        const t = Math.min(1, (now - e.appearAt) / MODE_SPAWN_FADE_MS);
-        const sFactor = e.isFadeOut ? (1 - t) : t;
-        for (const bl of e.blades) {
-          _modeChunkDummy.position.copy(bl.pos);
-          _modeChunkDummy.quaternion.copy(bl.quat);
-          _modeChunkDummy.scale.setScalar(bl.scaleTarget * sFactor);
-          _modeChunkDummy.updateMatrix();
-          bl.chunk.mesh.setMatrixAt(bl.idx, _modeChunkDummy.matrix);
-          dirtyMeshes.add(bl.chunk.mesh);
-        }
-        if (t >= 1) { e.done = true; hasDone = true; }
+        // fadeEnd 到達で done 扱い (shader 側は u_modeTime で既に fade 完了)
+        if (now >= e.fadeEnd) { e.done = true; hasDone = true; }
       }
-      for (const m of dirtyMeshes) m.instanceMatrix.needsUpdate = true;
-      // Cleanup: 済みエントリを削除 (低頻度)
+      // Cleanup: 済みエントリ除去
       if (hasDone) {
         let w = 0;
         for (let i = 0; i < _modeAnimEntries.length; i++) {
@@ -4894,6 +4988,24 @@
     updaters.push(_modeCullTick);
     // 川 shader の uTime を全チャンク材料で共有 (uniforms 同一参照、1行で全反映)
     updaters.push(() => { _sharedRiverUniforms.uTime.value = performance.now() * 0.001; });
+    // 改善案B: モード派生オブジェクト用 共有時刻 (全モード vertex shader の fade 計算に使用)
+    updaters.push(() => { _modeTimeUniform.value = performance.now() * 0.001; });
+    // 改善案B/phase6: warmup — 起動後 3 モードの chunk を事前作成し renderer.compile で shader 事前コンパイル
+    //   (初回スプレー発火時の 10ms 程度の stall を事前解消)
+    setTimeout(() => {
+      try {
+        for (const mode of ['wood', 'river', 'sky']) {
+          const ch = _chunkOfWorld(mode, 0, -1000, 0);   // 地面下 1000m にダミー配置、視界外
+          if (ch) log('[modeFade/phase6] warmup chunk ok (mode=' + mode + ')', 'ok');
+        }
+        if (renderer && typeof renderer.compile === 'function') {
+          renderer.compile(scene, camera);
+          log('[modeFade/phase6] renderer.compile() done (shaders pre-compiled)', 'ok');
+        }
+      } catch (e) {
+        log('[modeFade/phase6] warmup EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }, 500);
     // sky star shader: u_time を全マテリアルに同期更新 (脈動アニメーション)
     updaters.push(() => {
       if (_skyShaderMats.length === 0) return;
