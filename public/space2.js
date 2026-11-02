@@ -151,6 +151,52 @@
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(100, 20, 0);
+
+    // ===== グリッド用照明応答 ShaderMaterial 共有 uniform =====
+    //   LineBasicMaterial は非応答のため、ambient/dir 強度に合わせて暗化しない。
+    //   独自 shader で local normal uniform × directional light 方向 (world) を参照し、
+    //   ambient + max(0, dot(N, L)) * dirIntensity で色を変調する。
+    //   dirLight.position は固定 → 起動時に一度 uDirDir を計算、以降更新不要。
+    const _gridLightUni = {
+      uAmbient:      { value: 0.85 },
+      uDirIntensity: { value: 0.35 },
+      uDirDir:       { value: new THREE.Vector3(1, 0, 0) },
+    };
+    // uDirDir = normalize(light.position - target.position)。target.position はデフォ (0,0,0)。
+    _gridLightUni.uDirDir.value.copy(dirLight.position).normalize();
+    // 線の色 + 面の local normal を受け取り、照明応答 shader を返す
+    function _makeGridLightMaterial(colorHex, normalLocal) {
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          uAmbient:      _gridLightUni.uAmbient,
+          uDirIntensity: _gridLightUni.uDirIntensity,
+          uDirDir:       _gridLightUni.uDirDir,
+          uColor:        { value: new THREE.Color(colorHex) },
+          uNormalLocal:  { value: new THREE.Vector3().copy(normalLocal) },
+        },
+        vertexShader: `
+          uniform vec3 uNormalLocal;
+          varying vec3 vNormalWorld;
+          void main() {
+            vNormalWorld = normalize((modelMatrix * vec4(uNormalLocal, 0.0)).xyz);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          precision mediump float;
+          uniform float uAmbient;
+          uniform float uDirIntensity;
+          uniform vec3 uDirDir;
+          uniform vec3 uColor;
+          varying vec3 vNormalWorld;
+          void main() {
+            float diff = max(0.0, dot(vNormalWorld, uDirDir));
+            float b = clamp(uAmbient + diff * uDirIntensity, 0.0, 2.0);
+            gl_FragColor = vec4(uColor * b, 1.0);
+          }
+        `,
+      });
+    }
     // シャドウ初期は無効化。master 検証タブ 効果3 のトグルで ON/OFF 切替。
     dirLight.castShadow = false;
     scene.add(dirLight);
@@ -180,13 +226,15 @@
     // ===== モノクロ格子表示 (恒常) =====
     //   タイル機能は廃止。1m グレー + 5m 濃グレー格子を常時表示する。
     //   AR passthrough 中は従来通り非表示に。
-    // 床グリッド: 色 = 白、幅 1px (THREE.LineBasicMaterial.linewidth はブラウザ依存で 1px 以外描画不可)
+    // 床グリッド: 色 = 白、1px、照明応答 ShaderMaterial (local normal +Y)
     const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0xffffff, 0xffffff);
-    if (grid.material) { grid.material.linewidth = 1; }
+    if (grid.material) { try { grid.material.dispose(); } catch (_) {} }
+    grid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0));
     grid.position.set(0, 0.015, 0);
     scene.add(grid);
     const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xffffff, 0xffffff);
-    if (majorGrid.material) { majorGrid.material.linewidth = 1; }
+    if (majorGrid.material) { try { majorGrid.material.dispose(); } catch (_) {} }
+    majorGrid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0));
     majorGrid.position.set(0, 0.018, 0);
     scene.add(majorGrid);
     const monoGrid = grid;             // 参照互換 (dummy)
@@ -660,7 +708,6 @@
     //   CPU 側の毎フレーム setMatrixAt を廃止するためのインフラ。
     const MODE_FADE_SEC = 1.0;   // = MODE_SPAWN_FADE_MS / 1000
     const _modeTimeUniform = { value: 0 };
-    log('[modeFade/phase1] shared time uniform init (MODE_FADE_SEC=' + MODE_FADE_SEC + ')', 'ok');
     // chunk 生成直後に per-instance 属性 aSpawnTime (sec), aFadeOutTime (sec) を付与。
     //   初期値は -1 (= 未スポーン / fade-out 未発火) で shader 側が scale 1.0 として扱う。
     function _attachModeInstanceAttrs(chunk) {
@@ -686,7 +733,6 @@
         chunk.mesh.geometry.setAttribute('aFadeOutTime', aFade);
         chunk._aSpawn = aSpawn;
         chunk._aFade  = aFade;
-        log('[modeFade/phase1] attached aSpawnTime/aFadeOutTime (mode=' + chunk.mode + ', cap=' + n + ')', 'ok');
       } catch (e) {
         log('[modeFade/phase1] attach EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
       }
@@ -1091,7 +1137,8 @@
       }
       const gridGeom = new THREE.BufferGeometry();
       gridGeom.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
-      const gridLines = new THREE.LineSegments(gridGeom, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 1 }));
+      // 壁グリッド: 照明応答 ShaderMaterial (local normal +Z、壁の rotation.y で world normal に変換)
+      const gridLines = new THREE.LineSegments(gridGeom, _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 0, 1)));
       gridLines.position.copy(position);
       gridLines.rotation.copy(wall.rotation);
       scene.add(gridLines);
@@ -1138,7 +1185,8 @@
       }
       const _cGeom = new THREE.BufferGeometry();
       _cGeom.setAttribute('position', new THREE.Float32BufferAttribute(_cLines, 3));
-      const _cGrid = new THREE.LineSegments(_cGeom, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 1 }));
+      // 天井グリッド: 照明応答 ShaderMaterial (local normal +Z、rotation.x=π/2 で world normal -Y)
+      const _cGrid = new THREE.LineSegments(_cGeom, _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 0, 1)));
       _cGrid.rotation.x = Math.PI / 2;
       _cGrid.position.set(0, WALL_H_M - 0.02, 0);   // 天面の少し下 (内側)
       scene.add(_cGrid);
@@ -2160,7 +2208,6 @@
           .replace('#include <opaque_fragment>',
             'gl_FragColor.a *= vModeFade;\n#include <opaque_fragment>');
         _woodShaderMats.push(shader);
-        log('[modeFade/phase2] wood shader compiled (fade attrs injected)', 'ok');
       };
       return mat;
     }
@@ -2172,7 +2219,6 @@
       // 頂点変位・bgRT 廃止、fragment だけでさざ波 (ノイズ2枚スクロール + Fresnel 風ハイライト)
       // 改善案B: 共有時刻 uniform を追加 (fade 計算用)
       const _riverUni = Object.assign({ u_modeTime: _modeTimeUniform }, _sharedRiverUniforms);
-      log('[modeFade/phase3] river shader material built (fade attrs injected)', 'ok');
       return new THREE.ShaderMaterial({
         uniforms: _riverUni,
         vertexShader: `
@@ -2294,7 +2340,6 @@
         depthWrite: false,
       });
       _skyShaderMats.push(mat);
-      log('[modeFade/phase4] sky shader material built (fade attrs injected)', 'ok');
       return mat;
     }
 
@@ -2524,7 +2569,6 @@
       _modeVoxels.clear();
       _modePendingLocal.length = 0;
       _modeAnimEntries.length = 0;
-      log('[modeFade] clearAll done (attrs reset)', 'ok');
     }
 
     // ============ 発生アニメーション ============
@@ -4668,6 +4712,8 @@
         if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
         if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
+        // グリッド shader 共有 uniform (ambient 強度) を同期
+        if (_gridLightUni) _gridLightUni.uAmbient.value = v;
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
       });
       // 平行光源 (DirectionalLight) 強度 (0-3): master スライダー変更 → 全クライアント配信
@@ -4675,6 +4721,8 @@
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(3, data.intensity));
         if (dirLight) dirLight.intensity = v;
+        // グリッド shader 共有 uniform (dir 強度) を同期
+        if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
         if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
       });
 
@@ -4995,12 +5043,10 @@
     setTimeout(() => {
       try {
         for (const mode of ['wood', 'river', 'sky']) {
-          const ch = _chunkOfWorld(mode, 0, -1000, 0);   // 地面下 1000m にダミー配置、視界外
-          if (ch) log('[modeFade/phase6] warmup chunk ok (mode=' + mode + ')', 'ok');
+          _chunkOfWorld(mode, 0, -1000, 0);   // 地面下 1000m にダミー配置、視界外
         }
         if (renderer && typeof renderer.compile === 'function') {
           renderer.compile(scene, camera);
-          log('[modeFade/phase6] renderer.compile() done (shaders pre-compiled)', 'ok');
         }
       } catch (e) {
         log('[modeFade/phase6] warmup EXCEPTION: ' + (e && e.message ? e.message : e), 'err');
