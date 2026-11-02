@@ -147,9 +147,9 @@
     // ライト (床は白でフラットに見せるため、環境光を強めに)
     // space3 環境光: master スライダーで動的に intensity を変更可能。
     //   個別 light タグオブジェクトからの寄与とは別途、全体を底上げする AmbientLight。
-    const sceneAmbient = new THREE.AmbientLight(0xffffff, 0.85);
+    const sceneAmbient = new THREE.AmbientLight(0xffffff, 0);
     scene.add(sceneAmbient);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.34);
     dirLight.position.set(100, 20, 0);
 
     // ===== 原点中心 直径約 1m のスポットライト =====
@@ -161,7 +161,7 @@
     const SPOT_ANGLE  = Math.atan(5.0 / 2.0);   // 半角 (= 円半径 5.0m / 高さ 2m) → 床で直径 10m
     // 案C: penumbra=1.0 で cone 全体を smoothstep 補間 (中心 → 外周 の radial gradient)
     //      強度は初期値 1.0 に下げて白飛び回避 (スライダー 0〜5 で変更可)
-    const spot = new THREE.SpotLight(0xffffee, 1.0, 20, SPOT_ANGLE, 1.0, 1.0);
+    const spot = new THREE.SpotLight(0xffffee, 0.43, 20, SPOT_ANGLE, 1.0, 1.0);
     spot.position.copy(SPOT_POS);
     spot.target.position.copy(SPOT_TARGET);
     spot.castShadow = false;   // 効果3 で後から ON 可能
@@ -172,13 +172,13 @@
     //   LineBasicMaterial は非応答のため、ambient / dir / spot 強度に合わせて暗化しない。
     //   独自 shader で local normal + spot cone 計算を行う。
     const _gridLightUni = {
-      uAmbient:         { value: 0.85 },
-      uDirIntensity:    { value: 0.35 },
+      uAmbient:         { value: 0 },
+      uDirIntensity:    { value: 0.34 },
       uDirDir:          { value: new THREE.Vector3(1, 0, 0) },
       uSpotPos:         { value: new THREE.Vector3().copy(SPOT_POS) },
       uSpotTarget:      { value: new THREE.Vector3().copy(SPOT_TARGET) },
       uSpotAngleCos:    { value: Math.cos(SPOT_ANGLE) },
-      uSpotIntensity:   { value: 1.0 },
+      uSpotIntensity:   { value: 0.43 },
       uSpotRange:       { value: 20.0 },
       uSpotColor:       { value: new THREE.Color(0xffffee) },
     };
@@ -6660,7 +6660,7 @@
       const _ambVal = _by('m-scene-ambient-val');
       window.__syncMasterAmbientSlider = function(intensity) {
         if (!_ambInp || !_ambVal) return;
-        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0.85;
+        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0;
         _ambInp.value = String(intensity);
         _ambVal.textContent = intensity.toFixed(2);
       };
@@ -6691,7 +6691,7 @@
       const _dirVal = _by('m-scene-dir-val');
       window.__syncMasterDirSlider = function(intensity) {
         if (!_dirInp || !_dirVal) return;
-        if (typeof intensity !== 'number') intensity = dirLight ? dirLight.intensity : 0.35;
+        if (typeof intensity !== 'number') intensity = dirLight ? dirLight.intensity : 0.34;
         _dirInp.value = String(intensity);
         _dirVal.textContent = intensity.toFixed(2);
       };
@@ -6722,7 +6722,7 @@
       const _spotVal = _by('m-scene-spot-val');
       window.__syncMasterSpotSlider = function(intensity) {
         if (!_spotInp || !_spotVal) return;
-        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 1.0;
+        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 0.43;
         _spotInp.value = String(intensity);
         _spotVal.textContent = intensity.toFixed(2);
       };

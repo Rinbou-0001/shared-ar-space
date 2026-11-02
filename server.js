@@ -73,9 +73,9 @@ const cubeOwners = new Map();
 const cubeOpacities = new Map();
 // space3 のグローバル環境光 (AmbientLight 強度、master スライダーから制御)。
 //   light タグ PointLight とは別系統: 全体ベース照度を上げ下げする用途。
-let sceneAmbientConfig = { intensity: 0.85 };
-let sceneDirConfig     = { intensity: 0.35 };   // DirectionalLight 強度
-let sceneSpotConfig    = { intensity: 1.0  };   // SpotLight 強度 (案C: 白飛び回避)
+let sceneAmbientConfig = { intensity: 0 };
+let sceneDirConfig     = { intensity: 0.34 };
+let sceneSpotConfig    = { intensity: 0.43 };
 
 // 壁を這う球体 (全クライアント共有)
 // s: 周回パラメータ (北→東→南→西、メートル単位、0 で北壁の西端)
