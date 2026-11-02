@@ -152,21 +152,13 @@
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.34);
     dirLight.position.set(100, 20, 0);
 
-    // ===== 原点中心 直径約 1m のスポットライト =====
-    //   高さ 2m から真下に照射、角度 atan(0.5/2) ≈ 0.245 rad で床に直径 1m の光斑
-    //   物体 (MeshStandardMaterial) は Three.js 標準パイプラインで反応、
-    //   グリッド (独自 shader) は _gridLightUni に uSpot* uniform を追加して対応
-    const SPOT_POS    = new THREE.Vector3(0, 2, 0);
-    const SPOT_TARGET = new THREE.Vector3(0, 0, 0);
-    const SPOT_ANGLE  = Math.atan(5.0 / 2.0);   // 半角 (= 円半径 5.0m / 高さ 2m) → 床で直径 10m
-    // 案C: penumbra=1.0 で cone 全体を smoothstep 補間 (中心 → 外周 の radial gradient)
-    //      強度は初期値 1.0 に下げて白飛び回避 (スライダー 0〜5 で変更可)
-    const spot = new THREE.SpotLight(0xffffee, 0.43, 20, SPOT_ANGLE, 1.0, 1.0);
-    spot.position.copy(SPOT_POS);
-    spot.target.position.copy(SPOT_TARGET);
-    spot.castShadow = false;   // 効果3 で後から ON 可能
-    scene.add(spot);
-    scene.add(spot.target);
+    // ===== 原点中心 ポイントライト =====
+    //   位置 (0, 2, 0) から全方向に放射、距離減衰で半径 10m 程度の光斑に
+    const POINT_POS = new THREE.Vector3(0, 2, 0);
+    const point = new THREE.PointLight(0xffffee, 0.43, 20, 1.0);
+    point.position.copy(POINT_POS);
+    point.castShadow = false;
+    scene.add(point);
 
     // ===== グリッド用照明応答 ShaderMaterial 共有 uniform =====
     //   LineBasicMaterial は非応答のため、ambient / dir / spot 強度に合わせて暗化しない。
@@ -175,12 +167,10 @@
       uAmbient:         { value: 0 },
       uDirIntensity:    { value: 0.34 },
       uDirDir:          { value: new THREE.Vector3(1, 0, 0) },
-      uSpotPos:         { value: new THREE.Vector3().copy(SPOT_POS) },
-      uSpotTarget:      { value: new THREE.Vector3().copy(SPOT_TARGET) },
-      uSpotAngleCos:    { value: Math.cos(SPOT_ANGLE) },
-      uSpotIntensity:   { value: 0.43 },
-      uSpotRange:       { value: 20.0 },
-      uSpotColor:       { value: new THREE.Color(0xffffee) },
+      uPointPos:        { value: new THREE.Vector3().copy(POINT_POS) },
+      uPointIntensity:  { value: 0.43 },
+      uPointRange:      { value: 20.0 },
+      uPointColor:      { value: new THREE.Color(0xffffee) },
     };
     _gridLightUni.uDirDir.value.copy(dirLight.position).normalize();
     // 線の色 + 面の local normal を受け取り、照明応答 shader を返す
@@ -190,12 +180,10 @@
           uAmbient:        _gridLightUni.uAmbient,
           uDirIntensity:   _gridLightUni.uDirIntensity,
           uDirDir:         _gridLightUni.uDirDir,
-          uSpotPos:        _gridLightUni.uSpotPos,
-          uSpotTarget:     _gridLightUni.uSpotTarget,
-          uSpotAngleCos:   _gridLightUni.uSpotAngleCos,
-          uSpotIntensity:  _gridLightUni.uSpotIntensity,
-          uSpotRange:      _gridLightUni.uSpotRange,
-          uSpotColor:      _gridLightUni.uSpotColor,
+          uPointPos:       _gridLightUni.uPointPos,
+          uPointIntensity: _gridLightUni.uPointIntensity,
+          uPointRange:     _gridLightUni.uPointRange,
+          uPointColor:     _gridLightUni.uPointColor,
           uColor:          { value: new THREE.Color(colorHex) },
           uNormalLocal:    { value: new THREE.Vector3().copy(normalLocal) },
         },
@@ -215,12 +203,10 @@
           uniform float uAmbient;
           uniform float uDirIntensity;
           uniform vec3  uDirDir;
-          uniform vec3  uSpotPos;
-          uniform vec3  uSpotTarget;
-          uniform float uSpotAngleCos;
-          uniform float uSpotIntensity;
-          uniform float uSpotRange;
-          uniform vec3  uSpotColor;
+          uniform vec3  uPointPos;
+          uniform float uPointIntensity;
+          uniform float uPointRange;
+          uniform vec3  uPointColor;
           uniform vec3  uColor;
           varying vec3  vNormalWorld;
           varying vec3  vWorldPos;
@@ -228,19 +214,14 @@
             // directional
             float diffDir = max(0.0, dot(vNormalWorld, uDirDir));
             vec3 col = uColor * clamp(uAmbient + diffDir * uDirIntensity, 0.0, 2.0);
-            // spot: cone + lambert + 距離減衰
-            vec3 toFrag = vWorldPos - uSpotPos;
-            float dist = length(toFrag);
-            vec3 toFragN = toFrag / max(dist, 1e-4);
-            vec3 spotForward = normalize(uSpotTarget - uSpotPos);
-            float ang = dot(toFragN, spotForward);
-            // 案C: 中心 → 外周 の radial smoothstep (penumbra=1.0 相当)
-            float coneMask = smoothstep(uSpotAngleCos, 1.0, ang);
-            vec3 toLight = -toFragN;
-            float diffSpot = max(0.0, dot(vNormalWorld, toLight));
-            float falloff = max(0.0, 1.0 - dist / uSpotRange);
-            float spotContrib = coneMask * diffSpot * falloff * uSpotIntensity;
-            col += uSpotColor * spotContrib;
+            // point: lambert + 線形距離減衰
+            vec3 toLight = uPointPos - vWorldPos;
+            float dist = length(toLight);
+            vec3 toLightN = toLight / max(dist, 1e-4);
+            float diffPt = max(0.0, dot(vNormalWorld, toLightN));
+            float falloff = max(0.0, 1.0 - dist / uPointRange);
+            float ptContrib = diffPt * falloff * uPointIntensity;
+            col += uPointColor * ptContrib;
             gl_FragColor = vec4(col, 1.0);
           }
         `,
@@ -4761,13 +4742,13 @@
         if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
         if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
       });
-      // SpotLight (原点 直径 3m) 強度 (0-5)
-      socket.on('sceneSpot', (data) => {
+      // PointLight 強度 (0-5)
+      socket.on('scenePointLight', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(5, data.intensity));
-        if (spot) spot.intensity = v;
-        if (_gridLightUni) _gridLightUni.uSpotIntensity.value = v;
-        if (window.__syncMasterSpotSlider) window.__syncMasterSpotSlider(v);
+        if (point) point.intensity = v;
+        if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
+        if (window.__syncMasterPointSlider) window.__syncMasterPointSlider(v);
       });
 
       socket.on('leave', (u) => {
@@ -6716,36 +6697,36 @@
       if (window.__syncMasterDirSlider) window.__syncMasterDirSlider();
 
       // ==================================================
-      // SpotLight (原点 直径 3m) 強度スライダー (0-5)
+      // PointLight 強度スライダー (0-5)
       // ==================================================
-      const _spotInp = _by('m-scene-spot');
-      const _spotVal = _by('m-scene-spot-val');
-      window.__syncMasterSpotSlider = function(intensity) {
-        if (!_spotInp || !_spotVal) return;
-        if (typeof intensity !== 'number') intensity = spot ? spot.intensity : 0.43;
-        _spotInp.value = String(intensity);
-        _spotVal.textContent = intensity.toFixed(2);
+      const _ptInp = _by('m-scene-point');
+      const _ptVal = _by('m-scene-point-val');
+      window.__syncMasterPointSlider = function(intensity) {
+        if (!_ptInp || !_ptVal) return;
+        if (typeof intensity !== 'number') intensity = point ? point.intensity : 0.43;
+        _ptInp.value = String(intensity);
+        _ptVal.textContent = intensity.toFixed(2);
       };
-      let _spotThrottle = 0;
-      if (_spotInp) {
-        _spotInp.addEventListener('input', () => {
-          const v = parseFloat(_spotInp.value);
+      let _ptThrottle = 0;
+      if (_ptInp) {
+        _ptInp.addEventListener('input', () => {
+          const v = parseFloat(_ptInp.value);
           if (!isFinite(v)) return;
-          if (spot) spot.intensity = v;
-          if (_gridLightUni) _gridLightUni.uSpotIntensity.value = v;
-          if (_spotVal) _spotVal.textContent = v.toFixed(2);
+          if (point) point.intensity = v;
+          if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
+          if (_ptVal) _ptVal.textContent = v.toFixed(2);
           const now = performance.now();
-          if (now - _spotThrottle < 50) return;
-          _spotThrottle = now;
-          if (socket && socket.connected) socket.emit('sceneSpot', { intensity: v });
+          if (now - _ptThrottle < 50) return;
+          _ptThrottle = now;
+          if (socket && socket.connected) socket.emit('scenePointLight', { intensity: v });
         });
-        _spotInp.addEventListener('change', () => {
-          const v = parseFloat(_spotInp.value);
+        _ptInp.addEventListener('change', () => {
+          const v = parseFloat(_ptInp.value);
           if (!isFinite(v)) return;
-          if (socket && socket.connected) socket.emit('sceneSpot', { intensity: v });
+          if (socket && socket.connected) socket.emit('scenePointLight', { intensity: v });
         });
       }
-      if (window.__syncMasterSpotSlider) window.__syncMasterSpotSlider();
+      if (window.__syncMasterPointSlider) window.__syncMasterPointSlider();
 
       // ==================================================
       // 移動 Box 質量 (cube 選択 + 数値入力、Enter で即時適用)
