@@ -1423,8 +1423,24 @@
         return uniforms;
       }
       const fishUniforms = addFishSwimAnimation(fish);
-      // 既存 updaters が後方で初期化されるので、グローバル経由で登録 (後の updaters セットアップが拾う)
-      window.__fishSwimUpdater = () => { fishUniforms.uTime.value = performance.now() * 0.001; };
+      // ===== 周回アニメ: 半径 2m / 平均高さ 1.5m / 速度 0.5 rad/sec、進行方向を向く + 上下揺れ =====
+      //   effect4 = ON 時のみ有効、OFF で魚非表示 + 更新停止
+      const FISH_ORBIT_R      = 2.0;
+      const FISH_ORBIT_H      = 1.5;
+      const FISH_ORBIT_SPEED  = 0.5;
+      const FISH_VERT_AMP     = 0.2;
+      window.__fishMesh = fish;
+      window.__fishSwimUpdater = () => {
+        if (window.__effect && window.__effect[4] === false) return;
+        const t = performance.now() * 0.001;
+        fishUniforms.uTime.value = t;
+        const a = t * FISH_ORBIT_SPEED;
+        fish.position.x = FISH_ORBIT_R * Math.cos(a);
+        fish.position.z = FISH_ORBIT_R * Math.sin(a);
+        fish.position.y = FISH_ORBIT_H + Math.sin(a * 2) * FISH_VERT_AMP;
+        // 進行方向 = 速度ベクトル (-sin a, 0, cos a)。魚の head が +X なので rotation.y = -a - π/2
+        fish.rotation.y = -a - Math.PI / 2;
+      };
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
@@ -5090,7 +5106,7 @@
           const btn = document.getElementById('m-effect-' + n);
           if (btn) {
             btn.dataset.on = on ? '1' : '0';
-            const _lbl = (n === 3) ? '効果3 (影)' : ('効果' + n);
+            const _lbl = (n === 3) ? '効果3 (影)' : (n === 4) ? '効果4 (魚)' : ('効果' + n);
             btn.textContent = _lbl + ': ' + (on ? 'ON' : 'OFF');
             btn.style.background = on ? '#22c55e' : '#475569';
             btn.style.color = on ? '#052e16' : 'white';
@@ -5102,7 +5118,7 @@
         //        1cm×1cm グリッド背景 + スプレーボタンのみを表示。
         //        塗装状況や他オブジェクトは camera 視点から非表示。
         // 効果3: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
-        // 効果4: 空き
+        // 効果4: 魚オブジェクトの表示・周回アニメ ON/OFF
         if (n === 2) {
           // body class を切替 (CSS 側で canvas 非表示 + grid overlay 表示)
           // camera role 以外では見た目に差は出ないが、フラグは全端末で共通化しておく
@@ -5126,6 +5142,11 @@
             mats.forEach((m) => { if (m) m.needsUpdate = true; });
           });
           log('shadow ' + (on ? 'ON' : 'OFF') + ' (effect3)', 'ok');
+        }
+        if (n === 4) {
+          // 魚オブジェクトの可視トグル (更新は __fishSwimUpdater 内でフラグ参照)
+          if (window.__fishMesh) window.__fishMesh.visible = !!on;
+          log('fish ' + (on ? 'ON' : 'OFF') + ' (effect4)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
