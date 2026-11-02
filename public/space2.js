@@ -150,10 +150,8 @@
     const sceneAmbient = new THREE.AmbientLight(0xffffff, 0.85);
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
-    dirLight.position.set(10, 20, 10);
-    // シャドウは完全無効化: 別タブ操作→復帰時のシャドウマップ再生成によるちらつきを根絶。
-    //   原因: autoUpdate=false でも WebGL コンテキスト pause/resume 時にシャドウパスが
-    //         再評価されることがある (ブラウザ依存)。シャドウ機能自体を切ることで回避。
+    dirLight.position.set(10, 100, 100);
+    // シャドウ初期は無効化。master 検証タブ 効果3 のトグルで ON/OFF 切替。
     dirLight.castShadow = false;
     scene.add(dirLight);
     renderer.shadowMap.enabled = false;
@@ -166,7 +164,7 @@
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
       new THREE.MeshStandardMaterial({
-        color: 0xffffff,      // 純白
+        color: 0xf3f7fa,      // 床・天・壁 統一色
         roughness: 1.0,
         metalness: 0.0,
         side: THREE.DoubleSide,
@@ -182,10 +180,13 @@
     // ===== モノクロ格子表示 (恒常) =====
     //   タイル機能は廃止。1m グレー + 5m 濃グレー格子を常時表示する。
     //   AR passthrough 中は従来通り非表示に。
-    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x374151, 0x6b7280);
+    // 床グリッド: 色 = 白、幅 1px (THREE.LineBasicMaterial.linewidth はブラウザ依存で 1px 以外描画不可)
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0xffffff, 0xffffff);
+    if (grid.material) { grid.material.linewidth = 1; }
     grid.position.set(0, 0.015, 0);
     scene.add(grid);
-    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x1f2937, 0x1f2937);
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xffffff, 0xffffff);
+    if (majorGrid.material) { majorGrid.material.linewidth = 1; }
     majorGrid.position.set(0, 0.018, 0);
     scene.add(majorGrid);
     const monoGrid = grid;             // 参照互換 (dummy)
@@ -1029,7 +1030,7 @@
       const wall = new THREE.Mesh(
         new THREE.PlaneGeometry(WALL_SIDE, WALL_H_M),
         new THREE.MeshStandardMaterial({
-          color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+          color: 0xf3f7fa, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
         })
       );
       wall.position.copy(position);
@@ -1055,7 +1056,7 @@
       }
       const gridGeom = new THREE.BufferGeometry();
       gridGeom.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
-      const gridLines = new THREE.LineSegments(gridGeom, new THREE.LineBasicMaterial({ color: 0x9ca3af }));
+      const gridLines = new THREE.LineSegments(gridGeom, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 1 }));
       gridLines.position.copy(position);
       gridLines.rotation.copy(wall.rotation);
       scene.add(gridLines);
@@ -1080,7 +1081,7 @@
       const ceiling = new THREE.Mesh(
         new THREE.PlaneGeometry(2 * WALL_HALF, 2 * WALL_HALF),
         new THREE.MeshStandardMaterial({
-          color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+          color: 0xf3f7fa, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
         })
       );
       ceiling.rotation.x = Math.PI / 2;   // 床と逆の向き (法線 -Y = 下向きに内側)
@@ -1102,7 +1103,7 @@
       }
       const _cGeom = new THREE.BufferGeometry();
       _cGeom.setAttribute('position', new THREE.Float32BufferAttribute(_cLines, 3));
-      const _cGrid = new THREE.LineSegments(_cGeom, new THREE.LineBasicMaterial({ color: 0x9ca3af }));
+      const _cGrid = new THREE.LineSegments(_cGeom, new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 1 }));
       _cGrid.rotation.x = Math.PI / 2;
       _cGrid.position.set(0, WALL_H_M - 0.02, 0);   // 天面の少し下 (内側)
       scene.add(_cGrid);
@@ -4776,7 +4777,8 @@
           const btn = document.getElementById('m-effect-' + n);
           if (btn) {
             btn.dataset.on = on ? '1' : '0';
-            btn.textContent = '効果' + n + ': ' + (on ? 'ON' : 'OFF');
+            const _lbl = (n === 3) ? '効果3 (影)' : ('効果' + n);
+            btn.textContent = _lbl + ': ' + (on ? 'ON' : 'OFF');
             btn.style.background = on ? '#22c55e' : '#475569';
             btn.style.color = on ? '#052e16' : 'white';
           }
@@ -4786,8 +4788,8 @@
         // 効果2: スマホ UI モード (camera role のみ)。ON の間 3D シーン描画をスキップし、
         //        1cm×1cm グリッド背景 + スプレーボタンのみを表示。
         //        塗装状況や他オブジェクトは camera 視点から非表示。
-        // 効果3: 廃止 (旧 Fog 原点固定)
-        // 効果4: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
+        // 効果3: シャドウ ON/OFF — renderer.shadowMap + dirLight.castShadow + 全マテリアル再コンパイル
+        // 効果4: 空き
         if (n === 2) {
           // body class を切替 (CSS 側で canvas 非表示 + grid overlay 表示)
           // camera role 以外では見た目に差は出ないが、フラグは全端末で共通化しておく
@@ -4800,7 +4802,7 @@
           }
           log('スマホ UI モード (効果2) ' + (on ? 'ON' : 'OFF') + ' (role=' + ROLE + ')', 'ok');
         }
-        if (n === 4) {
+        if (n === 3) {
           renderer.shadowMap.enabled = on;
           renderer.shadowMap.type = THREE.PCFSoftShadowMap;
           dirLight.castShadow = on;
@@ -4810,7 +4812,7 @@
             const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
             mats.forEach((m) => { if (m) m.needsUpdate = true; });
           });
-          log('shadow ' + (on ? 'ON' : 'OFF') + ' (effect4)', 'ok');
+          log('shadow ' + (on ? 'ON' : 'OFF') + ' (effect3)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
