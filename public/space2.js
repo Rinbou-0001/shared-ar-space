@@ -150,7 +150,7 @@
     const sceneAmbient = new THREE.AmbientLight(0xffffff, 0.85);
     scene.add(sceneAmbient);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
-    dirLight.position.set(10, 100, 100);
+    dirLight.position.set(100, 20, 0);
     // シャドウ初期は無効化。master 検証タブ 効果3 のトグルで ON/OFF 切替。
     dirLight.castShadow = false;
     scene.add(dirLight);
@@ -4576,6 +4576,13 @@
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
       });
+      // 平行光源 (DirectionalLight) 強度 (0-3): master スライダー変更 → 全クライアント配信
+      socket.on('sceneDirLight', (data) => {
+        if (!data || typeof data.intensity !== 'number') return;
+        const v = Math.max(0, Math.min(3, data.intensity));
+        if (dirLight) dirLight.intensity = v;
+        if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
+      });
 
       socket.on('leave', (u) => {
         const a = avatars.get(u.id);
@@ -6476,6 +6483,37 @@
         });
       }
       if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider();
+
+      // ==================================================
+      // 平行光源 (DirectionalLight) 強度スライダー (0-3)
+      // ==================================================
+      const _dirInp = _by('m-scene-dir');
+      const _dirVal = _by('m-scene-dir-val');
+      window.__syncMasterDirSlider = function(intensity) {
+        if (!_dirInp || !_dirVal) return;
+        if (typeof intensity !== 'number') intensity = dirLight ? dirLight.intensity : 0.35;
+        _dirInp.value = String(intensity);
+        _dirVal.textContent = intensity.toFixed(2);
+      };
+      let _dirThrottle = 0;
+      if (_dirInp) {
+        _dirInp.addEventListener('input', () => {
+          const v = parseFloat(_dirInp.value);
+          if (!isFinite(v)) return;
+          if (dirLight) dirLight.intensity = v;
+          if (_dirVal) _dirVal.textContent = v.toFixed(2);
+          const now = performance.now();
+          if (now - _dirThrottle < 50) return;
+          _dirThrottle = now;
+          if (socket && socket.connected) socket.emit('sceneDirLight', { intensity: v });
+        });
+        _dirInp.addEventListener('change', () => {
+          const v = parseFloat(_dirInp.value);
+          if (!isFinite(v)) return;
+          if (socket && socket.connected) socket.emit('sceneDirLight', { intensity: v });
+        });
+      }
+      if (window.__syncMasterDirSlider) window.__syncMasterDirSlider();
 
       // ==================================================
       // 移動 Box 質量 (cube 選択 + 数値入力、Enter で即時適用)
