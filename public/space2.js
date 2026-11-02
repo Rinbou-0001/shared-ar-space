@@ -1084,7 +1084,9 @@
             'void main() {',
             'void main() {\n  vPaintUv = uv;'
           );
-          // fragment: 最終合成 (output_fragment / opaque_fragment の直後に OVER 合成)
+          // 案A (試験): paint を diffuseColor (albedo) に置換 → 標準ライトパイプラインで
+          //   paint が ambient / dir / point の寄与を自然に受ける。
+          //   光の反射色はスプレー色 (= paint.rgb) を参照する形になる。
           if (shader.fragmentShader.indexOf('#include <common>') !== -1) {
             shader.fragmentShader = shader.fragmentShader.replace(
               '#include <common>',
@@ -1093,20 +1095,33 @@
           } else {
             shader.fragmentShader = 'varying vec2 vPaintUv;\nuniform sampler2D u_paint;\n' + shader.fragmentShader;
           }
-          const paintCompose = `
-          vec4 _paint = texture2D(u_paint, vPaintUv);
-          gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
+          // diffuseColor に対して OVER 合成 (ライト計算前に差し替え)
+          const paintAlbedo = `
+          {
+            vec4 _paint = texture2D(u_paint, vPaintUv);
+            diffuseColor.rgb = diffuseColor.rgb * (1.0 - _paint.a) + _paint.rgb;
+          }`;
           let fs = shader.fragmentShader;
-          const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
-          let injected = false;
-          for (const m of markers) {
-            if (fs.indexOf(m) !== -1) {
-              fs = fs.replace(m, m + '\n' + paintCompose);
-              injected = true;
-              break;
+          // MeshStandardMaterial / MeshLambertMaterial / MeshBasicMaterial すべてに <color_fragment> 存在
+          const colorMarker = '#include <color_fragment>';
+          if (fs.indexOf(colorMarker) !== -1) {
+            fs = fs.replace(colorMarker, colorMarker + '\n' + paintAlbedo);
+          } else {
+            // fallback: 旧挙動 (output 合成) — color_fragment が見つからない shader 用
+            const legacy = `
+            vec4 _paint = texture2D(u_paint, vPaintUv);
+            gl_FragColor.rgb = gl_FragColor.rgb * (1.0 - _paint.a) + _paint.rgb;`;
+            const markers = ['#include <output_fragment>', '#include <opaque_fragment>'];
+            let injected = false;
+            for (const m of markers) {
+              if (fs.indexOf(m) !== -1) {
+                fs = fs.replace(m, m + '\n' + legacy);
+                injected = true;
+                break;
+              }
             }
+            if (!injected) fs = fs.replace(/\}\s*$/, legacy + '\n}');
           }
-          if (!injected) fs = fs.replace(/\}\s*$/, paintCompose + '\n}');
           shader.fragmentShader = fs;
         };
         const _key = 'paintable_' + mat.uuid;
