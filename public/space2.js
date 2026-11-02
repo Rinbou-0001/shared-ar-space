@@ -1288,6 +1288,51 @@
       });
     })();
 
+    // ===== Low-poly fish =====
+    //   位置 (1, 1.5, 0) に配置
+    (function _spawnLowPolyFish() {
+      function createLowPolyFish() {
+        const fish = new THREE.Group();
+        const bodyMaterial = new THREE.MeshStandardMaterial({
+          color: 0x287fba, flatShading: true, roughness: 0.9,
+        });
+        const tailMaterial = new THREE.MeshStandardMaterial({
+          color: 0x55b5df, flatShading: true, side: THREE.DoubleSide,
+        });
+        // 1. 楕円形の胴体
+        const bodyGeometry = new THREE.SphereGeometry(1, 10, 6);
+        bodyGeometry.scale(1.0, 0.42, 0.28);
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        fish.add(body);
+        // 2. 多角形の尾びれを生成
+        function createTailLobe(points) {
+          const shape = new THREE.Shape();
+          shape.moveTo(points[0][0], points[0][1]);
+          for (let i = 1; i < points.length; i++) shape.lineTo(points[i][0], points[i][1]);
+          shape.closePath();
+          const geometry = new THREE.ShapeGeometry(shape);
+          const mesh = new THREE.Mesh(geometry, tailMaterial);
+          mesh.position.z = 0;
+          return mesh;
+        }
+        // 3. 上側の尾びれ
+        const upperTail = createTailLobe([
+          [-0.82,  0.00], [-1.25,  0.28], [-1.70,  0.48], [-1.43,  0.12], [-1.18,  0.00],
+        ]);
+        // 4. 下側の尾びれ
+        const lowerTail = createTailLobe([
+          [-0.82,  0.00], [-1.18,  0.00], [-1.43, -0.12], [-1.70, -0.48], [-1.25, -0.28],
+        ]);
+        fish.add(upperTail);
+        fish.add(lowerTail);
+        return fish;
+      }
+      const fish = createLowPolyFish();
+      fish.position.set(1, 1.5, 0);
+      fish.name = 'low-poly-fish';
+      scene.add(fish);
+    })();
+
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
     //   位置 (0.5, 1, 0) を L の内角 (= 共有縦辺) として、plate1 が +X 方向、plate2 が +Z 方向に伸びる
     //   それぞれ縦長 (W=0.179 × H=0.286)、長辺 (0.286m) は Y 軸に沿った共有縦線で接する
