@@ -1020,9 +1020,9 @@
     }
 
     // ===== 外壁: 40m × 40m エリアを囲む高さ 20m の 4 面 =====
-    // 一時的に 200m × 200m 化: 壁面辺長 200m / 位置 ±100m (床と合わせる、高さは据え置き)
+    // 一時的に 200m × 200m 化: 壁面辺長 200m / 位置 ±100m / 高さ 100m (= 元の5倍)
     const WALL_HALF = 100;
-    const WALL_H_M  = 20;
+    const WALL_H_M  = 100;
     const WALL_SIDE = 200;
     function _makeWall(id, position, rotYDeg) {
       // 壁 = 標準の MeshStandardMaterial (白、照明/フォグ反応) + onBeforeCompile で paint 合成
