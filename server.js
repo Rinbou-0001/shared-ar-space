@@ -202,7 +202,7 @@ io.on('connection', (socket) => {
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
   // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
-  for (const n of [1, 2, 3, 4]) {
+  for (const n of [1, 2, 3, 4, 5]) {
     socket.emit('effectState', { effect: n, on: !!effectState[n] });
   }
   // 接続直後に space3 スプレー履歴をまとめて配信 (チャンク化して送信、新規接続者に塗りを同期)

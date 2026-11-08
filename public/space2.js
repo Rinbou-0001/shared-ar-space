@@ -293,7 +293,7 @@
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(FIELD_SIZE, FIELD_SIZE),
       new THREE.MeshStandardMaterial({
-        color: 0xf3f7fa,      // 床・天・壁 統一色
+        color: 0xffffff,      // 床: white
         roughness: 1.0,
         metalness: 0.0,
         side: THREE.DoubleSide,
@@ -309,16 +309,16 @@
     // ===== モノクロ格子表示 (恒常) =====
     //   タイル機能は廃止。1m グレー + 5m 濃グレー格子を常時表示する。
     //   AR passthrough 中は従来通り非表示に。
-    // 床グリッド: 色 = 白、1px、照明応答 ShaderMaterial (local normal +Y)
+    // 床グリッド: 色 = 黒、1px、照明応答 ShaderMaterial (local normal +Y)
     //   floorPaintMask ON → 塗装された世界座標でグリッドの alpha を 0 にして塗りを上に見せる
-    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0xffffff, 0xffffff);
+    const grid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE, 0x000000, 0x000000);
     if (grid.material) { try { grid.material.dispose(); } catch (_) {} }
-    grid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0), true);
+    grid.material = _makeGridLightMaterial(0x000000, new THREE.Vector3(0, 1, 0), true);
     grid.position.set(0, 0.015, 0);
     scene.add(grid);
-    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0xffffff, 0xffffff);
+    const majorGrid = new THREE.GridHelper(FIELD_SIZE, FIELD_SIZE / 5, 0x000000, 0x000000);
     if (majorGrid.material) { try { majorGrid.material.dispose(); } catch (_) {} }
-    majorGrid.material = _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 1, 0), true);
+    majorGrid.material = _makeGridLightMaterial(0x000000, new THREE.Vector3(0, 1, 0), true);
     majorGrid.position.set(0, 0.018, 0);
     scene.add(majorGrid);
     const monoGrid = grid;             // 参照互換 (dummy)
