@@ -1536,18 +1536,22 @@
     window.__getCurrentTheme = () => _currentTheme;
     window.__themeGoogleGroup = _themeGoogleGroup;
 
-    // ===== Google テーマ内容: 空 (スカイドーム + 3 色グラデ) =====
+    // ===== Google テーマ内容: 空 (スカイドーム + 仰角ベース 3 色グラデ) =====
     (function _buildGoogleTheme() {
       // MeshBasicMaterial + onBeforeCompile で gradient 注入
-      //   3 色グラデ: 天頂 #87ceeb → 中空 #d9effb → 地平線 #edf7fc
+      //   変数名入替 (修正B):
+      //     uTopColor    = #edf7fc (= 地平線色、t=0 側)
+      //     uMidColor    = #d9effb
+      //     uBottomColor = #87ceeb (= 天頂色、t=1 側)
+      //   t = elevation / (π/2)、t=0 が地平線、t=1 が天頂
+      //   最終表示: 天頂=青 (uBottomColor) / 地平線=白 (uTopColor) ← ご指示通り
       //   toneMapped=false でスカイドームは tone mapping の対象外
       const skyGeom = new THREE.SphereGeometry(500, 32, 16);
       const skyUniforms = {
-        uTopColor:    { value: new THREE.Color(0x87ceeb) },
-        uMidColor:    { value: new THREE.Color(0xd9effb) },
-        uBottomColor: { value: new THREE.Color(0xedf7fc) },
-        uHeightLow:   { value: -50.0 },
-        uHeightHigh:  { value: 300.0 },
+        uTopColor:               { value: new THREE.Color(0xedf7fc) },   // 地平線色 (t=0)
+        uMidColor:               { value: new THREE.Color(0xd9effb) },
+        uBottomColor:            { value: new THREE.Color(0x87ceeb) },   // 天頂色 (t=1)
+        uCameraWorldPosition:    { value: new THREE.Vector3(0, 0, 0) },
       };
       const skyMat = new THREE.MeshBasicMaterial({
         side: THREE.BackSide,
@@ -1556,44 +1560,52 @@
         toneMapped: false,
       });
       skyMat.onBeforeCompile = (shader) => {
-        shader.uniforms.uTopColor    = skyUniforms.uTopColor;
-        shader.uniforms.uMidColor    = skyUniforms.uMidColor;
-        shader.uniforms.uBottomColor = skyUniforms.uBottomColor;
-        shader.uniforms.uHeightLow   = skyUniforms.uHeightLow;
-        shader.uniforms.uHeightHigh  = skyUniforms.uHeightHigh;
+        shader.uniforms.uTopColor            = skyUniforms.uTopColor;
+        shader.uniforms.uMidColor            = skyUniforms.uMidColor;
+        shader.uniforms.uBottomColor         = skyUniforms.uBottomColor;
+        shader.uniforms.uCameraWorldPosition = skyUniforms.uCameraWorldPosition;
         // vertex: world pos を varying 出力
         shader.vertexShader = shader.vertexShader
           .replace('#include <common>',
             '#include <common>\nvarying vec3 vSkyWorldPos;')
           .replace('#include <begin_vertex>',
             '#include <begin_vertex>\nvSkyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
-        // fragment: 標準 diffuseColor を 2 段 smoothstep の 3 色グラデで置換
-        //   _tLin = 0 at 天頂 (worldY 最大) / 1 at 地平線 (worldY 最小)
-        //   g1: 0.0 → 0.65 で uTopColor (#87ceeb) → uMidColor (#d9effb) (緩やか)
-        //   g2: 0.65 → 0.85 で uMidColor → uBottomColor (#edf7fc) (比較的早い)
-        //   _tLin ≥ 0.85 で uBottomColor 一色 (地平線側 15% がベタ)
+        // fragment: 仰角ベースで 2 段 smoothstep → diffuseColor 置換
+        //   skyDir = カメラから sphere 上の点への方向 (正規化)
+        //   elevation = asin(skyDir.y) → [-π/2, π/2]
+        //   t = clamp(elevation / (π/2), 0, 1) → 0 at 地平線, 1 at 天頂
+        //   g1: 0.0 → 0.65 で bottomColor (白) → mid (緩やか)
+        //   g2: 0.65 → 0.85 で mid → topColor (青) (比較的早い)
+        //   ※ ご提示コード準拠で、uTopColor/uBottomColor の意味を入れ替えた (修正B)
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>',
             '#include <common>\n' +
             'uniform vec3 uTopColor;\nuniform vec3 uMidColor;\nuniform vec3 uBottomColor;\n' +
-            'uniform float uHeightLow;\nuniform float uHeightHigh;\nvarying vec3 vSkyWorldPos;')
+            'uniform vec3 uCameraWorldPosition;\nvarying vec3 vSkyWorldPos;')
           .replace('#include <color_fragment>',
             '#include <color_fragment>\n' +
             '{\n' +
-            '  float _tLin = clamp((uHeightHigh - vSkyWorldPos.y) / (uHeightHigh - uHeightLow), 0.0, 1.0);\n' +
-            '  float _g1 = smoothstep(0.0,  0.65, _tLin);\n' +
-            '  float _g2 = smoothstep(0.65, 0.85, _tLin);\n' +
+            '  vec3 _skyDir = normalize(vSkyWorldPos - uCameraWorldPosition);\n' +
+            '  float _elev = asin(clamp(_skyDir.y, -1.0, 1.0));\n' +
+            '  float _t = clamp(_elev / 1.5707963, 0.0, 1.0);\n' +
+            '  float _g1 = smoothstep(0.0,  0.65, _t);\n' +
+            '  float _g2 = smoothstep(0.65, 0.85, _t);\n' +
             '  vec3 _lower = mix(uTopColor, uMidColor, _g1);\n' +
             '  diffuseColor.rgb = mix(_lower, uBottomColor, _g2);\n' +
             '}');
       };
-      skyMat.customProgramCacheKey = () => 'google-skydome-grad';
+      skyMat.customProgramCacheKey = () => 'google-skydome-elev';
       const skyDome = new THREE.Mesh(skyGeom, skyMat);
       skyDome.name = 'google-skydome';
       skyDome.userData.themeRestrict = 'google';
       skyDome.renderOrder = -1000;
       skyDome.frustumCulled = false;
       _themeGoogleGroup.add(skyDome);
+      // 毎フレーム カメラの world 座標を uniform に同期
+      const _skyCamPos = skyUniforms.uCameraWorldPosition.value;
+      window.__skySyncUpdater = () => {
+        camera.getWorldPosition(_skyCamPos);
+      };
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
@@ -5417,6 +5429,7 @@
     // ミニキューブ更新 tick (前方で保留した関数を push)
     if (typeof window.__miniCubeUpdater === 'function') updaters.push(window.__miniCubeUpdater);
     if (typeof window.__fishSwimUpdater === 'function') updaters.push(window.__fishSwimUpdater);
+    if (typeof window.__skySyncUpdater === 'function') updaters.push(window.__skySyncUpdater);
 
     // ========== 効果2: スマホ リモコン型ポインター + スプレーボタン ==========
     //   ・effect2 ON + ROLE=camera の時のみ有効化
