@@ -5159,7 +5159,7 @@
         const n = data.effect;
         if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -7095,8 +7095,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false };
-      [1, 2, 3, 4].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false };
+      [1, 2, 3, 4, 5].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
