@@ -1207,6 +1207,7 @@
       wall.rotation.y = rotYDeg * Math.PI / 180;
       wall.name = id;
       wall.receiveShadow = true;
+      wall.userData.themeRestrict = 'default';   // Google テーマ時は非表示
       scene.add(wall);
       // worldSpanM: 幅 40m を基準 (brush uvR = worldR/40)
       _makePaintable(wall, WALL_SIDE, 512);
@@ -1230,6 +1231,7 @@
       const gridLines = new THREE.LineSegments(gridGeom, _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 0, 1)));
       gridLines.position.copy(position);
       gridLines.rotation.copy(wall.rotation);
+      gridLines.userData.themeRestrict = 'default';   // 壁と一緒に非表示
       scene.add(gridLines);
 
       return wall;
@@ -1264,6 +1266,7 @@
       ceiling.position.set(0, WALL_H_M, 0);
       ceiling.name = 'ceiling';
       ceiling.receiveShadow = true;
+      ceiling.userData.themeRestrict = 'default';   // Google テーマ時は非表示
       scene.add(ceiling);
       _makePaintable(ceiling, 2 * WALL_HALF, 512);
 
@@ -1283,6 +1286,7 @@
       const _cGrid = new THREE.LineSegments(_cGeom, _makeGridLightMaterial(0xffffff, new THREE.Vector3(0, 0, 1)));
       _cGrid.rotation.x = Math.PI / 2;
       _cGrid.position.set(0, WALL_H_M - 0.02, 0);   // 天面の少し下 (内側)
+      _cGrid.userData.themeRestrict = 'default';   // 天面と一緒に非表示
       scene.add(_cGrid);
     }
 
