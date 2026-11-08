@@ -1548,9 +1548,9 @@
       //   toneMapped=false でスカイドームは tone mapping の対象外
       const skyGeom = new THREE.SphereGeometry(500, 32, 16);
       const skyUniforms = {
-        uTopColor:               { value: new THREE.Color(0xedf7fc) },   // 地平線色 (t=0)
+        uTopColor:               { value: new THREE.Color(0x87ceeb) },   // 天頂色 (t=0、名前と意味が一致)
         uMidColor:               { value: new THREE.Color(0xd9effb) },
-        uBottomColor:            { value: new THREE.Color(0x87ceeb) },   // 天頂色 (t=1)
+        uBottomColor:            { value: new THREE.Color(0xedf7fc) },   // 地平線色 (t=1、名前と意味が一致)
         uCameraWorldPosition:    { value: new THREE.Vector3(0, 0, 0) },
       };
       const skyMat = new THREE.MeshBasicMaterial({
@@ -1573,10 +1573,10 @@
         // fragment: 仰角ベースで 2 段 smoothstep → diffuseColor 置換
         //   skyDir = カメラから sphere 上の点への方向 (正規化)
         //   elevation = asin(skyDir.y) → [-π/2, π/2]
-        //   t = clamp(elevation / (π/2), 0, 1) → 0 at 地平線, 1 at 天頂
-        //   g1: 0.0 → 0.65 で bottomColor (白) → mid (緩やか)
-        //   g2: 0.65 → 0.85 で mid → topColor (青) (比較的早い)
-        //   ※ ご提示コード準拠で、uTopColor/uBottomColor の意味を入れ替えた (修正B)
+        //   t = clamp(1 - elevation / (π/2), 0, 1) → 0 at 天頂, 1 at 地平線
+        //   g1: 0.0 → 0.65 で uTopColor (青、天頂) → uMidColor (緩やか、天頂側 65%)
+        //   g2: 0.65 → 0.85 で uMidColor → uBottomColor (白、地平線) (急な遷移、20%)
+        //   t ≥ 0.85 で uBottomColor 一色 (地平線側 15%)
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>',
             '#include <common>\n' +
@@ -1587,7 +1587,7 @@
             '{\n' +
             '  vec3 _skyDir = normalize(vSkyWorldPos - uCameraWorldPosition);\n' +
             '  float _elev = asin(clamp(_skyDir.y, -1.0, 1.0));\n' +
-            '  float _t = clamp(_elev / 1.5707963, 0.0, 1.0);\n' +
+            '  float _t = clamp(1.0 - _elev / 1.5707963, 0.0, 1.0);\n' +
             '  float _g1 = smoothstep(0.0,  0.65, _t);\n' +
             '  float _g2 = smoothstep(0.65, 0.85, _t);\n' +
             '  vec3 _lower = mix(uTopColor, uMidColor, _g1);\n' +
