@@ -1319,6 +1319,10 @@
           fbx.position.add(new THREE.Vector3(10, -1, -10));
           fbx.name = 'ancientTree';
           fbx.userData.themeRestrict = 'default';   // Google テーマ時は非表示
+          // 非同期ロード完了時点で既に Google テーマなら即座に隠す (再適用不要)
+          if (typeof window.__getCurrentTheme === 'function') {
+            fbx.visible = (window.__getCurrentTheme() === 'default');
+          }
           scene.add(fbx);
           // 4. 全 sub-mesh をモノクロマテリアルに差し替え + paintable 化
           let paintableN = 0;
@@ -1491,7 +1495,9 @@
     // 日中プリセット: Google テーマ有効時に適用する光源強度
     const _googleLightPreset = { ambient: 0.4, dir: 0.5, point: 0.0 };
     // default テーマの光源値を退避 (Google ON 前の値、OFF で復元)
+    //   sceneAmbient/Dir/Point broadcast 受信時もこのキャッシュを更新する
     const _defaultLightCache = { ambient: null, dir: null, point: null };
+    window.__defaultLightCache = _defaultLightCache;
     window.__applyTheme = function(name) {
       if (name !== 'default' && name !== 'google') return;
       const prev = _currentTheme;
@@ -5013,28 +5019,41 @@
         //   lit area (ambient+dirLight=1.35) も shadow area (ambient=1.0) も 1.0 に clamp され
         //   影が完全に消える。0.75 で止めることで常に dirLight 分の輝度差を確保 → 影が残る。
         //   背景/フォグ色はスライダー値 v をそのまま使うので「背景も最大白」の挙動は維持。
-        if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
+        // default テーマの cache を常に更新 (google → default 復元時に使う)
+        if (window.__defaultLightCache) window.__defaultLightCache.ambient = v;
+        // 現在のテーマが default の場合のみ実際のライトに反映 (google 中は上書きしない)
+        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
+        if (_isDefaultTheme) {
+          if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
+          if (_gridLightUni) _gridLightUni.uAmbient.value = v;
+        }
+        // 背景・フォグは テーマ非依存で常に更新
         if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
-        // グリッド shader 共有 uniform (ambient 強度) を同期
-        if (_gridLightUni) _gridLightUni.uAmbient.value = v;
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
       });
       // 平行光源 (DirectionalLight) 強度 (0-3): master スライダー変更 → 全クライアント配信
       socket.on('sceneDirLight', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(3, data.intensity));
-        if (dirLight) dirLight.intensity = v;
-        // グリッド shader 共有 uniform (dir 強度) を同期
-        if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
+        if (window.__defaultLightCache) window.__defaultLightCache.dir = v;
+        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
+        if (_isDefaultTheme) {
+          if (dirLight) dirLight.intensity = v;
+          if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
+        }
         if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
       });
       // PointLight 強度 (0-5)
       socket.on('scenePointLight', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(5, data.intensity));
-        if (point) point.intensity = v;
-        if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
+        if (window.__defaultLightCache) window.__defaultLightCache.point = v;
+        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
+        if (_isDefaultTheme) {
+          if (point) point.intensity = v;
+          if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
+        }
         if (window.__syncMasterPointSlider) window.__syncMasterPointSlider(v);
       });
 
