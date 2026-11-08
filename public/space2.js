@@ -1314,6 +1314,7 @@
           // 3. 目標位置へ (Y=-1 で base を 1m 沈める)
           fbx.position.add(new THREE.Vector3(10, -1, -10));
           fbx.name = 'ancientTree';
+          fbx.userData.themeRestrict = 'default';   // Google テーマ時は非表示
           scene.add(fbx);
           // 4. 全 sub-mesh をモノクロマテリアルに差し替え + paintable 化
           let paintableN = 0;
@@ -1422,6 +1423,7 @@
       fish.rotation.y = -Math.PI / 2;        // yaw -90°
       fish.position.set(1, 1.5, 0);
       fish.name = 'low-poly-fish';
+      fish.userData.themeRestrict = 'default';   // Google テーマ時は非表示
       scene.add(fish);
 
       // ===== 泳ぎアニメ: 頂点変形で尾を左右に揺らす =====
@@ -1470,6 +1472,35 @@
         // 進行方向 = 速度ベクトル (-sin a, 0, cos a)。魚の head が +X なので rotation.y = -a - π/2
         fish.rotation.y = -a - Math.PI / 2;
       };
+    })();
+
+    // ===== 案D テーマシステム: default / google を切替 =====
+    //   同一 scene に両テーマのオブジェクトを配置し、visible フラグで切替える。
+    //   使い方: オブジェクトに userData.themeRestrict = 'default' or 'google' を付与するだけで、
+    //           __applyTheme 呼び出し時に自動で切替わる (scene 階層のどこに置かれていても OK)。
+    //   両テーマ共通 → tag を付けない (常時可視)。
+    const _themeGoogleGroup = new THREE.Group();
+    _themeGoogleGroup.name = 'theme-google-root';
+    _themeGoogleGroup.userData.themeRestrict = 'google';
+    scene.add(_themeGoogleGroup);
+    let _currentTheme = 'default';
+    window.__applyTheme = function(name) {
+      if (name !== 'default' && name !== 'google') return;
+      _currentTheme = name;
+      scene.traverse((obj) => {
+        if (obj.userData && obj.userData.themeRestrict) {
+          obj.visible = (obj.userData.themeRestrict === name);
+        }
+      });
+    };
+    window.__getCurrentTheme = () => _currentTheme;
+    window.__themeGoogleGroup = _themeGoogleGroup;
+
+    // ===== Google テーマ内容 (プレースホルダ、初期は空) =====
+    //   追加はここ以外でも可: `obj.userData.themeRestrict = 'google'; _themeGoogleGroup.add(obj)` で済む
+    (function _buildGoogleTheme() {
+      // TODO: Google テーマ固有のオブジェクトをここに追加する
+      // 例: const m = new THREE.Mesh(...); _themeGoogleGroup.add(m);
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
@@ -5126,7 +5157,7 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5) return;
         const on = !!data.on;
         window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false };
         window.__effect[n] = on;
@@ -5135,7 +5166,7 @@
           const btn = document.getElementById('m-effect-' + n);
           if (btn) {
             btn.dataset.on = on ? '1' : '0';
-            const _lbl = (n === 3) ? '効果3 (影)' : (n === 4) ? '効果4 (魚)' : ('効果' + n);
+            const _lbl = (n === 3) ? '効果3 (影)' : (n === 4) ? '効果4 (魚)' : (n === 5) ? '効果5 (Google テーマ)' : ('効果' + n);
             btn.textContent = _lbl + ': ' + (on ? 'ON' : 'OFF');
             btn.style.background = on ? '#22c55e' : '#475569';
             btn.style.color = on ? '#052e16' : 'white';
@@ -5176,6 +5207,13 @@
           // 魚オブジェクトの可視トグル (更新は __fishSwimUpdater 内でフラグ参照)
           if (window.__fishMesh) window.__fishMesh.visible = !!on;
           log('fish ' + (on ? 'ON' : 'OFF') + ' (effect4)', 'ok');
+        }
+        if (n === 5) {
+          // 効果5: 案D テーマ切替 (ON = Google テーマ、OFF = 標準テーマ)
+          if (typeof window.__applyTheme === 'function') {
+            window.__applyTheme(on ? 'google' : 'default');
+          }
+          log('theme → ' + (on ? 'Google' : 'default') + ' (effect5)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });

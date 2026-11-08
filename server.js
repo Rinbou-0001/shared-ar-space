@@ -110,7 +110,7 @@ let moveConfig = { sensitivity: 10 };
 //   effect4: cube しなりモード — false=直結ばね, true=2段ばね+向き追従 (遠心力感)
 //   新規接続時にも initEffects で現在値を送る
 // 効果2 (camera のスプレー缶 UI モード) はデフォルト ON 恒常化
-let effectState = { 1: true, 2: true, 3: false, 4: true };
+let effectState = { 1: true, 2: true, 3: false, 4: true, 5: false };
 
 // space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。
 //   各要素: { u, v, c (hex 6文字) } — 1 件 ~24 bytes
@@ -670,7 +670,7 @@ io.on('connection', (socket) => {
     if (!sender || sender.role !== 'master') return;
     if (!data || typeof data !== 'object') return;
     const n = data.effect;
-    if (n !== 1 && n !== 2 && n !== 3 && n !== 4) return;
+    if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5) return;
     effectState[n] = !!data.on;
     io.emit('effectState', { effect: n, on: effectState[n] });
   });
