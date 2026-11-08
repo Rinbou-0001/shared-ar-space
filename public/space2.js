@@ -1552,7 +1552,14 @@
         uMidColor:               { value: new THREE.Color(0xd9effb) },
         uBottomColor:            { value: new THREE.Color(0xedf7fc) },   // 地平線色 (t=1、名前と意味が一致)
         uCameraWorldPosition:    { value: new THREE.Vector3(0, 0, 0) },
+        // 遷移閾値 (master パネル UI から直接操作、ローカル専用)
+        uG1Start:                { value: 0.65 },
+        uG1End:                  { value: 0.85 },
+        uG2Start:                { value: 0.85 },
+        uG2End:                  { value: 1.00 },
       };
+      // 診断用: マスターパネル UI からアクセスできるようグローバル公開
+      window.__skyUniforms = skyUniforms;
       const skyMat = new THREE.MeshBasicMaterial({
         side: THREE.BackSide,
         depthWrite: false,
@@ -1564,31 +1571,30 @@
         shader.uniforms.uMidColor            = skyUniforms.uMidColor;
         shader.uniforms.uBottomColor         = skyUniforms.uBottomColor;
         shader.uniforms.uCameraWorldPosition = skyUniforms.uCameraWorldPosition;
-        // vertex: world pos を varying 出力
+        shader.uniforms.uG1Start             = skyUniforms.uG1Start;
+        shader.uniforms.uG1End               = skyUniforms.uG1End;
+        shader.uniforms.uG2Start             = skyUniforms.uG2Start;
+        shader.uniforms.uG2End               = skyUniforms.uG2End;
         shader.vertexShader = shader.vertexShader
           .replace('#include <common>',
             '#include <common>\nvarying vec3 vSkyWorldPos;')
           .replace('#include <begin_vertex>',
             '#include <begin_vertex>\nvSkyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
-        // fragment: 仰角ベースで 2 段 smoothstep → diffuseColor 置換
-        //   t = clamp(1 - elevation / (π/2), 0, 1) → 0 at 天頂, 1 at 地平線
-        //   0 ≤ t < 0.65  → uTopColor 一色 (青、天頂側 65% ベタ)
-        //   0.65 ≤ t < 0.85 → uTopColor → uMidColor 遷移 (青→mid)
-        //   0.85 ≤ t < 1.00 → uMidColor → uBottomColor 遷移 (mid→白)
-        //   t = 1.00 → uBottomColor (白、地平線)
+        // 閾値を uniform 化: マスター UI から動的に変更可能
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>',
             '#include <common>\n' +
             'uniform vec3 uTopColor;\nuniform vec3 uMidColor;\nuniform vec3 uBottomColor;\n' +
-            'uniform vec3 uCameraWorldPosition;\nvarying vec3 vSkyWorldPos;')
+            'uniform vec3 uCameraWorldPosition;\nuniform float uG1Start;\nuniform float uG1End;\n' +
+            'uniform float uG2Start;\nuniform float uG2End;\nvarying vec3 vSkyWorldPos;')
           .replace('#include <color_fragment>',
             '#include <color_fragment>\n' +
             '{\n' +
             '  vec3 _skyDir = normalize(vSkyWorldPos - uCameraWorldPosition);\n' +
             '  float _elev = asin(clamp(_skyDir.y, -1.0, 1.0));\n' +
             '  float _t = clamp(1.0 - _elev / 1.5707963, 0.0, 1.0);\n' +
-            '  float _g1 = smoothstep(0.65, 0.85, _t);\n' +
-            '  float _g2 = smoothstep(0.85, 1.00, _t);\n' +
+            '  float _g1 = smoothstep(uG1Start, uG1End, _t);\n' +
+            '  float _g2 = smoothstep(uG2Start, uG2End, _t);\n' +
             '  vec3 _lower = mix(uTopColor, uMidColor, _g1);\n' +
             '  diffuseColor.rgb = mix(_lower, uBottomColor, _g2);\n' +
             '}');
@@ -7224,6 +7230,69 @@
           }
         });
       });
+
+      // ==================================================
+      // スカイドーム診断 UI (マスターローカル専用、他クライアントに同期しない)
+      //   window.__skyUniforms (= Google テーマの skyUniforms) を直接書換
+      // ==================================================
+      const _skyColorBindings = [
+        { id: 'top', inp: 'm-sky-top', valSpan: 'm-sky-top-val', uniform: 'uTopColor', defHex: '#87ceeb' },
+        { id: 'mid', inp: 'm-sky-mid', valSpan: 'm-sky-mid-val', uniform: 'uMidColor', defHex: '#d9effb' },
+        { id: 'bot', inp: 'm-sky-bot', valSpan: 'm-sky-bot-val', uniform: 'uBottomColor', defHex: '#edf7fc' },
+      ];
+      _skyColorBindings.forEach((b) => {
+        const inp = document.getElementById(b.inp);
+        const val = document.getElementById(b.valSpan);
+        if (!inp) return;
+        inp.addEventListener('input', () => {
+          if (val) val.textContent = inp.value;
+          if (window.__skyUniforms && window.__skyUniforms[b.uniform]) {
+            window.__skyUniforms[b.uniform].value.set(inp.value);
+          }
+        });
+      });
+      const _skyThreshBindings = [
+        { inp: 'm-sky-g1a', valSpan: 'm-sky-g1a-val', uniform: 'uG1Start', defVal: 0.65 },
+        { inp: 'm-sky-g1b', valSpan: 'm-sky-g1b-val', uniform: 'uG1End',   defVal: 0.85 },
+        { inp: 'm-sky-g2a', valSpan: 'm-sky-g2a-val', uniform: 'uG2Start', defVal: 0.85 },
+        { inp: 'm-sky-g2b', valSpan: 'm-sky-g2b-val', uniform: 'uG2End',   defVal: 1.00 },
+      ];
+      _skyThreshBindings.forEach((b) => {
+        const inp = document.getElementById(b.inp);
+        const val = document.getElementById(b.valSpan);
+        if (!inp) return;
+        inp.addEventListener('input', () => {
+          const v = parseFloat(inp.value);
+          if (!isFinite(v)) return;
+          if (val) val.textContent = v.toFixed(2);
+          if (window.__skyUniforms && window.__skyUniforms[b.uniform]) {
+            window.__skyUniforms[b.uniform].value = v;
+          }
+        });
+      });
+      const _skyResetBtn = document.getElementById('m-sky-reset');
+      if (_skyResetBtn) {
+        _skyResetBtn.addEventListener('click', () => {
+          _skyColorBindings.forEach((b) => {
+            const inp = document.getElementById(b.inp);
+            const val = document.getElementById(b.valSpan);
+            if (inp) inp.value = b.defHex;
+            if (val) val.textContent = b.defHex;
+            if (window.__skyUniforms && window.__skyUniforms[b.uniform]) {
+              window.__skyUniforms[b.uniform].value.set(b.defHex);
+            }
+          });
+          _skyThreshBindings.forEach((b) => {
+            const inp = document.getElementById(b.inp);
+            const val = document.getElementById(b.valSpan);
+            if (inp) inp.value = String(b.defVal);
+            if (val) val.textContent = b.defVal.toFixed(2);
+            if (window.__skyUniforms && window.__skyUniforms[b.uniform]) {
+              window.__skyUniforms[b.uniform].value = b.defVal;
+            }
+          });
+        });
+      }
     }
 
     // ========== クライアント選択ドロップダウン ==========
