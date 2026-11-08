@@ -1567,7 +1567,10 @@
             '#include <common>\nvarying vec3 vSkyWorldPos;')
           .replace('#include <begin_vertex>',
             '#include <begin_vertex>\nvSkyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
-        // fragment: 標準 diffuseColor を 3 色グラデで置換
+        // fragment: 標準 diffuseColor を 2 段 smoothstep の 3 色グラデで置換
+        //   g1: 0.0 → 0.65 で bottom → mid (緩やか)
+        //   g2: 0.65 → 0.85 で mid → top  (比較的早い)
+        //   t ≥ 0.85 で top 一色、天頂側 15% 程度がベタ top
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>',
             '#include <common>\n' +
@@ -1576,11 +1579,11 @@
           .replace('#include <color_fragment>',
             '#include <color_fragment>\n' +
             '{\n' +
-            '  float t = smoothstep(uHeightLow, uHeightHigh, vSkyWorldPos.y);\n' +
-            '  vec3 _sky = (t < 0.5)\n' +
-            '    ? mix(uBottomColor, uMidColor, t * 2.0)\n' +
-            '    : mix(uMidColor,    uTopColor, (t - 0.5) * 2.0);\n' +
-            '  diffuseColor.rgb = _sky;\n' +
+            '  float _tLin = clamp((vSkyWorldPos.y - uHeightLow) / (uHeightHigh - uHeightLow), 0.0, 1.0);\n' +
+            '  float _g1 = smoothstep(0.0,  0.65, _tLin);\n' +
+            '  float _g2 = smoothstep(0.65, 0.85, _tLin);\n' +
+            '  vec3 _lower = mix(uBottomColor, uMidColor, _g1);\n' +
+            '  diffuseColor.rgb = mix(_lower, uTopColor, _g2);\n' +
             '}');
       };
       skyMat.customProgramCacheKey = () => 'google-skydome-grad';
