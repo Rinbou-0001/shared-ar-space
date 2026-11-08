@@ -1571,12 +1571,11 @@
           .replace('#include <begin_vertex>',
             '#include <begin_vertex>\nvSkyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
         // fragment: 仰角ベースで 2 段 smoothstep → diffuseColor 置換
-        //   skyDir = カメラから sphere 上の点への方向 (正規化)
-        //   elevation = asin(skyDir.y) → [-π/2, π/2]
         //   t = clamp(1 - elevation / (π/2), 0, 1) → 0 at 天頂, 1 at 地平線
-        //   g1: 0.0 → 0.65 で uTopColor (青、天頂) → uMidColor (緩やか、天頂側 65%)
-        //   g2: 0.65 → 0.85 で uMidColor → uBottomColor (白、地平線) (急な遷移、20%)
-        //   t ≥ 0.85 で uBottomColor 一色 (地平線側 15%)
+        //   0 ≤ t < 0.65  → uTopColor 一色 (青、天頂側 65% ベタ)
+        //   0.65 ≤ t < 0.85 → uTopColor → uMidColor 遷移 (青→mid)
+        //   0.85 ≤ t < 1.00 → uMidColor → uBottomColor 遷移 (mid→白)
+        //   t = 1.00 → uBottomColor (白、地平線)
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>',
             '#include <common>\n' +
@@ -1588,8 +1587,8 @@
             '  vec3 _skyDir = normalize(vSkyWorldPos - uCameraWorldPosition);\n' +
             '  float _elev = asin(clamp(_skyDir.y, -1.0, 1.0));\n' +
             '  float _t = clamp(1.0 - _elev / 1.5707963, 0.0, 1.0);\n' +
-            '  float _g1 = smoothstep(0.0,  0.65, _t);\n' +
-            '  float _g2 = smoothstep(0.65, 0.85, _t);\n' +
+            '  float _g1 = smoothstep(0.65, 0.85, _t);\n' +
+            '  float _g2 = smoothstep(0.85, 1.00, _t);\n' +
             '  vec3 _lower = mix(uTopColor, uMidColor, _g1);\n' +
             '  diffuseColor.rgb = mix(_lower, uBottomColor, _g2);\n' +
             '}');
