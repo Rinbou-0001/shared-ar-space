@@ -1541,8 +1541,8 @@
         depthWrite: false,
         fog: false,
         uniforms: {
-          uTopColor:    { value: new THREE.Color(0x5fddff) },   // 天頂: ライトシアン
-          uBottomColor: { value: new THREE.Color(0xf0fcff) },   // 地平線: 淡い青白
+          uTopColor:    { value: new THREE.Color(0x4aa8c0) },   // 天頂: 明度 70% まで下げた青シアン (白飛び回避)
+          uBottomColor: { value: new THREE.Color(0xc0d8dc) },   // 地平線: 明度 85% の青白
           uHeightLow:   { value: -50.0 },
           uHeightHigh:  { value: 300.0 },
         },
