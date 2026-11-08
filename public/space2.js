@@ -1548,9 +1548,9 @@
       //   toneMapped=false でスカイドームは tone mapping の対象外
       const skyGeom = new THREE.SphereGeometry(500, 32, 16);
       const skyUniforms = {
-        uTopColor:               { value: new THREE.Color(0x87ceeb) },   // 地平線色 (t=0) — 色順逆転
+        uTopColor:               { value: new THREE.Color(0xedf7fc) },   // 地平線色 (t=0)
         uMidColor:               { value: new THREE.Color(0xd9effb) },
-        uBottomColor:            { value: new THREE.Color(0xedf7fc) },   // 天頂色 (t=1) — 色順逆転
+        uBottomColor:            { value: new THREE.Color(0x87ceeb) },   // 天頂色 (t=1)
         uCameraWorldPosition:    { value: new THREE.Vector3(0, 0, 0) },
       };
       const skyMat = new THREE.MeshBasicMaterial({
