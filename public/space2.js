@@ -1488,8 +1488,38 @@
     _themeGoogleGroup.userData.themeRestrict = 'google';
     scene.add(_themeGoogleGroup);
     let _currentTheme = 'default';
+    // 日中プリセット: Google テーマ有効時に適用する光源強度
+    const _googleLightPreset = { ambient: 0.6, dir: 0.8, point: 0.3 };
+    // default テーマの光源値を退避 (Google ON 前の値、OFF で復元)
+    const _defaultLightCache = { ambient: null, dir: null, point: null };
     window.__applyTheme = function(name) {
       if (name !== 'default' && name !== 'google') return;
+      const prev = _currentTheme;
+      // ライティング切替 (default ↔ google の遷移のみで動作)
+      if (name === 'google' && prev !== 'google') {
+        _defaultLightCache.ambient = sceneAmbient ? sceneAmbient.intensity : 0;
+        _defaultLightCache.dir     = dirLight     ? dirLight.intensity     : 0;
+        _defaultLightCache.point   = point        ? point.intensity        : 0;
+        if (sceneAmbient) sceneAmbient.intensity = _googleLightPreset.ambient;
+        if (dirLight)     dirLight.intensity     = _googleLightPreset.dir;
+        if (point)        point.intensity        = _googleLightPreset.point;
+        if (_gridLightUni) {
+          _gridLightUni.uAmbient.value        = _googleLightPreset.ambient;
+          _gridLightUni.uDirIntensity.value   = _googleLightPreset.dir;
+          _gridLightUni.uPointIntensity.value = _googleLightPreset.point;
+        }
+      } else if (name === 'default' && prev === 'google') {
+        if (_defaultLightCache.ambient !== null) {
+          if (sceneAmbient) sceneAmbient.intensity = _defaultLightCache.ambient;
+          if (dirLight)     dirLight.intensity     = _defaultLightCache.dir;
+          if (point)        point.intensity        = _defaultLightCache.point;
+          if (_gridLightUni) {
+            _gridLightUni.uAmbient.value        = _defaultLightCache.ambient;
+            _gridLightUni.uDirIntensity.value   = _defaultLightCache.dir;
+            _gridLightUni.uPointIntensity.value = _defaultLightCache.point;
+          }
+        }
+      }
       _currentTheme = name;
       scene.traverse((obj) => {
         if (obj.userData && obj.userData.themeRestrict) {
@@ -1500,11 +1530,49 @@
     window.__getCurrentTheme = () => _currentTheme;
     window.__themeGoogleGroup = _themeGoogleGroup;
 
-    // ===== Google テーマ内容 (プレースホルダ、初期は空) =====
-    //   追加はここ以外でも可: `obj.userData.themeRestrict = 'google'; _themeGoogleGroup.add(obj)` で済む
+    // ===== Google テーマ内容: 空 (スカイドーム + 青→白グラデ) =====
     (function _buildGoogleTheme() {
-      // TODO: Google テーマ固有のオブジェクトをここに追加する
-      // 例: const m = new THREE.Mesh(...); _themeGoogleGroup.add(m);
+      // 巨大な逆向きスフィアを描画、fragment で world Y に基づく smoothstep 補間で色決定
+      //   地平線付近 (uHeightLow=−50m) = 白、天頂 (uHeightHigh=+300m) = 青
+      //   depthWrite=false + renderOrder=-1000 で常に最奥に描画
+      const skyGeom = new THREE.SphereGeometry(500, 32, 16);
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        fog: false,
+        uniforms: {
+          uTopColor:    { value: new THREE.Color(0x87ceeb) },   // sky blue
+          uBottomColor: { value: new THREE.Color(0xffffff) },   // white
+          uHeightLow:   { value: -50.0 },
+          uHeightHigh:  { value: 300.0 },
+        },
+        vertexShader: `
+          varying vec3 vWorldPos;
+          void main() {
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vWorldPos = wp.xyz;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+          }
+        `,
+        fragmentShader: `
+          precision mediump float;
+          uniform vec3  uTopColor;
+          uniform vec3  uBottomColor;
+          uniform float uHeightLow;
+          uniform float uHeightHigh;
+          varying vec3  vWorldPos;
+          void main() {
+            float t = smoothstep(uHeightLow, uHeightHigh, vWorldPos.y);
+            gl_FragColor = vec4(mix(uBottomColor, uTopColor, t), 1.0);
+          }
+        `,
+      });
+      const skyDome = new THREE.Mesh(skyGeom, skyMat);
+      skyDome.name = 'google-skydome';
+      skyDome.userData.themeRestrict = 'google';
+      skyDome.renderOrder = -1000;
+      skyDome.frustumCulled = false;
+      _themeGoogleGroup.add(skyDome);
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
