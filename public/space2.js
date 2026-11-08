@@ -1536,43 +1536,54 @@
     window.__getCurrentTheme = () => _currentTheme;
     window.__themeGoogleGroup = _themeGoogleGroup;
 
-    // ===== Google テーマ内容: 空 (スカイドーム + 青→白グラデ) =====
+    // ===== Google テーマ内容: 空 (スカイドーム + 3 色グラデ) =====
     (function _buildGoogleTheme() {
-      // 巨大な逆向きスフィアを描画、fragment で world Y に基づく smoothstep 補間で色決定
-      //   地平線付近 (uHeightLow=−50m) = 白、天頂 (uHeightHigh=+300m) = 青
-      //   depthWrite=false + renderOrder=-1000 で常に最奥に描画
+      // MeshBasicMaterial + onBeforeCompile で gradient 注入
+      //   3 色グラデ: 天頂 #87ceeb → 中空 #d9effb → 地平線 #edf7fc
+      //   toneMapped=false でスカイドームは tone mapping の対象外
       const skyGeom = new THREE.SphereGeometry(500, 32, 16);
-      const skyMat = new THREE.ShaderMaterial({
+      const skyUniforms = {
+        uTopColor:    { value: new THREE.Color(0x87ceeb) },
+        uMidColor:    { value: new THREE.Color(0xd9effb) },
+        uBottomColor: { value: new THREE.Color(0xedf7fc) },
+        uHeightLow:   { value: -50.0 },
+        uHeightHigh:  { value: 300.0 },
+      };
+      const skyMat = new THREE.MeshBasicMaterial({
         side: THREE.BackSide,
         depthWrite: false,
         fog: false,
-        uniforms: {
-          uTopColor:    { value: new THREE.Color(0x4aa8c0) },   // 天頂: 明度 70% まで下げた青シアン (白飛び回避)
-          uBottomColor: { value: new THREE.Color(0xc0d8dc) },   // 地平線: 明度 85% の青白
-          uHeightLow:   { value: -50.0 },
-          uHeightHigh:  { value: 300.0 },
-        },
-        vertexShader: `
-          varying vec3 vWorldPos;
-          void main() {
-            vec4 wp = modelMatrix * vec4(position, 1.0);
-            vWorldPos = wp.xyz;
-            gl_Position = projectionMatrix * viewMatrix * wp;
-          }
-        `,
-        fragmentShader: `
-          precision mediump float;
-          uniform vec3  uTopColor;
-          uniform vec3  uBottomColor;
-          uniform float uHeightLow;
-          uniform float uHeightHigh;
-          varying vec3  vWorldPos;
-          void main() {
-            float t = smoothstep(uHeightLow, uHeightHigh, vWorldPos.y);
-            gl_FragColor = vec4(mix(uBottomColor, uTopColor, t), 1.0);
-          }
-        `,
+        toneMapped: false,
       });
+      skyMat.onBeforeCompile = (shader) => {
+        shader.uniforms.uTopColor    = skyUniforms.uTopColor;
+        shader.uniforms.uMidColor    = skyUniforms.uMidColor;
+        shader.uniforms.uBottomColor = skyUniforms.uBottomColor;
+        shader.uniforms.uHeightLow   = skyUniforms.uHeightLow;
+        shader.uniforms.uHeightHigh  = skyUniforms.uHeightHigh;
+        // vertex: world pos を varying 出力
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>',
+            '#include <common>\nvarying vec3 vSkyWorldPos;')
+          .replace('#include <begin_vertex>',
+            '#include <begin_vertex>\nvSkyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        // fragment: 標準 diffuseColor を 3 色グラデで置換
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>',
+            '#include <common>\n' +
+            'uniform vec3 uTopColor;\nuniform vec3 uMidColor;\nuniform vec3 uBottomColor;\n' +
+            'uniform float uHeightLow;\nuniform float uHeightHigh;\nvarying vec3 vSkyWorldPos;')
+          .replace('#include <color_fragment>',
+            '#include <color_fragment>\n' +
+            '{\n' +
+            '  float t = smoothstep(uHeightLow, uHeightHigh, vSkyWorldPos.y);\n' +
+            '  vec3 _sky = (t < 0.5)\n' +
+            '    ? mix(uBottomColor, uMidColor, t * 2.0)\n' +
+            '    : mix(uMidColor,    uTopColor, (t - 0.5) * 2.0);\n' +
+            '  diffuseColor.rgb = _sky;\n' +
+            '}');
+      };
+      skyMat.customProgramCacheKey = () => 'google-skydome-grad';
       const skyDome = new THREE.Mesh(skyGeom, skyMat);
       skyDome.name = 'google-skydome';
       skyDome.userData.themeRestrict = 'google';
