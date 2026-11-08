@@ -148,7 +148,7 @@
     //   true: 塗装を HDR 値で出力し、UnrealBloomPass で周囲に halo (発光) を広げる
     //   false: 従来通り gl_FragColor 直書き (単純上書き、発光効果なし)
     //   注: このフラグは _makePaintable (shader 注入) と render ループ (composer 使用) の両方で参照
-    window.__paintBloomEnabled = (typeof window.__paintBloomEnabled === 'boolean') ? window.__paintBloomEnabled : true;
+    window.__paintBloomEnabled = (typeof window.__paintBloomEnabled === 'boolean') ? window.__paintBloomEnabled : false;
     // Composer 遅延生成: three postprocessing スクリプトのロードを待つため
     let _bloomComposer = null;
     let _bloomPass = null;
