@@ -1541,8 +1541,8 @@
         depthWrite: false,
         fog: false,
         uniforms: {
-          uTopColor:    { value: new THREE.Color(0x87ceeb) },   // sky blue
-          uBottomColor: { value: new THREE.Color(0xffffff) },   // white
+          uTopColor:    { value: new THREE.Color(0x5fddff) },   // 天頂: ライトシアン
+          uBottomColor: { value: new THREE.Color(0xf0fcff) },   // 地平線: 淡い青白
           uHeightLow:   { value: -50.0 },
           uHeightHigh:  { value: 300.0 },
         },
