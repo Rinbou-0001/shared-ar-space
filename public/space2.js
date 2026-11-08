@@ -1489,7 +1489,7 @@
     scene.add(_themeGoogleGroup);
     let _currentTheme = 'default';
     // 日中プリセット: Google テーマ有効時に適用する光源強度
-    const _googleLightPreset = { ambient: 0.6, dir: 0.8, point: 0.3 };
+    const _googleLightPreset = { ambient: 0.4, dir: 0.5, point: 0.0 };
     // default テーマの光源値を退避 (Google ON 前の値、OFF で復元)
     const _defaultLightCache = { ambient: null, dir: null, point: null };
     window.__applyTheme = function(name) {
