@@ -1965,6 +1965,37 @@
           cityRoot.add(sphere);
         }
 
+        // === 画像貼り付け可能な白い面 × 30 (100m × 100m 内、max 6m × 6m) ===
+        //   床面接地で直立、Y 軸回りにランダム 90° 単位の yaw
+        //   10m × 10m 禁止エリア (|x|<5 && |z|<5) に重ならないよう再試行
+        //   userData.imageTarget = true で後段から画像/テクスチャ attach 可能
+        const _imgPlaneMat = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          side: THREE.DoubleSide,
+          roughness: 0.75,
+          metalness: 0.0,
+        });
+        let _imgPlanesPlaced = 0;
+        let _imgPlaneAttempts = 0;
+        while (_imgPlanesPlaced < 30 && _imgPlaneAttempts < 200) {
+          _imgPlaneAttempts++;
+          const w = randInt(2, 6);      // max 6m
+          const h = randInt(2, 6);      // max 6m
+          const x = randInt(-45, 45);   // 100m × 100m 範囲 (±50m 内)
+          const z = randInt(-45, 45);
+          // 10m × 10m 禁止エリアをスキップ
+          if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
+          const planeGeom = new THREE.PlaneGeometry(w, h);
+          const plane = new THREE.Mesh(planeGeom, _imgPlaneMat);
+          plane.position.set(x, h / 2, z);
+          // Y 軸 90° 単位の 4 方向
+          plane.rotation.y = randInt(0, 3) * (Math.PI / 2);
+          plane.name = 'image-plane-' + _imgPlanesPlaced;
+          plane.userData.imageTarget = true;
+          cityRoot.add(plane);
+          _imgPlanesPlaced++;
+        }
+
         // === InstancedMesh (詳細パーツ) を cityRoot に追加して確定 ===
         [instWhite, instLight, instGray, ...instG].forEach((im) => {
           if (im.count > 0) {
