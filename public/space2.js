@@ -1501,28 +1501,22 @@
     window.__applyTheme = function(name) {
       if (name !== 'default' && name !== 'google') return;
       const prev = _currentTheme;
-      // ライティング切替 (default ↔ google の遷移のみで動作)
-      if (name === 'google' && prev !== 'google') {
-        _defaultLightCache.ambient = sceneAmbient ? sceneAmbient.intensity : 0;
-        _defaultLightCache.dir     = dirLight     ? dirLight.intensity     : 0;
-        _defaultLightCache.point   = point        ? point.intensity        : 0;
-        if (sceneAmbient) sceneAmbient.intensity = _googleLightPreset.ambient;
-        if (dirLight)     dirLight.intensity     = _googleLightPreset.dir;
-        if (point)        point.intensity        = _googleLightPreset.point;
-        if (_gridLightUni) {
-          _gridLightUni.uAmbient.value        = _googleLightPreset.ambient;
-          _gridLightUni.uDirIntensity.value   = _googleLightPreset.dir;
-          _gridLightUni.uPointIntensity.value = _googleLightPreset.point;
-        }
-      } else if (name === 'default' && prev === 'google') {
-        if (_defaultLightCache.ambient !== null) {
-          if (sceneAmbient) sceneAmbient.intensity = _defaultLightCache.ambient;
-          if (dirLight)     dirLight.intensity     = _defaultLightCache.dir;
-          if (point)        point.intensity        = _defaultLightCache.point;
-          if (_gridLightUni) {
-            _gridLightUni.uAmbient.value        = _defaultLightCache.ambient;
-            _gridLightUni.uDirIntensity.value   = _defaultLightCache.dir;
-            _gridLightUni.uPointIntensity.value = _defaultLightCache.point;
+      // ライティングプリセットの配信は master のみが担当。
+      //   master が emit → 全クライアントが sceneAmbient/Dir/Point handler で受信・適用。
+      //   これにより master のスライダー変更も同じ経路で全端末に反映される。
+      if (ROLE === 'master' && socket && socket.connected) {
+        if (name === 'google' && prev !== 'google') {
+          _defaultLightCache.ambient = sceneAmbient ? sceneAmbient.intensity : 0;
+          _defaultLightCache.dir     = dirLight     ? dirLight.intensity     : 0;
+          _defaultLightCache.point   = point        ? point.intensity        : 0;
+          socket.emit('sceneAmbient',    { intensity: _googleLightPreset.ambient });
+          socket.emit('sceneDirLight',   { intensity: _googleLightPreset.dir });
+          socket.emit('scenePointLight', { intensity: _googleLightPreset.point });
+        } else if (name === 'default' && prev === 'google') {
+          if (_defaultLightCache.ambient !== null) {
+            socket.emit('sceneAmbient',    { intensity: _defaultLightCache.ambient });
+            socket.emit('sceneDirLight',   { intensity: _defaultLightCache.dir });
+            socket.emit('scenePointLight', { intensity: _defaultLightCache.point });
           }
         }
       }
@@ -1613,19 +1607,22 @@
       };
 
       // ===== Google 検索エンジンをモチーフにした街の生成 =====
-      //   立方体・直方体・球体のみで構成
-      //   参考画像: アニメ風層状都市 + 浮遊キューブ + Google 4 色アクセント
+      //   立方体・直方体・球体のみで構成、全サイズ・位置は 1m 単位 (整数)
+      //   床面に設置するオブジェクトの角は 1m グリッドに沿う
+      //   各建物は複数の直方体を積み重ねて密度 UP (参考画像の層状/凹凸構造)
       //   決定論的 seed で全クライアント同一の街
       (function _spawnGoogleCity() {
-        // deterministic LCG
         let _seed = 20261109;
         const rand = () => {
           _seed = (_seed * 1664525 + 1013904223) >>> 0;
           return _seed / 4294967296;
         };
+        // integer in [lo, hi] inclusive
+        const randInt = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
         const googleHex = [0x4285F4, 0xEA4335, 0xFBBC04, 0x34A853];   // 青 / 赤 / 黄 / 緑
         const whiteMat   = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.05 });
         const lightMat   = new THREE.MeshStandardMaterial({ color: 0xe8ecef, roughness: 0.7, metalness: 0.02 });
+        const grayMat    = new THREE.MeshStandardMaterial({ color: 0xc8cfd4, roughness: 0.8, metalness: 0.02 });
         const googleMats = googleHex.map((c) => new THREE.MeshStandardMaterial({
           color: c, roughness: 0.4, metalness: 0.1,
           emissive: c, emissiveIntensity: 0.06,
@@ -1634,73 +1631,159 @@
         cityRoot.name = 'google-city';
         cityRoot.userData.themeRestrict = 'google';
 
-        // ─ 主要建物: 15m グリッドで配置、原点 (魚軌道) と ancientTree を回避 ─
-        const GRID_SIZE = 15;
-        const CELLS = 12;
-        const HALF = CELLS / 2;
-        for (let gx = 0; gx < CELLS; gx++) {
-          for (let gz = 0; gz < CELLS; gz++) {
-            const cx = (gx - HALF + 0.5) * GRID_SIZE;
-            const cz = (gz - HALF + 0.5) * GRID_SIZE;
-            // 魚軌道 (半径 6m) を回避
-            if (Math.sqrt(cx * cx + cz * cz) < 6) continue;
-            // ancientTree (10, -, -10) 半径 12m を回避
-            const dxt = cx - 10, dzt = cz + 10;
-            if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
-            // 道路用に 20% の確率でスキップ
-            if (rand() < 0.20) continue;
-            const W = 8 + rand() * 4;
-            const D = 8 + rand() * 4;
-            const H = 4 + Math.pow(rand(), 2) * 46;   // 低層寄りに偏った 4〜50m
-            // マテリアル: 8% で Google 色、52% で白、40% で薄灰
-            let mat;
-            const r1 = rand();
-            if (r1 < 0.08) mat = googleMats[Math.floor(rand() * 4)];
-            else if (r1 < 0.60) mat = whiteMat;
-            else mat = lightMat;
-            const building = new THREE.Mesh(new THREE.BoxGeometry(W, H, D), mat);
-            building.position.set(cx, H / 2, cz);
-            cityRoot.add(building);
-            // 窓風アクセント立方体: 35% の建物に 2〜4 個
-            if (rand() < 0.35) {
-              const n = 2 + Math.floor(rand() * 3);
-              for (let i = 0; i < n; i++) {
-                const asz = 0.5 + rand() * 0.6;
-                const amat = googleMats[Math.floor(rand() * 4)];
-                const theta = rand() * Math.PI * 2;
-                const ay = 2 + rand() * (H - 2);
-                const accent = new THREE.Mesh(new THREE.BoxGeometry(asz, asz, asz), amat);
-                accent.position.set(
-                  cx + Math.cos(theta) * (W / 2 + 0.3),
-                  ay,
-                  cz + Math.sin(theta) * (D / 2 + 0.3)
-                );
-                cityRoot.add(accent);
+        // === 複合直方体建物の生成関数 (多数の Box を積み上げ、凹凸と層を持つ) ===
+        //   (gx, gz): 1m グリッド上の角位置 (整数)
+        //   footW, footD: 基礎フットプリントの幅/奥行き (整数 m)
+        //   maxH: 全体最大高さ (整数 m)
+        function _buildComplex(gx, gz, footW, footD, maxH) {
+          // ─ 基礎層 ─ 高さ 2〜4m の広い基礎
+          const baseH = randInt(2, 4);
+          const base = new THREE.Mesh(
+            new THREE.BoxGeometry(footW, baseH, footD),
+            (rand() < 0.5) ? whiteMat : lightMat
+          );
+          // 床面接地、角を 1m グリッドに合わせる (gx, gz が角)
+          base.position.set(gx + footW / 2, baseH / 2, gz + footD / 2);
+          cityRoot.add(base);
+          let curY = baseH;
+          let curW = footW, curD = footD;
+          let curGx = gx, curGz = gz;
+          // ─ 段々と細くなる中層 ─
+          const stacks = randInt(2, 5);
+          for (let s = 0; s < stacks; s++) {
+            if (curW <= 2 || curD <= 2 || curY >= maxH) break;
+            // 2m 単位で縮小 (角が 1m グリッドに整列し続ける)
+            const shrinkX = 2 * randInt(0, 2);
+            const shrinkZ = 2 * randInt(0, 2);
+            const nextW = Math.max(2, curW - shrinkX);
+            const nextD = Math.max(2, curD - shrinkZ);
+            const sectH = randInt(2, Math.max(2, Math.floor((maxH - curY) / 3) + 2));
+            const offX = Math.floor((curW - nextW) / 2);
+            const offZ = Math.floor((curD - nextD) / 2);
+            const nextGx = curGx + offX;
+            const nextGz = curGz + offZ;
+            const matRoll = rand();
+            const sectMat = matRoll < 0.06 ? googleMats[randInt(0, 3)]
+                          : matRoll < 0.55 ? whiteMat
+                          : matRoll < 0.85 ? lightMat
+                                            : grayMat;
+            const section = new THREE.Mesh(new THREE.BoxGeometry(nextW, sectH, nextD), sectMat);
+            section.position.set(nextGx + nextW / 2, curY + sectH / 2, nextGz + nextD / 2);
+            cityRoot.add(section);
+            curY += sectH;
+            curW = nextW;
+            curD = nextD;
+            curGx = nextGx;
+            curGz = nextGz;
+          }
+          // ─ 側面プロトルージョン (Google 色の張り出し、画像の pipe 装飾を近似) ─
+          const protrusions = randInt(0, 3);
+          for (let i = 0; i < protrusions; i++) {
+            const pw = randInt(1, 2);
+            const pd = randInt(1, 2);
+            const ph = randInt(1, 4);
+            const py = randInt(1, Math.max(2, Math.floor(curY) - ph - 1));
+            const side = randInt(0, 3);
+            const useColor = rand() < 0.5;
+            const pmat = useColor ? googleMats[randInt(0, 3)] : (rand() < 0.5 ? whiteMat : grayMat);
+            let px, pz;
+            switch (side) {
+              case 0: px = gx + footW; pz = gz + randInt(0, footD - pd); break;             // +X 側
+              case 1: px = gx - pw;    pz = gz + randInt(0, footD - pd); break;             // -X 側
+              case 2: px = gx + randInt(0, footW - pw); pz = gz + footD; break;             // +Z 側
+              case 3: px = gx + randInt(0, footW - pw); pz = gz - pd; break;                // -Z 側
+            }
+            const p = new THREE.Mesh(new THREE.BoxGeometry(pw, ph, pd), pmat);
+            p.position.set(px + pw / 2, py + ph / 2, pz + pd / 2);
+            cityRoot.add(p);
+          }
+          // ─ 屋上ユニット (塔屋/ペントハウス的な小型 Box) ─
+          if (curW >= 3 && curD >= 3 && rand() < 0.5) {
+            const tw = Math.min(curW - 2, randInt(1, 3));
+            const td = Math.min(curD - 2, randInt(1, 3));
+            const th = randInt(1, 3);
+            const tx = curGx + Math.floor((curW - tw) / 2);
+            const tz = curGz + Math.floor((curD - td) / 2);
+            const topMat = rand() < 0.3 ? googleMats[randInt(0, 3)] : lightMat;
+            const top = new THREE.Mesh(new THREE.BoxGeometry(tw, th, td), topMat);
+            top.position.set(tx + tw / 2, curY + th / 2, tz + td / 2);
+            cityRoot.add(top);
+          }
+          // ─ 壁面 "窓" アクセント (小さな Google 色の Box を外壁に貼る) ─
+          if (rand() < 0.6) {
+            const winN = randInt(3, 7);
+            for (let i = 0; i < winN; i++) {
+              const ws = 1;  // 1m 立方体
+              const wmat = googleMats[randInt(0, 3)];
+              const side = randInt(0, 3);
+              const wy = randInt(1, Math.max(2, Math.floor(curY) - 1));
+              let wx, wz;
+              switch (side) {
+                case 0: wx = gx + footW; wz = gz + randInt(0, footD - 1); break;
+                case 1: wx = gx - 1;     wz = gz + randInt(0, footD - 1); break;
+                case 2: wx = gx + randInt(0, footW - 1); wz = gz + footD; break;
+                case 3: wx = gx + randInt(0, footW - 1); wz = gz - 1; break;
               }
+              const win = new THREE.Mesh(new THREE.BoxGeometry(ws, ws, ws), wmat);
+              win.position.set(wx + 0.5, wy + 0.5, wz + 0.5);
+              cityRoot.add(win);
             }
           }
         }
 
-        // ─ 空中の浮遊キューブ (画像4 インスパイア、ドリーミー) ─
-        for (let i = 0; i < 80; i++) {
-          const size = 0.6 + rand() * 1.4;
-          const x = (rand() - 0.5) * 180;
-          const z = (rand() - 0.5) * 180;
-          const y = 30 + rand() * 55;
+        // === グリッド配置 (角は 1m グリッドに整列) ===
+        //   セル = 15m × 15m、建物は 8〜12m フットプリント、セル内で開始位置も 1m 単位オフセット
+        const CELL = 15;
+        const CELLS = 12;
+        const HALF = CELLS / 2;
+        for (let gcx = 0; gcx < CELLS; gcx++) {
+          for (let gcz = 0; gcz < CELLS; gcz++) {
+            const cellGx = Math.round((gcx - HALF) * CELL);   // 1m 整数
+            const cellGz = Math.round((gcz - HALF) * CELL);
+            // セル中央で判定 (魚軌道半径 6m を回避)
+            const cxCenter = cellGx + CELL / 2;
+            const czCenter = cellGz + CELL / 2;
+            if (Math.sqrt(cxCenter * cxCenter + czCenter * czCenter) < 6) continue;
+            // ancientTree (10, -, -10) 半径 12m を回避
+            const dxt = cxCenter - 10, dzt = czCenter + 10;
+            if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
+            // 道路: 20% の確率でセルをスキップ
+            if (rand() < 0.20) continue;
+            // フットプリント (1m 単位)
+            const footW = randInt(8, 12);
+            const footD = randInt(8, 12);
+            // セル内オフセット (1m 単位)
+            const offX = randInt(0, CELL - footW);
+            const offZ = randInt(0, CELL - footD);
+            const gx = cellGx + offX;
+            const gz = cellGz + offZ;
+            const maxH = randInt(5, 50);
+            _buildComplex(gx, gz, footW, footD, maxH);
+          }
+        }
+
+        // === 空中浮遊キューブ (画像4、ドリーミーな要素) ===
+        //   1m 単位サイズ、1m 単位位置
+        for (let i = 0; i < 100; i++) {
+          const s = randInt(1, 2);
+          const x = randInt(-90, 90);
+          const z = randInt(-90, 90);
+          const y = randInt(30, 85);
           const useColor = rand() < 0.4;
-          const mat = useColor ? googleMats[Math.floor(rand() * 4)] : whiteMat;
-          const f = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
-          f.position.set(x, y, z);
+          const mat = useColor ? googleMats[randInt(0, 3)] : whiteMat;
+          const f = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), mat);
+          f.position.set(x + s / 2, y + s / 2, z + s / 2);
           f.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
           cityRoot.add(f);
         }
 
-        // ─ Google ロゴ 4 色の大球 (象限に配置、Google 検索の "G" のイメージ) ─
+        // === Google ロゴ 4 色の大球 (象限に配置) ===
+        //   床面接地、XZ は 1m グリッド整数、半径も整数 m
         const logoSpheres = [
-          { x:  35, z: -30, r: 3.0, c: 0 },   // 青 (青象限)
-          { x: -45, z:  25, r: 3.0, c: 1 },   // 赤
-          { x:  25, z:  45, r: 3.0, c: 2 },   // 黄
-          { x: -30, z: -50, r: 3.0, c: 3 },   // 緑
+          { x:  35, z: -30, r: 3, c: 0 },   // 青
+          { x: -45, z:  25, r: 3, c: 1 },   // 赤
+          { x:  25, z:  45, r: 3, c: 2 },   // 黄
+          { x: -30, z: -50, r: 3, c: 3 },   // 緑
         ];
         logoSpheres.forEach((s) => {
           const mesh = new THREE.Mesh(new THREE.SphereGeometry(s.r, 24, 16), googleMats[s.c]);
@@ -1708,16 +1791,16 @@
           cityRoot.add(mesh);
         });
 
-        // ─ 小球をランダム散布 (画像2 の装飾要素) ─
-        for (let i = 0; i < 25; i++) {
-          const r = 0.7 + rand() * 1.5;
-          const x = (rand() - 0.5) * 150;
-          const z = (rand() - 0.5) * 150;
+        // === 小球をランダム散布 (画像2 の装飾要素、整数 m) ===
+        for (let i = 0; i < 30; i++) {
+          const r = randInt(1, 2);
+          const x = randInt(-75, 75);
+          const z = randInt(-75, 75);
           if (Math.sqrt(x * x + z * z) < 5) continue;
-          const y = r + rand() * 25;
+          const y = r + randInt(0, 20);
           const sphere = new THREE.Mesh(
             new THREE.SphereGeometry(r, 16, 12),
-            googleMats[Math.floor(rand() * 4)]
+            googleMats[randInt(0, 3)]
           );
           sphere.position.set(x, y, z);
           cityRoot.add(sphere);
@@ -5165,15 +5248,9 @@
         //   lit area (ambient+dirLight=1.35) も shadow area (ambient=1.0) も 1.0 に clamp され
         //   影が完全に消える。0.75 で止めることで常に dirLight 分の輝度差を確保 → 影が残る。
         //   背景/フォグ色はスライダー値 v をそのまま使うので「背景も最大白」の挙動は維持。
-        // default テーマの cache を常に更新 (google → default 復元時に使う)
-        if (window.__defaultLightCache) window.__defaultLightCache.ambient = v;
-        // 現在のテーマが default の場合のみ実際のライトに反映 (google 中は上書きしない)
-        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
-        if (_isDefaultTheme) {
-          if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
-          if (_gridLightUni) _gridLightUni.uAmbient.value = v;
-        }
-        // 背景・フォグは テーマ非依存で常に更新
+        // 常に全クライアントで適用 (theme 判定は削除、master の調整が他クライアントに即時反映)
+        if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
+        if (_gridLightUni) _gridLightUni.uAmbient.value = v;
         if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
         if (window.__syncMasterAmbientSlider) window.__syncMasterAmbientSlider(v);
@@ -5182,24 +5259,16 @@
       socket.on('sceneDirLight', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(3, data.intensity));
-        if (window.__defaultLightCache) window.__defaultLightCache.dir = v;
-        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
-        if (_isDefaultTheme) {
-          if (dirLight) dirLight.intensity = v;
-          if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
-        }
+        if (dirLight) dirLight.intensity = v;
+        if (_gridLightUni) _gridLightUni.uDirIntensity.value = v;
         if (window.__syncMasterDirSlider) window.__syncMasterDirSlider(v);
       });
       // PointLight 強度 (0-5)
       socket.on('scenePointLight', (data) => {
         if (!data || typeof data.intensity !== 'number') return;
         const v = Math.max(0, Math.min(5, data.intensity));
-        if (window.__defaultLightCache) window.__defaultLightCache.point = v;
-        const _isDefaultTheme = !window.__getCurrentTheme || window.__getCurrentTheme() === 'default';
-        if (_isDefaultTheme) {
-          if (point) point.intensity = v;
-          if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
-        }
+        if (point) point.intensity = v;
+        if (_gridLightUni) _gridLightUni.uPointIntensity.value = v;
         if (window.__syncMasterPointSlider) window.__syncMasterPointSlider(v);
       });
 
