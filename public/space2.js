@@ -179,15 +179,15 @@
     // ライト (床は白でフラットに見せるため、環境光を強めに)
     // space3 環境光: master スライダーで動的に intensity を変更可能。
     //   個別 light タグオブジェクトからの寄与とは別途、全体を底上げする AmbientLight。
-    const sceneAmbient = new THREE.AmbientLight(0xffffff, 0);
+    const sceneAmbient = new THREE.AmbientLight(0xffffff, 0.87);
     scene.add(sceneAmbient);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.34);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
     dirLight.position.set(100, 20, 0);
 
     // ===== 原点中心 ポイントライト =====
     //   位置 (0, 2, 0) から全方向に放射、距離減衰で半径 10m 程度の光斑に
     const POINT_POS = new THREE.Vector3(0, 2, 0);
-    const point = new THREE.PointLight(0xffffee, 0.43, 20, 1.0);
+    const point = new THREE.PointLight(0xffffee, 0.0, 20, 1.0);
     point.position.copy(POINT_POS);
     point.castShadow = false;
     scene.add(point);
@@ -1493,7 +1493,7 @@
     scene.add(_themeGoogleGroup);
     let _currentTheme = 'default';
     // 日中プリセット: Google テーマ有効時に適用する光源強度
-    const _googleLightPreset = { ambient: 0.4, dir: 0.5, point: 0.0 };
+    const _googleLightPreset = { ambient: 0.87, dir: 1.0, point: 0.0 };
     // default テーマの光源値を退避 (Google ON 前の値、OFF で復元)
     //   sceneAmbient/Dir/Point broadcast 受信時もこのキャッシュを更新する
     const _defaultLightCache = { ambient: null, dir: null, point: null };
@@ -1606,11 +1606,12 @@
         camera.getWorldPosition(_skyCamPos);
       };
 
-      // ===== Google 検索エンジンをモチーフにした街の生成 =====
+      // ===== Google 検索エンジンをモチーフにした街の生成 (案C: architectural 細部) =====
       //   立方体・直方体・球体のみで構成、全サイズ・位置は 1m 単位 (整数)
       //   床面に設置するオブジェクトの角は 1m グリッドに沿う
-      //   各建物は複数の直方体を積み重ねて密度 UP (参考画像の層状/凹凸構造)
-      //   決定論的 seed で全クライアント同一の街
+      //   原点中心 10m × 10m (|x|<5 && |z|<5) エリアは配置禁止
+      //   各建物 = 基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上
+      //   小さな詳細パーツは InstancedMesh で集約し draw call を抑制
       (function _spawnGoogleCity() {
         let _seed = 20261109;
         const rand = () => {
@@ -1631,39 +1632,66 @@
         cityRoot.name = 'google-city';
         cityRoot.userData.themeRestrict = 'google';
 
-        // === 複合直方体建物の生成関数 (多数の Box を積み上げ、凹凸と層を持つ) ===
-        //   (gx, gz): 1m グリッド上の角位置 (整数)
-        //   footW, footD: 基礎フットプリントの幅/奥行き (整数 m)
-        //   maxH: 全体最大高さ (整数 m)
+        // === InstancedMesh (小パーツを 1m 立方体で集約、draw call 削減) ===
+        const _detailGeo = new THREE.BoxGeometry(1, 1, 1);
+        const INST_CAP = 12000;
+        const _dummy = new THREE.Object3D();
+        function _makeInst(mat) {
+          const m = new THREE.InstancedMesh(_detailGeo, mat, INST_CAP);
+          m.count = 0;
+          return m;
+        }
+        const instWhite = _makeInst(whiteMat);
+        const instLight = _makeInst(lightMat);
+        const instGray  = _makeInst(grayMat);
+        const instG     = googleMats.map((m) => _makeInst(m));
+        // 詳細パーツ追加ヘルパ (角座標 + サイズ、整数 m)
+        function _addInst(inst, gx, gy, gz, w, h, d) {
+          if (inst.count >= INST_CAP) return;
+          _dummy.position.set(gx + w / 2, gy + h / 2, gz + d / 2);
+          _dummy.scale.set(w, h, d);
+          _dummy.rotation.set(0, 0, 0);
+          _dummy.updateMatrix();
+          inst.setMatrixAt(inst.count, _dummy.matrix);
+          inst.count++;
+        }
+        function _pickNeutralInst() {
+          const r = rand();
+          if (r < 0.5) return instWhite;
+          if (r < 0.85) return instLight;
+          return instGray;
+        }
+
+        // === 複合建物の生成 (基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上) ===
         function _buildComplex(gx, gz, footW, footD, maxH) {
-          // ─ 基礎層 ─ 高さ 2〜4m の広い基礎
+          // ─ 基礎層: 床面接地、角が (gx, gz) の整数グリッド ─
           const baseH = randInt(2, 4);
-          const base = new THREE.Mesh(
-            new THREE.BoxGeometry(footW, baseH, footD),
-            (rand() < 0.5) ? whiteMat : lightMat
-          );
-          // 床面接地、角を 1m グリッドに合わせる (gx, gz が角)
+          const baseMat = (rand() < 0.5) ? whiteMat : lightMat;
+          const base = new THREE.Mesh(new THREE.BoxGeometry(footW, baseH, footD), baseMat);
           base.position.set(gx + footW / 2, baseH / 2, gz + footD / 2);
           cityRoot.add(base);
+          // 建物全体の有効最大高 (後段の中層計算で使用)
           let curY = baseH;
           let curW = footW, curD = footD;
           let curGx = gx, curGz = gz;
-          // ─ 段々と細くなる中層 ─
-          const stacks = randInt(2, 5);
+          // 各フロア境界 Y を記録 (梁・窓配置用)
+          const floorYs = [baseH];
+          // ─ 階段状の中層 ─
+          const stacks = randInt(3, 6);
           for (let s = 0; s < stacks; s++) {
-            if (curW <= 2 || curD <= 2 || curY >= maxH) break;
-            // 2m 単位で縮小 (角が 1m グリッドに整列し続ける)
+            if (curW <= 2 || curD <= 2 || curY >= maxH - 2) break;
             const shrinkX = 2 * randInt(0, 2);
             const shrinkZ = 2 * randInt(0, 2);
             const nextW = Math.max(2, curW - shrinkX);
             const nextD = Math.max(2, curD - shrinkZ);
-            const sectH = randInt(2, Math.max(2, Math.floor((maxH - curY) / 3) + 2));
+            const sectH = randInt(3, 6);
+            if (curY + sectH > maxH) break;
             const offX = Math.floor((curW - nextW) / 2);
             const offZ = Math.floor((curD - nextD) / 2);
             const nextGx = curGx + offX;
             const nextGz = curGz + offZ;
             const matRoll = rand();
-            const sectMat = matRoll < 0.06 ? googleMats[randInt(0, 3)]
+            const sectMat = matRoll < 0.08 ? googleMats[randInt(0, 3)]
                           : matRoll < 0.55 ? whiteMat
                           : matRoll < 0.85 ? lightMat
                                             : grayMat;
@@ -1675,33 +1703,178 @@
             curD = nextD;
             curGx = nextGx;
             curGz = nextGz;
+            floorYs.push(curY);
           }
-          // ─ 側面プロトルージョン (Google 色の張り出し、画像の pipe 装飾を近似) ─
-          const protrusions = randInt(0, 3);
-          for (let i = 0; i < protrusions; i++) {
-            const pw = randInt(1, 2);
-            const pd = randInt(1, 2);
-            const ph = randInt(1, 4);
-            const py = randInt(1, Math.max(2, Math.floor(curY) - ph - 1));
-            const side = randInt(0, 3);
-            const useColor = rand() < 0.5;
-            const pmat = useColor ? googleMats[randInt(0, 3)] : (rand() < 0.5 ? whiteMat : grayMat);
-            let px, pz;
-            switch (side) {
-              case 0: px = gx + footW; pz = gz + randInt(0, footD - pd); break;             // +X 側
-              case 1: px = gx - pw;    pz = gz + randInt(0, footD - pd); break;             // -X 側
-              case 2: px = gx + randInt(0, footW - pw); pz = gz + footD; break;             // +Z 側
-              case 3: px = gx + randInt(0, footW - pw); pz = gz - pd; break;                // -Z 側
+          const totalH = curY;
+
+          // ─ 四隅の柱 (縦長) ─ 基礎層の 4 角に 1m×totalH×1m の柱
+          const pillarInst = _pickNeutralInst();
+          _addInst(pillarInst, gx,              0, gz,              1, totalH, 1);
+          _addInst(pillarInst, gx + footW - 1,  0, gz,              1, totalH, 1);
+          _addInst(pillarInst, gx,              0, gz + footD - 1,  1, totalH, 1);
+          _addInst(pillarInst, gx + footW - 1,  0, gz + footD - 1,  1, totalH, 1);
+
+          // ─ 横梁: 各フロア境界 Y に 1m 高の horizontal band (4 面) ─
+          for (let fi = 0; fi < floorYs.length - 1; fi++) {
+            const fy = floorYs[fi];
+            if (fy + 1 > totalH) break;
+            const beamInst = _pickNeutralInst();
+            // 下側セクションサイズをフットプリントとして梁を貼る
+            const fw = (fi === 0) ? footW : footW;   // 基礎幅維持 (近似)
+            const fd = (fi === 0) ? footD : footD;
+            // 前面 (-Z): 幅 = footW、高さ 1、奥行き 1
+            _addInst(beamInst, gx,              fy, gz,              fw, 1, 1);
+            // 後面 (+Z)
+            _addInst(beamInst, gx,              fy, gz + fd - 1,     fw, 1, 1);
+            // 左面 (-X)
+            _addInst(beamInst, gx,              fy, gz + 1,          1, 1, fd - 2);
+            // 右面 (+X)
+            _addInst(beamInst, gx + fw - 1,     fy, gz + 1,          1, 1, fd - 2);
+          }
+
+          // ─ 窓グリッド: 基礎 + 各中層の各 facade に 2m×2m 窓を並べる ─
+          //   各窓 = 4 枚の 1m 枠 (枠: neutral、たまに中央に Google 色の窓タイル) ─
+          function _addWindowFrame(fx, fy, fz, side) {
+            // 窓 2m×2m の角 (x1,y1)〜(x2,y2) に 1m 立方体を 4 つ配置
+            // side: 0=-Z (前), 1=+Z (後), 2=-X (左), 3=+X (右)
+            const frameInst = _pickNeutralInst();
+            if (side === 0 || side === 1) {
+              // Z 面: 窓は XY 平面、1m 厚さ 1
+              _addInst(frameInst, fx,     fy,     fz, 1, 1, 1);   // 左下
+              _addInst(frameInst, fx + 1, fy,     fz, 1, 1, 1);   // 右下
+              _addInst(frameInst, fx,     fy + 1, fz, 1, 1, 1);   // 左上
+              _addInst(frameInst, fx + 1, fy + 1, fz, 1, 1, 1);   // 右上
+              // 10% で中央に Google 色のタイル
+              if (rand() < 0.1) {
+                const tileInst = instG[randInt(0, 3)];
+                _addInst(tileInst, fx + 0, fy + 0, fz, 2, 2, 1);
+              }
+            } else {
+              // X 面: 窓は YZ 平面
+              _addInst(frameInst, fx, fy,     fz,     1, 1, 1);
+              _addInst(frameInst, fx, fy,     fz + 1, 1, 1, 1);
+              _addInst(frameInst, fx, fy + 1, fz,     1, 1, 1);
+              _addInst(frameInst, fx, fy + 1, fz + 1, 1, 1, 1);
+              if (rand() < 0.1) {
+                const tileInst = instG[randInt(0, 3)];
+                _addInst(tileInst, fx, fy, fz, 1, 2, 2);
+              }
             }
-            const p = new THREE.Mesh(new THREE.BoxGeometry(pw, ph, pd), pmat);
-            p.position.set(px + pw / 2, py + ph / 2, pz + pd / 2);
-            cityRoot.add(p);
           }
-          // ─ 屋上ユニット (塔屋/ペントハウス的な小型 Box) ─
+          // 各フロアの中間 Y に 1 列の窓
+          for (let fi = 0; fi < floorYs.length - 1; fi++) {
+            const fy = floorYs[fi] + 1;
+            const fh = floorYs[fi + 1] - floorYs[fi];
+            if (fh < 4 || fy + 2 > totalH) continue;
+            // 前面 (-Z): 窓は gx+1〜gx+footW-3 の範囲に 3m 間隔で
+            for (let wx = gx + 2; wx <= gx + footW - 3; wx += 3) {
+              _addWindowFrame(wx, fy, gz, 0);
+            }
+            // 後面 (+Z)
+            for (let wx = gx + 2; wx <= gx + footW - 3; wx += 3) {
+              _addWindowFrame(wx, fy, gz + footD - 1, 1);
+            }
+            // 左面 (-X)
+            for (let wz = gz + 2; wz <= gz + footD - 3; wz += 3) {
+              _addWindowFrame(gx, fy, wz, 2);
+            }
+            // 右面 (+X)
+            for (let wz = gz + 2; wz <= gz + footD - 3; wz += 3) {
+              _addWindowFrame(gx + footW - 1, fy, wz, 3);
+            }
+          }
+
+          // ─ 出入口 (ground floor、1 facade 選択、3m 高 × 2m 幅の開口を枠で表現) ─
+          const entranceSide = randInt(0, 3);
+          {
+            const frameInst = _pickNeutralInst();
+            // 2m 幅の開口、両側に 1m 柱 (jamb)、上に 1m 梁 (lintel)
+            if (entranceSide === 0) {
+              // 前面 (-Z)
+              const ex = gx + Math.floor((footW - 2) / 2);
+              _addInst(frameInst, ex - 1, 0, gz,     1, 3, 1);
+              _addInst(frameInst, ex + 2, 0, gz,     1, 3, 1);
+              _addInst(frameInst, ex,     3, gz,     2, 1, 1);
+            } else if (entranceSide === 1) {
+              const ex = gx + Math.floor((footW - 2) / 2);
+              _addInst(frameInst, ex - 1, 0, gz + footD - 1, 1, 3, 1);
+              _addInst(frameInst, ex + 2, 0, gz + footD - 1, 1, 3, 1);
+              _addInst(frameInst, ex,     3, gz + footD - 1, 2, 1, 1);
+            } else if (entranceSide === 2) {
+              const ez = gz + Math.floor((footD - 2) / 2);
+              _addInst(frameInst, gx, 0, ez - 1, 1, 3, 1);
+              _addInst(frameInst, gx, 0, ez + 2, 1, 3, 1);
+              _addInst(frameInst, gx, 3, ez,     1, 1, 2);
+            } else {
+              const ez = gz + Math.floor((footD - 2) / 2);
+              _addInst(frameInst, gx + footW - 1, 0, ez - 1, 1, 3, 1);
+              _addInst(frameInst, gx + footW - 1, 0, ez + 2, 1, 3, 1);
+              _addInst(frameInst, gx + footW - 1, 3, ez,     1, 1, 2);
+            }
+          }
+
+          // ─ バルコニー (30% の建物、中層の 1 面に 3m× 1m の張り出し + 手摺り) ─
+          if (totalH >= 10 && rand() < 0.3) {
+            const balcSide = randInt(0, 3);
+            const balcY = randInt(Math.floor(totalH * 0.3), Math.floor(totalH * 0.7));
+            const balcW = 3;
+            if (balcSide === 0) {
+              const bx = gx + randInt(1, footW - balcW - 1);
+              const balcInst = _pickNeutralInst();
+              _addInst(balcInst, bx, balcY - 1, gz - 1,     balcW, 1, 1);        // deck
+              _addInst(balcInst, bx, balcY,     gz - 1,     1,     1, 1);        // post L
+              _addInst(balcInst, bx + balcW - 1, balcY, gz - 1, 1, 1, 1);        // post R
+              _addInst(balcInst, bx, balcY + 1, gz - 1,     balcW, 1, 1);        // rail (top)
+            } else if (balcSide === 1) {
+              const bx = gx + randInt(1, footW - balcW - 1);
+              const balcInst = _pickNeutralInst();
+              _addInst(balcInst, bx, balcY - 1, gz + footD,     balcW, 1, 1);
+              _addInst(balcInst, bx, balcY,     gz + footD,     1,     1, 1);
+              _addInst(balcInst, bx + balcW - 1, balcY, gz + footD, 1, 1, 1);
+              _addInst(balcInst, bx, balcY + 1, gz + footD,     balcW, 1, 1);
+            } else if (balcSide === 2) {
+              const bz = gz + randInt(1, footD - balcW - 1);
+              const balcInst = _pickNeutralInst();
+              _addInst(balcInst, gx - 1, balcY - 1, bz,     1, 1, balcW);
+              _addInst(balcInst, gx - 1, balcY,     bz,     1, 1, 1);
+              _addInst(balcInst, gx - 1, balcY, bz + balcW - 1, 1, 1, 1);
+              _addInst(balcInst, gx - 1, balcY + 1, bz,     1, 1, balcW);
+            } else {
+              const bz = gz + randInt(1, footD - balcW - 1);
+              const balcInst = _pickNeutralInst();
+              _addInst(balcInst, gx + footW, balcY - 1, bz,     1, 1, balcW);
+              _addInst(balcInst, gx + footW, balcY,     bz,     1, 1, 1);
+              _addInst(balcInst, gx + footW, balcY, bz + balcW - 1, 1, 1, 1);
+              _addInst(balcInst, gx + footW, balcY + 1, bz,     1, 1, balcW);
+            }
+          }
+
+          // ─ 外付けパイプ (1〜2 本、1m × totalH × 1m の細い縦ライン、Google 色 or neutral) ─
+          const pipeN = randInt(0, 2);
+          for (let p = 0; p < pipeN; p++) {
+            const useColor = rand() < 0.3;
+            const pipeInst = useColor ? instG[randInt(0, 3)] : _pickNeutralInst();
+            const pipeSide = randInt(0, 3);
+            if (pipeSide === 0) {
+              const px = gx + randInt(1, footW - 2);
+              _addInst(pipeInst, px, 0, gz - 1,     1, totalH, 1);
+            } else if (pipeSide === 1) {
+              const px = gx + randInt(1, footW - 2);
+              _addInst(pipeInst, px, 0, gz + footD, 1, totalH, 1);
+            } else if (pipeSide === 2) {
+              const pz = gz + randInt(1, footD - 2);
+              _addInst(pipeInst, gx - 1, 0, pz, 1, totalH, 1);
+            } else {
+              const pz = gz + randInt(1, footD - 2);
+              _addInst(pipeInst, gx + footW, 0, pz, 1, totalH, 1);
+            }
+          }
+
+          // ─ 屋上ユニット (塔屋、50% で) ─
           if (curW >= 3 && curD >= 3 && rand() < 0.5) {
-            const tw = Math.min(curW - 2, randInt(1, 3));
-            const td = Math.min(curD - 2, randInt(1, 3));
-            const th = randInt(1, 3);
+            const tw = Math.min(curW - 2, randInt(2, 3));
+            const td = Math.min(curD - 2, randInt(2, 3));
+            const th = randInt(2, 4);
             const tx = curGx + Math.floor((curW - tw) / 2);
             const tz = curGz + Math.floor((curD - td) / 2);
             const topMat = rand() < 0.3 ? googleMats[randInt(0, 3)] : lightMat;
@@ -1709,54 +1882,39 @@
             top.position.set(tx + tw / 2, curY + th / 2, tz + td / 2);
             cityRoot.add(top);
           }
-          // ─ 壁面 "窓" アクセント (小さな Google 色の Box を外壁に貼る) ─
-          if (rand() < 0.6) {
-            const winN = randInt(3, 7);
-            for (let i = 0; i < winN; i++) {
-              const ws = 1;  // 1m 立方体
-              const wmat = googleMats[randInt(0, 3)];
-              const side = randInt(0, 3);
-              const wy = randInt(1, Math.max(2, Math.floor(curY) - 1));
-              let wx, wz;
-              switch (side) {
-                case 0: wx = gx + footW; wz = gz + randInt(0, footD - 1); break;
-                case 1: wx = gx - 1;     wz = gz + randInt(0, footD - 1); break;
-                case 2: wx = gx + randInt(0, footW - 1); wz = gz + footD; break;
-                case 3: wx = gx + randInt(0, footW - 1); wz = gz - 1; break;
-              }
-              const win = new THREE.Mesh(new THREE.BoxGeometry(ws, ws, ws), wmat);
-              win.position.set(wx + 0.5, wy + 0.5, wz + 0.5);
-              cityRoot.add(win);
-            }
-          }
         }
 
         // === グリッド配置 (角は 1m グリッドに整列) ===
-        //   セル = 15m × 15m、建物は 8〜12m フットプリント、セル内で開始位置も 1m 単位オフセット
+        //   原点中心 10m × 10m (|x|<5 && |z|<5) に建物角が入ることを禁止
         const CELL = 15;
         const CELLS = 12;
         const HALF = CELLS / 2;
+        // 建物フットプリントが 10x10 禁止エリアと重ならないか判定
+        function _overlapsForbidden(gx, gz, w, d) {
+          // 建物の範囲: [gx, gx+w] × [gz, gz+d]
+          // 禁止エリア: [-5, 5] × [-5, 5]
+          // 重なり条件: gx < 5 && gx+w > -5 && gz < 5 && gz+d > -5
+          return (gx < 5 && (gx + w) > -5 && gz < 5 && (gz + d) > -5);
+        }
         for (let gcx = 0; gcx < CELLS; gcx++) {
           for (let gcz = 0; gcz < CELLS; gcz++) {
-            const cellGx = Math.round((gcx - HALF) * CELL);   // 1m 整数
+            const cellGx = Math.round((gcx - HALF) * CELL);
             const cellGz = Math.round((gcz - HALF) * CELL);
-            // セル中央で判定 (魚軌道半径 6m を回避)
             const cxCenter = cellGx + CELL / 2;
             const czCenter = cellGz + CELL / 2;
-            if (Math.sqrt(cxCenter * cxCenter + czCenter * czCenter) < 6) continue;
             // ancientTree (10, -, -10) 半径 12m を回避
             const dxt = cxCenter - 10, dzt = czCenter + 10;
             if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
             // 道路: 20% の確率でセルをスキップ
             if (rand() < 0.20) continue;
-            // フットプリント (1m 単位)
             const footW = randInt(8, 12);
             const footD = randInt(8, 12);
-            // セル内オフセット (1m 単位)
             const offX = randInt(0, CELL - footW);
             const offZ = randInt(0, CELL - footD);
             const gx = cellGx + offX;
             const gz = cellGz + offZ;
+            // 10m×10m 禁止エリアに重なるならスキップ
+            if (_overlapsForbidden(gx, gz, footW, footD)) continue;
             const maxH = randInt(5, 50);
             _buildComplex(gx, gz, footW, footD, maxH);
           }
@@ -1796,7 +1954,8 @@
           const r = randInt(1, 2);
           const x = randInt(-75, 75);
           const z = randInt(-75, 75);
-          if (Math.sqrt(x * x + z * z) < 5) continue;
+          // 10m × 10m 禁止エリアを回避 (|x|<5 && |z|<5)
+          if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
           const y = r + randInt(0, 20);
           const sphere = new THREE.Mesh(
             new THREE.SphereGeometry(r, 16, 12),
@@ -1805,6 +1964,15 @@
           sphere.position.set(x, y, z);
           cityRoot.add(sphere);
         }
+
+        // === InstancedMesh (詳細パーツ) を cityRoot に追加して確定 ===
+        [instWhite, instLight, instGray, ...instG].forEach((im) => {
+          if (im.count > 0) {
+            im.instanceMatrix.needsUpdate = true;
+            im.frustumCulled = false;   // 広範囲カバーのため手動 culling 不要
+            cityRoot.add(im);
+          }
+        });
 
         _themeGoogleGroup.add(cityRoot);
       })();
@@ -5249,7 +5417,7 @@
         //   影が完全に消える。0.75 で止めることで常に dirLight 分の輝度差を確保 → 影が残る。
         //   背景/フォグ色はスライダー値 v をそのまま使うので「背景も最大白」の挙動は維持。
         // 常に全クライアントで適用 (theme 判定は削除、master の調整が他クライアントに即時反映)
-        if (sceneAmbient) sceneAmbient.intensity = Math.min(0.75, v);
+        if (sceneAmbient) sceneAmbient.intensity = v;
         if (_gridLightUni) _gridLightUni.uAmbient.value = v;
         if (scene.background && scene.background.isColor) scene.background.setRGB(v, v, v);
         if (scene.fog && scene.fog.color) scene.fog.color.setRGB(v, v, v);
@@ -7176,7 +7344,7 @@
       const _ambVal = _by('m-scene-ambient-val');
       window.__syncMasterAmbientSlider = function(intensity) {
         if (!_ambInp || !_ambVal) return;
-        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0;
+        if (typeof intensity !== 'number') intensity = sceneAmbient ? sceneAmbient.intensity : 0.87;
         _ambInp.value = String(intensity);
         _ambVal.textContent = intensity.toFixed(2);
       };
@@ -7207,7 +7375,7 @@
       const _dirVal = _by('m-scene-dir-val');
       window.__syncMasterDirSlider = function(intensity) {
         if (!_dirInp || !_dirVal) return;
-        if (typeof intensity !== 'number') intensity = dirLight ? dirLight.intensity : 0.34;
+        if (typeof intensity !== 'number') intensity = dirLight ? dirLight.intensity : 1.0;
         _dirInp.value = String(intensity);
         _dirVal.textContent = intensity.toFixed(2);
       };
@@ -7238,7 +7406,7 @@
       const _ptVal = _by('m-scene-point-val');
       window.__syncMasterPointSlider = function(intensity) {
         if (!_ptInp || !_ptVal) return;
-        if (typeof intensity !== 'number') intensity = point ? point.intensity : 0.43;
+        if (typeof intensity !== 'number') intensity = point ? point.intensity : 0.0;
         _ptInp.value = String(intensity);
         _ptVal.textContent = intensity.toFixed(2);
       };
