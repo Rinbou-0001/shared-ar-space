@@ -1613,7 +1613,7 @@
       //   各建物 = 基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上
       //   小さな詳細パーツは InstancedMesh で集約し draw call を抑制
       (function _spawnGoogleCity() {
-        let _seed = 74513802;   // 再配置 seed (街レイアウト全更新)
+        let _seed = 20261110;   // 再配置 seed (街レイアウト全更新)
         const rand = () => {
           _seed = (_seed * 1664525 + 1013904223) >>> 0;
           return _seed / 4294967296;
