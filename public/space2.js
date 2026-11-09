@@ -2051,11 +2051,15 @@
           });
           g.textAlign = 'left';
         }
-        function _makeUITex(drawFn) {
+        // 面サイズに合わせて個別キャンバスを生成 (案A: 歪みゼロ)
+        //   1m = 128px、最小 128px (1m 面)、最大 768px (6m 面)
+        function _makeUITexFor(drawFn, planeW, planeH) {
+          const px = 128;
           const cv = document.createElement('canvas');
-          cv.width = 512; cv.height = 512;
+          cv.width = Math.round(planeW * px);
+          cv.height = Math.round(planeH * px);
           const g = cv.getContext('2d');
-          drawFn(g, 512, 512);
+          drawFn(g, cv.width, cv.height);
           const t = new THREE.CanvasTexture(cv);
           t.needsUpdate = true;
           return t;
@@ -2593,18 +2597,24 @@
           _ui_weather, _ui_news, _ui_music, _ui_photos, _ui_notes,
           _ui_translate, _ui_doc, _ui_search, _ui_chat, _ui_fit,
         ];
-        const _uiMaterials = _uiDrawers.map((fn) => {
-          const tex = _makeUITex(fn);
-          return new THREE.MeshStandardMaterial({
-            map: tex,
-            color: 0xffffff,
-            side: THREE.DoubleSide,
-            roughness: 0.75,
-            metalness: 0.0,
-          });
-        });
-        // 画像面の配置: 40m × 40m (スペース原点中心)、高さ上限 20m
-        // 建物と重ならないよう 3D AABB 衝突チェック + 古木 (10,-,-10 r=12) 回避
+        // 画像面の配置: 50m × 50m (スペース原点中心)、高さ上限 20m
+        //   - 面ごとに個別キャンバスを生成 (アスペクト歪みゼロ)
+        //   - サイズを 大 (5-6m) / 中 (3-4m) / 小 (1-2m) の 3 スケールに分けて 20 枚ずつ
+        //   - 禁止エリア [-5,5]×[-5,5] (建物消失の中央 10m 枠) にも面を置かない
+        //     → 原点集中を防止
+        //   - 建物 AABB、古木、配置済み面との衝突を 3D AABB で判定
+        function _planeEntersForbiddenXZ(x, z, w, yawIdx) {
+          const extendsX = (yawIdx === 0 || yawIdx === 2);
+          if (extendsX) {
+            if (z > FORB || z < -FORB) return false;
+            const x1 = x - w / 2, x2 = x + w / 2;
+            return !(x2 <= -FORB || x1 >= FORB);
+          } else {
+            if (x > FORB || x < -FORB) return false;
+            const z1 = z - w / 2, z2 = z + w / 2;
+            return !(z2 <= -FORB || z1 >= FORB);
+          }
+        }
         function _planeAABB(x, z, w, h, yawIdx, bottomY) {
           const extendsX = (yawIdx === 0 || yawIdx === 2);
           const thin = 0.4;    // 面の厚み相当 (safety)
@@ -2635,41 +2645,66 @@
           const dx = nx - tx, dz = nz - tz;
           return dx * dx + dz * dz < tr * tr;
         }
+        // サイズ 3 スケール × 20 枚 = 60 枚目標
+        const _sizeBuckets = [
+          { lo: 5, hi: 6, target: 20, label: 'L' },
+          { lo: 3, hi: 4, target: 20, label: 'M' },
+          { lo: 1, hi: 2, target: 20, label: 'S' },
+        ];
+        const HALF_AREA = 25;   // 50m × 50m → ±25
         let _imgPlanesPlaced = 0;
-        let _imgPlaneAttempts = 0;
-        while (_imgPlanesPlaced < 60 && _imgPlaneAttempts < 5000) {
-          _imgPlaneAttempts++;
-          const w = randInt(2, 6);
-          const h = randInt(2, 6);
-          // 40m × 40m 原点中心: 面中心 x,z ∈ [-20+w/2, 20-w/2] 相当だが整数グリッド簡易化
-          const x = randInt(-18, 18);
-          const z = randInt(-18, 18);
-          const yawIdx = randInt(0, 3);
-          // 高さ上限 20m: 面底辺 Y は [0, 20-h] の整数
-          const bottomY = randInt(0, 20 - h);
-          const aabb = _planeAABB(x, z, w, h, yawIdx, bottomY);
-          // 40m × 40m 内に AABB が収まるかチェック
-          if (aabb.minX < -20 || aabb.maxX > 20 || aabb.minZ < -20 || aabb.maxZ > 20) continue;
-          // 建物衝突チェック
-          let hit = false;
-          for (let bi = 0; bi < _buildingAABBs.length; bi++) {
-            if (_aabbIntersect(aabb, _buildingAABBs[bi])) { hit = true; break; }
+        for (let sbi = 0; sbi < _sizeBuckets.length; sbi++) {
+          const bk = _sizeBuckets[sbi];
+          let placed = 0;
+          let attempts = 0;
+          while (placed < bk.target && attempts < 6000) {
+            attempts++;
+            const w = randInt(bk.lo, bk.hi);
+            const h = randInt(bk.lo, bk.hi);
+            const halfLong = Math.ceil(w / 2);
+            // x, z は面の AABB が 50m × 50m 内に収まる範囲
+            const x = randInt(-HALF_AREA + halfLong, HALF_AREA - halfLong);
+            const z = randInt(-HALF_AREA + halfLong, HALF_AREA - halfLong);
+            const yawIdx = randInt(0, 3);
+            const bottomY = randInt(0, 20 - h);
+            // 禁止エリア (中央 10×10 枠) に面が侵入しないこと (原点集中防止)
+            if (_planeEntersForbiddenXZ(x, z, w, yawIdx)) continue;
+            const aabb = _planeAABB(x, z, w, h, yawIdx, bottomY);
+            if (aabb.minX < -HALF_AREA || aabb.maxX > HALF_AREA
+             || aabb.minZ < -HALF_AREA || aabb.maxZ > HALF_AREA) continue;
+            // 建物・既配置面との衝突チェック
+            let hit = false;
+            for (let bi = 0; bi < _buildingAABBs.length; bi++) {
+              if (_aabbIntersect(aabb, _buildingAABBs[bi])) { hit = true; break; }
+            }
+            if (hit) continue;
+            if (_hitAncientTree(aabb)) continue;
+            // 面専用キャンバス・マテリアル生成 (アスペクト = w:h 比率)
+            const uiIdx = randInt(0, _uiDrawers.length - 1);
+            const tex = _makeUITexFor(_uiDrawers[uiIdx], w, h);
+            const mat = new THREE.MeshStandardMaterial({
+              map: tex,
+              color: 0xffffff,
+              side: THREE.DoubleSide,
+              roughness: 0.75,
+              metalness: 0.0,
+            });
+            const planeGeom = new THREE.PlaneGeometry(w, h);
+            const plane = new THREE.Mesh(planeGeom, mat);
+            plane.position.set(x, bottomY + h / 2, z);
+            plane.rotation.y = yawIdx * (Math.PI / 2);
+            plane.name = 'image-plane-' + _imgPlanesPlaced;
+            plane.userData.imageTarget = true;
+            plane.userData.uiType = uiIdx;
+            plane.userData.sizeBucket = bk.label;
+            cityRoot.add(plane);
+            _buildingAABBs.push(aabb);   // 以降のチェック対象に追加
+            _imgPlanesPlaced++;
+            placed++;
           }
-          if (hit) continue;
-          if (_hitAncientTree(aabb)) continue;
-          const planeGeom = new THREE.PlaneGeometry(w, h);
-          const uiIdx = randInt(0, _uiMaterials.length - 1);
-          const plane = new THREE.Mesh(planeGeom, _uiMaterials[uiIdx]);
-          plane.position.set(x, bottomY + h / 2, z);
-          plane.rotation.y = yawIdx * (Math.PI / 2);
-          plane.name = 'image-plane-' + _imgPlanesPlaced;
-          plane.userData.imageTarget = true;
-          plane.userData.uiType = uiIdx;
-          cityRoot.add(plane);
-          // 配置済みの面も以降の衝突チェックに加える (面同士の重なり防止)
-          _buildingAABBs.push(aabb);
-          _imgPlanesPlaced++;
+          console.log('[space2] image-plane bucket', bk.label, 'placed=', placed, '/', bk.target, 'attempts=', attempts);
         }
+        console.log('[space2] image planes total placed:', _imgPlanesPlaced, '/ 60');
 
         // === InstancedMesh (詳細パーツ) を cityRoot に追加して確定 ===
         [instWhite, instLight, instGray, ...instG].forEach((im) => {
