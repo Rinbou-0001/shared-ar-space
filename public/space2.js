@@ -1631,6 +1631,8 @@
         const cityRoot = new THREE.Group();
         cityRoot.name = 'google-city';
         cityRoot.userData.themeRestrict = 'google';
+        // 画像面の衝突判定用: 建物 AABB を蓄積
+        const _buildingAABBs = [];
 
         // === InstancedMesh (小パーツを 1m 立方体で集約、draw call 削減) ===
         const _detailGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -1664,6 +1666,12 @@
 
         // === 複合建物の生成 (基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上) ===
         function _buildComplex(gx, gz, footW, footD, maxH) {
+          // 衝突判定用 AABB (バルコニー・パイプの張り出し 1m + 屋上塔屋 +4m を加算)
+          _buildingAABBs.push({
+            minX: gx - 1, maxX: gx + footW + 1,
+            minZ: gz - 1, maxZ: gz + footD + 1,
+            minY: 0,      maxY: maxH + 4,
+          });
           // ─ 基礎層: 床面接地、角が (gx, gz) の整数グリッド ─
           const baseH = randInt(2, 4);
           const baseMat = (rand() < 0.5) ? whiteMat : lightMat;
@@ -1992,9 +2000,57 @@
           cityRoot.add(sphere);
         }
 
-        // === 15 種類の汎用 Web アプリ風 UI を CanvasTexture 化、パネルに割当 ===
-        //   全て原創デザイン、架空サービス名、汎用的なレイアウトのみ使用
-        //   特定ブランドの再現は行わない
+        // === 15 種類の Material Design 3 風 Web アプリ UI (CanvasTexture) ===
+        //   MD3 フォーマット (丸角、elevated card、FAB、typography scale) を参照
+        //   サービス名・ロゴはすべて架空、実在ブランドの再現なし
+        // ─ MD3 helpers ─
+        function _rr(g, x, y, w, h, r) {
+          g.beginPath();
+          g.moveTo(x + r, y);
+          g.lineTo(x + w - r, y); g.arcTo(x + w, y, x + w, y + r, r);
+          g.lineTo(x + w, y + h - r); g.arcTo(x + w, y + h, x + w - r, y + h, r);
+          g.lineTo(x + r, y + h); g.arcTo(x, y + h, x, y + h - r, r);
+          g.lineTo(x, y + r); g.arcTo(x, y, x + r, y, r);
+          g.closePath();
+        }
+        function _sh(g, blur, dy, a) {
+          g.shadowColor = 'rgba(0,0,0,' + a + ')';
+          g.shadowBlur = blur; g.shadowOffsetX = 0; g.shadowOffsetY = dy;
+        }
+        function _nosh(g) {
+          g.shadowColor = 'transparent';
+          g.shadowBlur = 0; g.shadowOffsetY = 0;
+        }
+        function _bar(g, W, bg, on, title) {
+          g.fillStyle = bg; g.fillRect(0, 0, W, 76);
+          g.fillStyle = on; g.font = '500 24px Roboto, sans-serif';
+          g.textAlign = 'left'; g.fillText(title, 28, 48);
+        }
+        function _fab(g, W, H, bg, on, icon) {
+          _sh(g, 16, 6, 0.28);
+          g.fillStyle = bg;
+          _rr(g, W - 92, H - 92, 64, 64, 20); g.fill();
+          _nosh(g);
+          g.fillStyle = on; g.font = 'bold 30px sans-serif';
+          g.textAlign = 'center'; g.fillText(icon, W - 60, H - 50);
+          g.textAlign = 'left';
+        }
+        function _navbar(g, W, H, items, aIdx, surf, active, onAct, inAct) {
+          g.fillStyle = surf; g.fillRect(0, H - 76, W, 76);
+          const iw = W / items.length;
+          items.forEach((it, i) => {
+            const cx = iw * (i + 0.5);
+            const act = (i === aIdx);
+            if (act) { g.fillStyle = active; _rr(g, cx - 30, H - 66, 60, 32, 16); g.fill(); }
+            g.fillStyle = act ? onAct : inAct;
+            g.font = '18px sans-serif'; g.textAlign = 'center';
+            g.fillText(it[0], cx, H - 44);
+            g.fillStyle = act ? active : inAct;
+            g.font = '500 11px sans-serif';
+            g.fillText(it[1], cx, H - 14);
+          });
+          g.textAlign = 'left';
+        }
         function _makeUITex(drawFn) {
           const cv = document.createElement('canvas');
           cv.width = 512; cv.height = 512;
@@ -2004,434 +2060,531 @@
           t.needsUpdate = true;
           return t;
         }
-        // ── 各 UI drawer ──
-        function _drawHeader(g, W, c, title) {
-          g.fillStyle = c; g.fillRect(0, 0, W, 54);
-          g.fillStyle = '#fff'; g.font = 'bold 22px sans-serif';
-          g.textAlign = 'left'; g.fillText(title, 18, 35);
-        }
-        // 1. MailBox (メール)
-        function _ui_mail(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#1a73e8', 'MailBox');
-          const names = ['Alex Chen', 'Taro Suzuki', 'Maria Garcia', 'Sam Lee', 'Emma Davis', 'Yuki Tanaka'];
-          const subs = ['Project update', 'Meeting Nov 15', 'Weekly report', 'Lunch?', 'Review needed', 'Welcome!'];
-          const cols = ['#ef5350', '#42a5f5', '#66bb6a', '#ffb74d', '#ab47bc', '#26a69a'];
-          for (let i = 0; i < 8; i++) {
-            const y = 72 + i * 54;
-            g.fillStyle = cols[i % 6];
-            g.beginPath(); g.arc(32, y + 22, 18, 0, 6.28); g.fill();
-            g.fillStyle = '#212121'; g.font = 'bold 15px sans-serif';
-            g.fillText(names[i % 6], 62, y + 18);
-            g.fillStyle = '#616161'; g.font = '13px sans-serif';
-            g.fillText(subs[i % 6], 62, y + 36);
-            g.fillStyle = '#e0e0e0'; g.fillRect(0, y + 50, W, 1);
-          }
-        }
-        // 2. MonthPlanner (カレンダー)
-        function _ui_calendar(g, W, H) {
-          g.fillStyle = '#fafafa'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#1565c0', 'November 2026');
-          const days = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-          const cw = W / 7;
-          g.textAlign = 'center';
-          for (let i = 0; i < 7; i++) {
-            g.fillStyle = (i === 0 || i === 6) ? '#e57373' : '#424242';
-            g.font = 'bold 14px sans-serif';
-            g.fillText(days[i], cw * (i + 0.5), 78);
-          }
-          const ch = (H - 95) / 5;
-          let d = 1;
-          const evCols = ['#4caf50', '#2196f3', '#ff9800', '#e91e63'];
-          for (let r = 0; r < 5; r++) {
-            for (let c = 0; c < 7; c++) {
-              const x = cw * c, y = 92 + ch * r;
-              g.fillStyle = '#fff'; g.fillRect(x + 2, y + 2, cw - 4, ch - 4);
-              if (d <= 30) {
-                g.fillStyle = '#212121'; g.font = '13px sans-serif';
-                g.textAlign = 'left'; g.fillText(String(d), x + 6, y + 20);
-                if (d % 4 === 0) {
-                  g.fillStyle = evCols[d % 4]; g.fillRect(x + 4, y + 30, cw - 8, 9);
-                }
-                if (d % 7 === 0) {
-                  g.fillStyle = evCols[(d + 1) % 4]; g.fillRect(x + 4, y + 42, cw - 8, 9);
-                }
-                d++;
-              }
-            }
-          }
-          g.textAlign = 'left';
-        }
-        // 3. Atlas (地図)
-        function _ui_map(g, W, H) {
-          g.fillStyle = '#e8eef0'; g.fillRect(0, 0, W, H);
-          g.strokeStyle = '#fff'; g.lineWidth = 10;
-          g.beginPath();
-          g.moveTo(0, H * 0.3); g.lineTo(W, H * 0.35);
-          g.moveTo(0, H * 0.65); g.lineTo(W, H * 0.7);
-          g.moveTo(W * 0.25, 0); g.lineTo(W * 0.22, H);
-          g.moveTo(W * 0.7, 0); g.lineTo(W * 0.72, H);
-          g.stroke();
-          g.fillStyle = '#c8e6c9';
-          g.fillRect(W * 0.73, H * 0.08, W * 0.22, H * 0.22);
-          g.fillStyle = '#90caf9';
-          g.beginPath(); g.ellipse(W * 0.4, H * 0.75, 90, 55, 0, 0, 6.28); g.fill();
-          const pins = [
-            { x: 0.4, y: 0.4, c: '#ea4335' },
-            { x: 0.6, y: 0.52, c: '#34a853' },
-            { x: 0.82, y: 0.65, c: '#4285f4' },
-            { x: 0.15, y: 0.5, c: '#fbbc04' },
-          ];
-          pins.forEach(p => {
-            const px = W * p.x, py = H * p.y;
-            g.fillStyle = p.c;
-            g.beginPath(); g.ellipse(px, py, 14, 18, 0, 0, 6.28); g.fill();
-            g.fillStyle = '#fff'; g.beginPath(); g.arc(px, py - 3, 5, 0, 6.28); g.fill();
-          });
-          g.fillStyle = '#fff'; g.fillRect(15, 15, W - 30, 42);
-          g.strokeStyle = '#bdbdbd'; g.lineWidth = 1;
-          g.strokeRect(15, 15, W - 30, 42);
-          g.fillStyle = '#9e9e9e'; g.font = '14px sans-serif';
-          g.fillText('🔍  Search location', 30, 41);
-        }
-        // 4. VideoReel (動画)
-        function _ui_video(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#000', 'VideoReel');
-          g.fillStyle = '#ff0000'; g.beginPath();
-          g.moveTo(W - 50, 20); g.lineTo(W - 20, 27); g.lineTo(W - 50, 34); g.closePath(); g.fill();
-          const titles = ['Daily Vlog #42', 'Tech Review 2026', 'Travel Journal', 'Gaming Stream', 'Music Mix'];
-          for (let i = 0; i < 4; i++) {
-            const y = 68 + i * 102;
-            const thumbColor = ['#78909c', '#8d6e63', '#5e35b1', '#00897b'][i];
-            g.fillStyle = thumbColor; g.fillRect(14, y, 170, 95);
-            g.fillStyle = 'rgba(0,0,0,0.7)';
-            g.beginPath(); g.arc(99, y + 47, 22, 0, 6.28); g.fill();
-            g.fillStyle = '#fff';
-            g.beginPath(); g.moveTo(92, y + 37); g.lineTo(92, y + 57); g.lineTo(112, y + 47); g.closePath(); g.fill();
-            g.fillStyle = 'rgba(0,0,0,0.8)'; g.fillRect(160, y + 78, 24, 15);
-            g.fillStyle = '#fff'; g.font = '11px sans-serif';
-            g.fillText('12:34', 162, y + 90);
-            g.fillStyle = '#212121'; g.font = 'bold 15px sans-serif';
-            g.fillText(titles[i % 5], 200, y + 22);
-            g.fillStyle = '#616161'; g.font = '12px sans-serif';
-            g.fillText('ChannelName', 200, y + 42);
-            g.fillText('28K views · 2 days ago', 200, y + 62);
-          }
-        }
-        // 5. ShopMart (ショッピング)
-        function _ui_shop(g, W, H) {
-          g.fillStyle = '#f5f5f5'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#ff6f00', 'ShopMart');
-          const prods = [
-            { n: 'Headphones', p: '¥8,980', c: '#5c6bc0' },
-            { n: 'Backpack',   p: '¥12,500', c: '#8d6e63' },
-            { n: 'Watch',      p: '¥24,800', c: '#424242' },
-            { n: 'Camera',     p: '¥48,000', c: '#616161' },
-            { n: 'Sneakers',   p: '¥6,500', c: '#e53935' },
-            { n: 'Mug',        p: '¥1,980', c: '#43a047' },
-          ];
-          for (let i = 0; i < 6; i++) {
-            const col = i % 2, row = Math.floor(i / 2);
-            const x = 16 + col * (W / 2 - 8);
-            const y = 72 + row * 148;
-            g.fillStyle = '#fff'; g.fillRect(x, y, W / 2 - 24, 140);
-            g.fillStyle = prods[i].c; g.fillRect(x + 8, y + 8, W / 2 - 40, 80);
-            g.fillStyle = '#212121'; g.font = 'bold 14px sans-serif';
-            g.fillText(prods[i].n, x + 10, y + 108);
-            g.fillStyle = '#ff6f00'; g.font = 'bold 14px sans-serif';
-            g.fillText(prods[i].p, x + 10, y + 128);
-          }
-        }
-        // 6. SkyWatch (天気)
-        function _ui_weather(g, W, H) {
-          const grad = g.createLinearGradient(0, 0, 0, H);
-          grad.addColorStop(0, '#4fc3f7'); grad.addColorStop(1, '#0288d1');
-          g.fillStyle = grad; g.fillRect(0, 0, W, H);
-          g.fillStyle = '#fff'; g.font = 'bold 20px sans-serif';
-          g.textAlign = 'center';
-          g.fillText('Tokyo', W / 2, 60);
-          g.font = '80px sans-serif';
-          g.fillText('☀', W / 2, 180);
-          g.font = 'bold 72px sans-serif';
-          g.fillText('18°', W / 2, 260);
-          g.font = '16px sans-serif';
-          g.fillText('Clear · Feels like 17°', W / 2, 290);
-          g.textAlign = 'left';
-          // forecast row
-          const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-          const temps = ['19', '17', '15', '20', '22'];
-          const icons = ['☀', '⛅', '☁', '🌦', '☀'];
-          for (let i = 0; i < 5; i++) {
-            const x = 20 + i * 95;
-            g.fillStyle = 'rgba(255,255,255,0.2)';
-            g.fillRect(x, 340, 85, 130);
-            g.fillStyle = '#fff'; g.font = '14px sans-serif';
-            g.textAlign = 'center';
-            g.fillText(days[i], x + 42, 365);
-            g.font = '34px sans-serif';
-            g.fillText(icons[i], x + 42, 410);
-            g.font = 'bold 18px sans-serif';
-            g.fillText(temps[i] + '°', x + 42, 450);
-          }
-          g.textAlign = 'left';
-        }
-        // 7. NewsDaily (ニュース)
-        function _ui_news(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#b71c1c', 'NewsDaily');
-          const heads = [
-            'Economy shows signs of growth',
-            'Tech launches new AI model',
-            'Sports: Championship finals start',
-            'Weather alert for weekend',
-            'Science: Mars mission update',
-          ];
-          const cats = ['BUSINESS', 'TECH', 'SPORTS', 'WEATHER', 'SCIENCE'];
-          const colors = ['#78909c', '#5e35b1', '#43a047', '#039be5', '#f4511e'];
-          for (let i = 0; i < 5; i++) {
-            const y = 72 + i * 82;
-            g.fillStyle = colors[i]; g.fillRect(14, y, 110, 70);
-            g.fillStyle = colors[i]; g.font = 'bold 10px sans-serif';
-            g.fillText(cats[i], 135, y + 14);
-            g.fillStyle = '#212121'; g.font = 'bold 14px sans-serif';
-            const lines = _wrap(g, heads[i], W - 150);
-            lines.slice(0, 2).forEach((ln, j) => g.fillText(ln, 135, y + 34 + j * 18));
-            g.fillStyle = '#9e9e9e'; g.font = '11px sans-serif';
-            g.fillText('2 hours ago · 5 min read', 135, y + 68);
-          }
-        }
+        // ── 各 UI drawer (MD3 スタイル) ──
+        // 共通: _wrap helper
         function _wrap(g, text, maxW) {
           const words = text.split(' ');
           const out = []; let cur = '';
           for (const w of words) {
-            const trial = cur ? cur + ' ' + w : w;
-            if (g.measureText(trial).width > maxW) { out.push(cur); cur = w; }
-            else cur = trial;
+            const t = cur ? cur + ' ' + w : w;
+            if (g.measureText(t).width > maxW) { out.push(cur); cur = w; }
+            else cur = t;
           }
           if (cur) out.push(cur);
           return out;
         }
-        // 8. SoundWave (音楽)
-        function _ui_music(g, W, H) {
-          g.fillStyle = '#121212'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#1db954', 'SoundWave');
-          const alb = [
-            { t: 'Summer Nights', a: 'The Lights',    c: '#e91e63' },
-            { t: 'Ocean Dreams',  a: 'Wave Riders',    c: '#2196f3' },
-            { t: 'Midnight Drive', a: 'Neon Pulse',    c: '#9c27b0' },
-            { t: 'Sunrise Mix',   a: 'Daylight Crew',  c: '#ff9800' },
+        // 1. MailBox — primary #6750A4
+        function _ui_mail(g, W, H) {
+          g.fillStyle = '#FFFBFE'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#EADDFF', '#21005E', 'Inbox');
+          _sh(g, 6, 2, 0.06);
+          g.fillStyle = '#E8DEF8';
+          _rr(g, 20, 96, W - 40, 48, 24); g.fill();
+          _nosh(g);
+          g.fillStyle = '#625B71'; g.font = '14px sans-serif';
+          g.fillText('🔍  Search mail', 56, 125);
+          const items = [
+            { n: 'Aiko Tanaka', s: 'Project kickoff tomorrow', p: 'A', c: '#6750A4' },
+            { n: 'Noah Smith',  s: 'Design review notes',       p: 'N', c: '#B3261E' },
+            { n: 'Hana Lee',    s: 'Lunch this Friday?',         p: 'H', c: '#386A20' },
+            { n: 'Ren Watari',  s: 'Weekly report attached',     p: 'R', c: '#7D5260' },
+            { n: 'Mia Park',    s: 'Thanks for the feedback',    p: 'M', c: '#006A6B' },
+            { n: 'Jun Sato',    s: 'Draft ready for review',     p: 'J', c: '#9C4146' },
           ];
-          for (let i = 0; i < 4; i++) {
-            const col = i % 2, row = Math.floor(i / 2);
-            const x = 20 + col * (W / 2);
-            const y = 76 + row * 170;
-            g.fillStyle = alb[i].c; g.fillRect(x, y, W / 2 - 40, W / 2 - 40);
-            g.fillStyle = '#fff'; g.font = 'bold 14px sans-serif';
-            g.fillText(alb[i].t, x, y + W / 2 - 20);
-            g.fillStyle = '#b3b3b3'; g.font = '12px sans-serif';
-            g.fillText(alb[i].a, x, y + W / 2 - 4);
+          for (let i = 0; i < items.length; i++) {
+            const y = 164 + i * 50;
+            g.fillStyle = items[i].c;
+            g.beginPath(); g.arc(40, y + 20, 20, 0, 6.28); g.fill();
+            g.fillStyle = '#fff'; g.font = 'bold 16px sans-serif';
+            g.textAlign = 'center'; g.fillText(items[i].p, 40, y + 26);
+            g.textAlign = 'left';
+            g.fillStyle = '#1C1B1F'; g.font = '500 15px sans-serif';
+            g.fillText(items[i].n, 72, y + 16);
+            g.fillStyle = '#49454E'; g.font = '13px sans-serif';
+            g.fillText(items[i].s, 72, y + 34);
           }
-          // player bar
-          g.fillStyle = '#282828'; g.fillRect(0, H - 80, W, 80);
-          g.fillStyle = '#1db954'; g.fillRect(0, H - 80, W * 0.38, 3);
-          g.fillStyle = '#fff'; g.beginPath(); g.arc(W / 2, H - 40, 20, 0, 6.28); g.fill();
-          g.fillStyle = '#121212';
-          g.beginPath();
-          g.moveTo(W / 2 - 6, H - 51); g.lineTo(W / 2 - 6, H - 29);
-          g.lineTo(W / 2 + 10, H - 40); g.closePath(); g.fill();
+          _fab(g, W, H, '#6750A4', '#FFFFFF', '✎');
         }
-        // 9. GallerySnap (写真)
-        function _ui_photos(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#4285f4', 'GallerySnap');
-          const palette = ['#ef5350','#42a5f5','#66bb6a','#ffb74d','#ab47bc','#26a69a','#8d6e63','#78909c','#ec407a'];
-          const gridS = 3;
-          const cell = (W - 32) / gridS;
-          for (let r = 0; r < 4; r++) {
-            for (let c = 0; c < gridS; c++) {
-              const x = 16 + c * cell, y = 72 + r * cell;
-              g.fillStyle = palette[(r * gridS + c) % 9];
-              g.fillRect(x + 4, y + 4, cell - 8, cell - 8);
-              // simple icon
-              g.fillStyle = 'rgba(255,255,255,0.6)';
-              g.beginPath(); g.arc(x + cell / 2, y + cell / 2 - 10, 14, 0, 6.28); g.fill();
-              g.beginPath();
-              g.moveTo(x + 10, y + cell - 14); g.lineTo(x + cell / 2, y + cell / 2 + 4); g.lineTo(x + cell - 10, y + cell - 14); g.closePath();
-              g.fill();
+        // 2. MonthPlanner — primary #006A6B (teal)
+        function _ui_calendar(g, W, H) {
+          g.fillStyle = '#F7FDFC'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#6FF7F7', '#002020', 'November');
+          const dow = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+          const cw = (W - 32) / 7;
+          g.fillStyle = '#49454E'; g.font = '500 12px sans-serif';
+          g.textAlign = 'center';
+          dow.forEach((d, i) => g.fillText(d, 16 + cw * (i + 0.5), 112));
+          const ch = 44; let day = 1;
+          for (let r = 0; r < 5; r++) {
+            for (let c = 0; c < 7; c++) {
+              const x = 16 + cw * c, y = 128 + ch * r;
+              if (day > 30) continue;
+              const isToday = (day === 9);
+              if (isToday) { g.fillStyle = '#006A6B'; g.beginPath(); g.arc(x + cw / 2, y + 20, 18, 0, 6.28); g.fill(); }
+              g.fillStyle = isToday ? '#FFFFFF' : '#1C1B1F';
+              g.font = (isToday ? 'bold ' : '') + '15px sans-serif';
+              g.fillText(String(day), x + cw / 2, y + 25);
+              if (day % 3 === 0) { g.fillStyle = '#006A6B'; g.beginPath(); g.arc(x + cw / 2, y + 36, 3, 0, 6.28); g.fill(); }
+              day++;
             }
           }
+          g.textAlign = 'left';
+          _sh(g, 10, 2, 0.08);
+          g.fillStyle = '#FFFFFF';
+          _rr(g, 16, 352, W - 32, 110, 24); g.fill();
+          _nosh(g);
+          g.fillStyle = '#1C1B1F'; g.font = '500 13px sans-serif';
+          g.fillText('TODAY · NOV 9', 32, 378);
+          g.fillStyle = '#006A6B'; _rr(g, 32, 390, 4, 54, 2); g.fill();
+          g.fillStyle = '#1C1B1F'; g.font = '500 16px sans-serif';
+          g.fillText('Design Sync', 48, 410);
+          g.fillStyle = '#49454E'; g.font = '13px sans-serif';
+          g.fillText('10:00 — 11:00  ·  Studio A', 48, 432);
+          _fab(g, W, H, '#006A6B', '#FFFFFF', '+');
         }
-        // 10. Memo (ノート)
-        function _ui_notes(g, W, H) {
-          g.fillStyle = '#fafafa'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#fbc02d', 'Memo');
-          const notes = [
-            { c: '#fff176', t: 'Grocery\n- Milk\n- Bread\n- Eggs' },
-            { c: '#aed581', t: 'Meeting\nagenda\n- Q4 plan' },
-            { c: '#90caf9', t: 'Ideas\nnew\nproject\nsketch' },
-            { c: '#f48fb1', t: 'Reminder\nCall dentist' },
-            { c: '#ce93d8', t: 'Book:\nreading list' },
-            { c: '#ffcc80', t: 'Workout\nroutine' },
+        // 3. Atlas — primary #006E1C
+        function _ui_map(g, W, H) {
+          g.fillStyle = '#E6F4EA'; g.fillRect(0, 0, W, H);
+          g.strokeStyle = '#FFFFFF'; g.lineWidth = 14; g.lineCap = 'round';
+          g.beginPath();
+          g.moveTo(0, H * 0.3); g.lineTo(W, H * 0.33);
+          g.moveTo(0, H * 0.68); g.lineTo(W, H * 0.72);
+          g.moveTo(W * 0.25, 0); g.lineTo(W * 0.22, H);
+          g.moveTo(W * 0.72, 0); g.lineTo(W * 0.75, H);
+          g.stroke();
+          g.fillStyle = '#C3EAC6'; _rr(g, W * 0.76, H * 0.1, W * 0.2, H * 0.2, 16); g.fill();
+          g.fillStyle = '#AADEF0';
+          g.beginPath(); g.ellipse(W * 0.4, H * 0.82, 110, 55, 0, 0, 6.28); g.fill();
+          const pins = [
+            { x: 0.42, y: 0.42, c: '#B3261E', k: '★' },
+            { x: 0.62, y: 0.55, c: '#006E1C', k: '◉' },
+            { x: 0.82, y: 0.44, c: '#1A73E8', k: '●' },
+          ];
+          pins.forEach(p => {
+            const px = W * p.x, py = H * p.y;
+            _sh(g, 10, 4, 0.3); g.fillStyle = p.c;
+            g.beginPath(); g.arc(px, py, 20, 0, 6.28); g.fill();
+            _nosh(g);
+            g.fillStyle = '#fff'; g.font = 'bold 16px sans-serif';
+            g.textAlign = 'center'; g.fillText(p.k, px, py + 6);
+            g.textAlign = 'left';
+          });
+          _sh(g, 12, 3, 0.15);
+          g.fillStyle = '#FFFFFF'; _rr(g, 20, 20, W - 40, 56, 28); g.fill();
+          _nosh(g);
+          g.fillStyle = '#49454E'; g.font = '14px sans-serif';
+          g.fillText('🔍  Search places', 56, 54);
+          _sh(g, 14, 4, 0.12);
+          g.fillStyle = '#FFFFFF';
+          _rr(g, 0, H - 132, W, 160, 28); g.fill();
+          _nosh(g);
+          g.fillStyle = '#C8C5CA'; _rr(g, W / 2 - 18, H - 122, 36, 4, 2); g.fill();
+          g.fillStyle = '#1C1B1F'; g.font = '500 18px sans-serif';
+          g.fillText('Blue Hour Cafe', 24, H - 86);
+          g.fillStyle = '#49454E'; g.font = '13px sans-serif';
+          g.fillText('★ 4.6 (120)  ·  Open until 10pm', 24, H - 62);
+          g.fillStyle = '#006E1C'; _rr(g, 24, H - 48, 130, 32, 16); g.fill();
+          g.fillStyle = '#fff'; g.font = '500 13px sans-serif';
+          g.textAlign = 'center'; g.fillText('DIRECTIONS', 89, H - 27);
+          g.textAlign = 'left';
+          g.strokeStyle = '#006E1C'; g.lineWidth = 2;
+          _rr(g, 168, H - 48, 120, 32, 16); g.stroke();
+          g.fillStyle = '#006E1C'; g.font = '500 13px sans-serif';
+          g.textAlign = 'center'; g.fillText('SAVE', 228, H - 27);
+          g.textAlign = 'left';
+        }
+        // 4. VideoReel — primary #B3261E
+        function _ui_video(g, W, H) {
+          g.fillStyle = '#FFFBFE'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#FFDAD4', '#410001', 'VideoReel');
+          const chips = ['All', 'Music', 'Gaming', 'News', 'Live'];
+          let cx = 20;
+          g.font = '500 13px sans-serif';
+          chips.forEach((c, i) => {
+            const w = g.measureText(c).width + 28;
+            g.fillStyle = i === 0 ? '#1C1B1F' : '#F7F2FA';
+            _rr(g, cx, 92, w, 32, 16); g.fill();
+            if (i !== 0) { g.strokeStyle = '#CAC4D0'; g.lineWidth = 1; _rr(g, cx, 92, w, 32, 16); g.stroke(); }
+            g.fillStyle = i === 0 ? '#FFFFFF' : '#1C1B1F';
+            g.textAlign = 'center'; g.fillText(c, cx + w / 2, 113);
+            cx += w + 8;
+          });
+          g.textAlign = 'left';
+          const vids = [
+            { t: 'Journey Through the Alps', ch: 'Travel Nook', v: '128K views', d: '14:22', c: '#5C6BC0' },
+            { t: 'Coding with Coffee',       ch: 'DevCast',     v: '42K views',  d: '08:10', c: '#8D6E63' },
+            { t: 'Ambient Rain  2 hours',    ch: 'SoundScapes', v: '890K views', d: '2:00:00', c: '#37474F' },
+          ];
+          vids.forEach((v, i) => {
+            const y = 148 + i * 120;
+            g.fillStyle = v.c; _rr(g, 16, y, W - 32, 84, 16); g.fill();
+            g.fillStyle = 'rgba(0,0,0,0.7)';
+            _rr(g, W - 72, y + 60, 52, 20, 6); g.fill();
+            g.fillStyle = '#fff'; g.font = '11px sans-serif';
+            g.textAlign = 'center'; g.fillText(v.d, W - 46, y + 75);
+            g.textAlign = 'left';
+            g.fillStyle = 'rgba(255,255,255,0.95)';
+            g.beginPath(); g.arc(W / 2, y + 42, 22, 0, 6.28); g.fill();
+            g.fillStyle = v.c;
+            g.beginPath();
+            g.moveTo(W / 2 - 7, y + 32); g.lineTo(W / 2 - 7, y + 52);
+            g.lineTo(W / 2 + 11, y + 42); g.closePath(); g.fill();
+            g.fillStyle = '#1C1B1F'; g.font = '500 14px sans-serif';
+            g.fillText(v.t, 16, y + 104);
+            g.fillStyle = '#49454E'; g.font = '12px sans-serif';
+            g.fillText(v.ch + '  ·  ' + v.v, 16, y + 121);
+          });
+        }
+        // 5. ShopMart — primary #825500 (amber)
+        function _ui_shop(g, W, H) {
+          g.fillStyle = '#FFFBFF'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#FFDDAE', '#2A1800', 'ShopMart');
+          const prods = [
+            { n: 'Headphones',  p: '¥8,980',  c: '#5C6BC0', b: '#E8EAF6' },
+            { n: 'Backpack',    p: '¥12,500', c: '#8D6E63', b: '#EFEBE9' },
+            { n: 'Smart Watch', p: '¥24,800', c: '#424242', b: '#ECEFF1' },
+            { n: 'Camera',      p: '¥48,000', c: '#616161', b: '#F5F5F5' },
+            { n: 'Sneakers',    p: '¥6,500',  c: '#E53935', b: '#FFEBEE' },
+            { n: 'Ceramic Mug', p: '¥1,980',  c: '#43A047', b: '#E8F5E9' },
           ];
           for (let i = 0; i < 6; i++) {
             const col = i % 2, row = Math.floor(i / 2);
-            const x = 20 + col * (W / 2);
-            const y = 76 + row * 148;
-            g.fillStyle = notes[i].c; g.fillRect(x, y, W / 2 - 40, 130);
-            g.fillStyle = '#424242'; g.font = '13px sans-serif';
-            notes[i].t.split('\n').forEach((ln, j) => g.fillText(ln, x + 10, y + 22 + j * 18));
+            const cardW = (W - 48) / 2;
+            const x = 16 + col * (cardW + 16);
+            const y = 96 + row * 130;
+            _sh(g, 6, 2, 0.08);
+            g.fillStyle = '#FFFFFF'; _rr(g, x, y, cardW, 118, 20); g.fill();
+            _nosh(g);
+            g.fillStyle = prods[i].b; _rr(g, x + 8, y + 8, cardW - 16, 60, 14); g.fill();
+            g.fillStyle = prods[i].c; _rr(g, x + cardW / 2 - 16, y + 20, 32, 36, 6); g.fill();
+            g.fillStyle = '#1C1B1F'; g.font = '500 13px sans-serif';
+            g.fillText(prods[i].n, x + 12, y + 86);
+            g.fillStyle = '#825500'; g.font = 'bold 14px sans-serif';
+            g.fillText(prods[i].p, x + 12, y + 106);
           }
+          _fab(g, W, H, '#825500', '#FFFFFF', '🛒');
         }
-        // 11. LangSwap (翻訳)
-        function _ui_translate(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#4285f4', 'LangSwap');
-          g.fillStyle = '#e3f2fd'; g.fillRect(16, 78, W - 32, H * 0.38);
-          g.fillStyle = '#1565c0'; g.font = 'bold 12px sans-serif';
-          g.fillText('ENGLISH', 24, 100);
-          g.fillStyle = '#212121'; g.font = '18px sans-serif';
-          const en = 'Hello, how are you today?';
-          _wrap(g, en, W - 48).forEach((ln, j) => g.fillText(ln, 24, 130 + j * 26));
-          // arrow
-          g.fillStyle = '#4285f4';
-          g.beginPath();
-          g.arc(W / 2, H * 0.52, 22, 0, 6.28); g.fill();
-          g.fillStyle = '#fff'; g.font = 'bold 18px sans-serif';
+        // 6. SkyWatch — primary #0061A4
+        function _ui_weather(g, W, H) {
+          const grad = g.createLinearGradient(0, 0, 0, H);
+          grad.addColorStop(0, '#89CFF0'); grad.addColorStop(1, '#0061A4');
+          g.fillStyle = grad; g.fillRect(0, 0, W, H);
+          g.fillStyle = 'rgba(255,255,255,0.9)'; g.font = '500 20px sans-serif';
           g.textAlign = 'center';
-          g.fillText('↕', W / 2, H * 0.52 + 6);
+          g.fillText('Tokyo', W / 2, 60);
+          g.fillStyle = '#fff'; g.font = '90px sans-serif';
+          g.fillText('☀', W / 2, 190);
+          g.font = 'bold 72px sans-serif'; g.fillText('18°', W / 2, 272);
+          g.font = '14px sans-serif'; g.fillStyle = 'rgba(255,255,255,0.85)';
+          g.fillText('Clear  ·  Feels like 17°', W / 2, 300);
           g.textAlign = 'left';
-          g.fillStyle = '#fff3e0'; g.fillRect(16, H * 0.6, W - 32, H * 0.35);
-          g.fillStyle = '#ef6c00'; g.font = 'bold 12px sans-serif';
-          g.fillText('日本語', 24, H * 0.6 + 22);
-          g.fillStyle = '#212121'; g.font = '18px sans-serif';
-          g.fillText('こんにちは、', 24, H * 0.6 + 55);
-          g.fillText('今日はお元気ですか？', 24, H * 0.6 + 82);
+          g.fillStyle = 'rgba(255,255,255,0.18)';
+          _rr(g, 20, 332, W - 40, 128, 24); g.fill();
+          const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+          const temps = ['19', '17', '15', '20', '22'];
+          const icons = ['☀', '⛅', '☁', '🌦', '☀'];
+          const cw = (W - 40) / 5;
+          g.textAlign = 'center';
+          for (let i = 0; i < 5; i++) {
+            const cx2 = 20 + cw * (i + 0.5);
+            g.fillStyle = 'rgba(255,255,255,0.75)'; g.font = '500 13px sans-serif';
+            g.fillText(days[i], cx2, 358);
+            g.fillStyle = '#fff'; g.font = '30px sans-serif';
+            g.fillText(icons[i], cx2, 400);
+            g.font = 'bold 18px sans-serif';
+            g.fillText(temps[i] + '°', cx2, 442);
+          }
+          g.textAlign = 'left';
         }
-        // 12. DocPages (ドキュメント)
+        // 7. NewsDaily — primary #904D00
+        function _ui_news(g, W, H) {
+          g.fillStyle = '#FFFBFE'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#FFDDB0', '#2D1700', 'NewsDaily');
+          const heads = [
+            { h: 'Economy shows signs of growth in Q4',     cat: 'BUSINESS', cc: '#004E60', bg: '#78909C' },
+            { h: 'City opens new waterfront park',           cat: 'LOCAL',    cc: '#386A20', bg: '#AED581' },
+            { h: 'Championship finals start this weekend',   cat: 'SPORTS',   cc: '#904D00', bg: '#FFB74D' },
+            { h: 'Science: new findings on deep-sea life',   cat: 'SCIENCE',  cc: '#4B35A4', bg: '#9575CD' },
+          ];
+          heads.forEach((n, i) => {
+            const y = 96 + i * 98;
+            _sh(g, 6, 2, 0.08);
+            g.fillStyle = '#FFFFFF';
+            _rr(g, 16, y, W - 32, 86, 18); g.fill();
+            _nosh(g);
+            g.fillStyle = n.bg; _rr(g, 24, y + 8, 100, 70, 14); g.fill();
+            const catW = g.measureText(n.cat).width + 16;
+            g.fillStyle = n.cc; _rr(g, 140, y + 12, catW, 18, 9); g.fill();
+            g.fillStyle = '#fff'; g.font = 'bold 10px sans-serif';
+            g.textAlign = 'center';
+            g.fillText(n.cat, 140 + catW / 2, y + 25);
+            g.textAlign = 'left';
+            g.fillStyle = '#1C1B1F'; g.font = '500 14px sans-serif';
+            const lines = _wrap(g, n.h, W - 160);
+            lines.slice(0, 2).forEach((ln, j) => g.fillText(ln, 140, y + 48 + j * 18));
+            g.fillStyle = '#79747E'; g.font = '11px sans-serif';
+            g.fillText('2h ago  ·  5 min read', 140, y + 78);
+          });
+        }
+        // 8. SoundWave — dark, primary #D0BCFF
+        function _ui_music(g, W, H) {
+          g.fillStyle = '#141218'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#4F378B', '#EADDFF', 'SoundWave');
+          const alb = [
+            { t: 'Summer Nights',  a: 'The Lights',     c: '#F06292' },
+            { t: 'Ocean Dreams',   a: 'Wave Riders',    c: '#64B5F6' },
+            { t: 'Midnight Drive', a: 'Neon Pulse',     c: '#BA68C8' },
+            { t: 'Sunrise Mix',    a: 'Daylight Crew',  c: '#FFB74D' },
+          ];
+          for (let i = 0; i < 4; i++) {
+            const col = i % 2, row = Math.floor(i / 2);
+            const cardW = (W - 48) / 2;
+            const x = 16 + col * (cardW + 16);
+            const y = 100 + row * (cardW + 48);
+            g.fillStyle = alb[i].c; _rr(g, x, y, cardW, cardW, 20); g.fill();
+            g.fillStyle = 'rgba(0,0,0,0.3)';
+            g.beginPath(); g.arc(x + cardW / 2, y + cardW / 2, 28, 0, 6.28); g.fill();
+            g.fillStyle = '#fff'; g.beginPath(); g.arc(x + cardW / 2, y + cardW / 2, 10, 0, 6.28); g.fill();
+            g.fillStyle = '#E6E0E9'; g.font = '500 14px sans-serif';
+            g.fillText(alb[i].t, x, y + cardW + 20);
+            g.fillStyle = '#938F99'; g.font = '12px sans-serif';
+            g.fillText(alb[i].a, x, y + cardW + 38);
+          }
+          g.fillStyle = '#1D1B20'; _rr(g, 0, H - 92, W, 92, 0); g.fill();
+          g.fillStyle = '#D0BCFF'; g.fillRect(0, H - 92, W * 0.38, 3);
+          g.fillStyle = '#4F378B'; g.fillRect(W * 0.38, H - 92, W * 0.62, 3);
+          g.fillStyle = '#D0BCFF';
+          g.beginPath(); g.arc(W / 2, H - 46, 24, 0, 6.28); g.fill();
+          g.fillStyle = '#381E72';
+          g.beginPath();
+          g.moveTo(W / 2 - 7, H - 58); g.lineTo(W / 2 - 7, H - 34);
+          g.lineTo(W / 2 + 11, H - 46); g.closePath(); g.fill();
+          g.fillStyle = '#E6E0E9'; g.font = '500 13px sans-serif';
+          g.fillText('Summer Nights', 16, H - 60);
+          g.fillStyle = '#938F99'; g.font = '11px sans-serif';
+          g.fillText('The Lights', 16, H - 42);
+        }
+        // 9. GallerySnap — primary #9C4146
+        function _ui_photos(g, W, H) {
+          g.fillStyle = '#FFFBFF'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#FFDAD8', '#410006', 'GallerySnap');
+          const palette = ['#EF5350','#42A5F5','#66BB6A','#FFB74D','#AB47BC','#26A69A','#8D6E63','#78909C','#EC407A','#5C6BC0','#FF7043','#9CCC65'];
+          const gridS = 3;
+          const gap = 6;
+          const cell = (W - 32 - gap * (gridS - 1)) / gridS;
+          for (let r = 0; r < 4; r++) {
+            for (let c = 0; c < gridS; c++) {
+              const x = 16 + c * (cell + gap);
+              const y = 96 + r * (cell + gap);
+              g.fillStyle = palette[(r * gridS + c) % palette.length];
+              _rr(g, x, y, cell, cell, 10); g.fill();
+              g.fillStyle = 'rgba(255,255,255,0.45)';
+              g.beginPath(); g.arc(x + cell * 0.72, y + cell * 0.32, cell * 0.12, 0, 6.28); g.fill();
+              g.beginPath();
+              g.moveTo(x + cell * 0.1, y + cell * 0.9);
+              g.lineTo(x + cell * 0.5, y + cell * 0.45);
+              g.lineTo(x + cell * 0.9, y + cell * 0.9);
+              g.closePath(); g.fill();
+            }
+          }
+          _fab(g, W, H, '#9C4146', '#FFFFFF', '📷');
+        }
+        // 10. Memo — primary #5D4037
+        function _ui_notes(g, W, H) {
+          g.fillStyle = '#FDF8F6'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#FFDBCA', '#2B1707', 'Memo');
+          const notes = [
+            { c: '#FFF59D', t: 'Grocery\n• Milk\n• Bread\n• Eggs' },
+            { c: '#C5E1A5', t: 'Meeting\nagenda\n• Q4 plan' },
+            { c: '#90CAF9', t: 'Ideas\nnew\nproject\nsketch' },
+            { c: '#F48FB1', t: 'Reminder\nCall dentist' },
+            { c: '#CE93D8', t: 'Books:\nreading list' },
+            { c: '#FFCC80', t: 'Workout\nroutine' },
+          ];
+          for (let i = 0; i < 6; i++) {
+            const col = i % 2, row = Math.floor(i / 2);
+            const cardW = (W - 48) / 2;
+            const x = 16 + col * (cardW + 16);
+            const y = 96 + row * 124;
+            _sh(g, 4, 2, 0.1);
+            g.fillStyle = notes[i].c;
+            _rr(g, x, y, cardW, 112, 14); g.fill();
+            _nosh(g);
+            g.fillStyle = '#5D4037'; g.font = '13px sans-serif';
+            notes[i].t.split('\n').forEach((ln, j) => g.fillText(ln, x + 14, y + 24 + j * 18));
+          }
+          _fab(g, W, H, '#5D4037', '#FFFFFF', '+');
+        }
+        // 11. LangSwap — primary #4B35A4
+        function _ui_translate(g, W, H) {
+          g.fillStyle = '#FFFBFF'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#E4DEFF', '#17005D', 'LangSwap');
+          _sh(g, 6, 2, 0.06);
+          g.fillStyle = '#FFFFFF'; _rr(g, 20, 96, W - 40, 150, 20); g.fill();
+          _nosh(g);
+          g.fillStyle = '#4B35A4'; g.font = '500 11px sans-serif';
+          g.fillText('ENGLISH', 36, 118);
+          g.fillStyle = '#1C1B1F'; g.font = '20px sans-serif';
+          const en = 'Hello, how are you today?';
+          _wrap(g, en, W - 80).forEach((ln, j) => g.fillText(ln, 36, 148 + j * 28));
+          g.fillStyle = '#4B35A4';
+          g.beginPath(); g.arc(W - 48, 220, 20, 0, 6.28); g.fill();
+          g.fillStyle = '#fff'; g.font = 'bold 18px sans-serif';
+          g.textAlign = 'center'; g.fillText('🔊', W - 48, 227);
+          g.textAlign = 'left';
+          _sh(g, 10, 4, 0.2);
+          g.fillStyle = '#4B35A4';
+          g.beginPath(); g.arc(W / 2, 268, 26, 0, 6.28); g.fill();
+          _nosh(g);
+          g.fillStyle = '#fff'; g.font = 'bold 22px sans-serif';
+          g.textAlign = 'center'; g.fillText('⇅', W / 2, 276);
+          g.textAlign = 'left';
+          _sh(g, 6, 2, 0.06);
+          g.fillStyle = '#E4DEFF'; _rr(g, 20, 300, W - 40, 150, 20); g.fill();
+          _nosh(g);
+          g.fillStyle = '#4B35A4'; g.font = '500 11px sans-serif';
+          g.fillText('日本語', 36, 322);
+          g.fillStyle = '#1C1B1F'; g.font = '20px sans-serif';
+          g.fillText('こんにちは、', 36, 356);
+          g.fillText('今日はお元気ですか？', 36, 388);
+          g.fillStyle = '#4B35A4';
+          g.beginPath(); g.arc(W - 48, 424, 20, 0, 6.28); g.fill();
+          g.fillStyle = '#fff'; g.font = 'bold 18px sans-serif';
+          g.textAlign = 'center'; g.fillText('🔊', W - 48, 431);
+          g.textAlign = 'left';
+        }
+        // 12. DocPages — primary #006874
         function _ui_doc(g, W, H) {
-          g.fillStyle = '#f1f3f4'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#1a73e8', 'DocPages');
-          g.fillStyle = '#fff'; g.fillRect(40, 76, W - 80, H - 90);
-          // toolbar simul
-          g.fillStyle = '#e8eaed'; g.fillRect(40, 76, W - 80, 32);
-          const btns = ['B', 'I', 'U', '•', '1.', '←', '→'];
-          g.fillStyle = '#5f6368'; g.font = 'bold 13px sans-serif';
-          btns.forEach((b, i) => g.fillText(b, 54 + i * 32, 97));
-          // doc content (simulated lines)
-          g.fillStyle = '#212121'; g.font = 'bold 18px sans-serif';
-          g.fillText('Weekly Report', 56, 140);
-          g.fillStyle = '#424242'; g.font = '13px sans-serif';
+          g.fillStyle = '#F7FAFA'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#97F0FF', '#001F24', 'DocPages');
+          _sh(g, 8, 2, 0.08);
+          g.fillStyle = '#FFFFFF';
+          _rr(g, 24, 96, W - 48, H - 112, 20); g.fill();
+          _nosh(g);
+          g.fillStyle = '#E0F7FA'; _rr(g, 24, 96, W - 48, 44, 20); g.fill();
+          const btns = ['B', 'I', 'U', '•', '1.', '«', '»'];
+          g.fillStyle = '#006874'; g.font = 'bold 14px sans-serif';
+          btns.forEach((b, i) => g.fillText(b, 44 + i * 34, 124));
+          g.fillStyle = '#1C1B1F'; g.font = 'bold 20px sans-serif';
+          g.fillText('Weekly Report', 44, 170);
+          g.fillStyle = '#49454E'; g.font = '13px sans-serif';
           const lines = [
             'This week we completed the initial design',
             'phase and started prototype development.',
-            '', 'Highlights:',
+            '',
+            'Highlights',
             '  • Reviewed user research findings',
             '  • Finalized color palette and typography',
-            '  • Set up repository and CI/CD pipeline',
-            '', 'Next week we will begin usability',
+            '  • Set up repository and CI pipeline',
+            '',
+            'Next week we will begin usability',
             'testing with 5 participants.',
           ];
-          lines.forEach((ln, j) => g.fillText(ln, 56, 168 + j * 22));
+          lines.forEach((ln, j) => g.fillText(ln, 44, 200 + j * 22));
+          _fab(g, W, H, '#006874', '#FFFFFF', '✎');
         }
-        // 13. FindQuick (検索)
+        // 13. FindQuick — primary #1A73E8
         function _ui_search(g, W, H) {
-          g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-          // top logo-ish
-          g.fillStyle = '#4285f4'; g.font = 'bold 36px sans-serif';
+          g.fillStyle = '#FFFBFE'; g.fillRect(0, 0, W, H);
+          g.fillStyle = '#1C1B1F'; g.font = 'bold 36px sans-serif';
           g.textAlign = 'center';
-          g.fillText('F', W / 2 - 60, 80);
-          g.fillStyle = '#ea4335'; g.fillText('i', W / 2 - 40, 80);
-          g.fillStyle = '#fbbc04'; g.fillText('n', W / 2 - 18, 80);
-          g.fillStyle = '#4285f4'; g.fillText('d', W / 2 + 10, 80);
-          g.fillStyle = '#34a853'; g.fillText('Q', W / 2 + 35, 80);
-          g.fillStyle = '#ea4335'; g.fillText('k', W / 2 + 65, 80);
+          g.fillText('FindQuick', W / 2, 72);
           g.textAlign = 'left';
-          // search box
-          g.fillStyle = '#fff'; g.strokeStyle = '#dfe1e5'; g.lineWidth = 1;
-          g.fillRect(40, 110, W - 80, 44); g.strokeRect(40, 110, W - 80, 44);
-          g.fillStyle = '#5f6368'; g.font = '14px sans-serif';
-          g.fillText('🔍', 52, 138);
-          g.fillText('best cafe near me', 80, 138);
-          // results
+          _sh(g, 10, 2, 0.08);
+          g.fillStyle = '#F7F2FA';
+          _rr(g, 24, 96, W - 48, 52, 26); g.fill();
+          _nosh(g);
+          g.fillStyle = '#49454E'; g.font = '15px sans-serif';
+          g.fillText('🔍  best cafe near me', 48, 127);
           const results = [
-            { t: 'Cozy Corner Cafe', u: 'cozycorner.example.com', d: 'Local coffee shop with breakfast menu...' },
-            { t: 'Downtown Brew Lab', u: 'brewlab.example.com', d: 'Specialty coffee roasters, open 7am-9pm...' },
-            { t: 'Riverside Espresso', u: 'riverside.example.com', d: 'Riverside seating, pastries and light meals...' },
+            { t: 'Cozy Corner Cafe',    u: 'cozycorner.example', d: 'Local coffee shop with breakfast menu and free wifi' },
+            { t: 'Downtown Brew Lab',   u: 'brewlab.example',    d: 'Specialty coffee roasters, open 7am to 9pm daily' },
+            { t: 'Riverside Espresso',  u: 'riverside.example',  d: 'Riverside seating, pastries and light meals' },
+            { t: 'The Morning Grind',   u: 'morning.example',    d: 'Hand-brewed drip and seasonal blends' },
           ];
           results.forEach((r, i) => {
-            const y = 180 + i * 85;
-            g.fillStyle = '#5f6368'; g.font = '12px sans-serif';
-            g.fillText(r.u, 40, y);
-            g.fillStyle = '#1a0dab'; g.font = '16px sans-serif';
-            g.fillText(r.t, 40, y + 22);
-            g.fillStyle = '#4d5156'; g.font = '13px sans-serif';
-            g.fillText(r.d, 40, y + 44);
+            const y = 180 + i * 78;
+            g.fillStyle = '#79747E'; g.font = '12px sans-serif';
+            g.fillText(r.u, 24, y);
+            g.fillStyle = '#1A73E8'; g.font = '16px sans-serif';
+            g.fillText(r.t, 24, y + 22);
+            g.fillStyle = '#49454E'; g.font = '13px sans-serif';
+            g.fillText(r.d, 24, y + 44);
           });
         }
-        // 14. ChatBox (チャット)
+        // 14. ChatBox — primary #386A20
         function _ui_chat(g, W, H) {
-          g.fillStyle = '#eceff1'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#0b8043', 'ChatBox · Alex');
+          g.fillStyle = '#F7FAF2'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#B6F2A1', '#002204', 'ChatBox  ·  Alex');
           const msgs = [
             { r: false, t: 'Hey! Are you free tomorrow?' },
             { r: true,  t: 'Yeah, what time?' },
             { r: false, t: 'Around 2pm works?' },
             { r: true,  t: 'Perfect, see you then!' },
-            { r: false, t: 'Great! Should we meet at the cafe?' },
+            { r: false, t: 'Great! Meet at the cafe?' },
             { r: true,  t: 'Sounds good 👍' },
           ];
+          g.font = '14px sans-serif';
           msgs.forEach((m, i) => {
-            const y = 76 + i * 56;
+            const y = 96 + i * 54;
+            const bw = g.measureText(m.t).width + 32;
             if (m.r) {
-              const bw = g.measureText(m.t).width + 24;
-              g.fillStyle = '#dcf8c6'; g.fillRect(W - bw - 16, y, bw, 42);
-              g.fillStyle = '#212121'; g.font = '14px sans-serif';
-              g.fillText(m.t, W - bw - 4, y + 26);
+              _sh(g, 4, 1, 0.08);
+              g.fillStyle = '#386A20';
+              _rr(g, W - bw - 16, y, bw, 40, 20); g.fill();
+              _nosh(g);
+              g.fillStyle = '#fff'; g.fillText(m.t, W - bw, y + 25);
             } else {
-              const bw = g.measureText(m.t).width + 24;
-              g.fillStyle = '#fff'; g.fillRect(16, y, bw, 42);
-              g.fillStyle = '#212121'; g.font = '14px sans-serif';
-              g.fillText(m.t, 28, y + 26);
+              _sh(g, 4, 1, 0.08);
+              g.fillStyle = '#FFFFFF';
+              _rr(g, 16, y, bw, 40, 20); g.fill();
+              _nosh(g);
+              g.fillStyle = '#1C1B1F'; g.fillText(m.t, 32, y + 25);
             }
           });
-          // input bar
-          g.fillStyle = '#fff'; g.fillRect(12, H - 60, W - 24, 42);
-          g.strokeStyle = '#cfd8dc'; g.strokeRect(12, H - 60, W - 24, 42);
-          g.fillStyle = '#90a4ae'; g.font = '14px sans-serif';
-          g.fillText('Type a message...', 26, H - 32);
-        }
-        // 15. FitPulse (フィットネス)
-        function _ui_fit(g, W, H) {
-          g.fillStyle = '#263238'; g.fillRect(0, 0, W, H);
-          _drawHeader(g, W, '#00bfa5', 'FitPulse');
-          // ring
-          const cx = W / 2, cy = 190, r = 90;
-          g.strokeStyle = '#37474f'; g.lineWidth = 18;
-          g.beginPath(); g.arc(cx, cy, r, 0, 6.28); g.stroke();
-          g.strokeStyle = '#00e676'; g.beginPath();
-          g.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + 6.28 * 0.72); g.stroke();
-          g.fillStyle = '#fff'; g.font = 'bold 38px sans-serif';
-          g.textAlign = 'center';
-          g.fillText('72%', cx, cy + 14);
-          g.font = '14px sans-serif';
-          g.fillText('Daily Goal', cx, cy + 40);
+          _sh(g, 6, -2, 0.1);
+          g.fillStyle = '#FFFFFF';
+          _rr(g, 16, H - 68, W - 32, 52, 26); g.fill();
+          _nosh(g);
+          g.fillStyle = '#79747E'; g.font = '14px sans-serif';
+          g.fillText('Type a message…', 36, H - 36);
+          g.fillStyle = '#386A20';
+          g.beginPath(); g.arc(W - 48, H - 42, 18, 0, 6.28); g.fill();
+          g.fillStyle = '#fff'; g.font = 'bold 14px sans-serif';
+          g.textAlign = 'center'; g.fillText('➤', W - 48, H - 37);
           g.textAlign = 'left';
-          // stats
+        }
+        // 15. FitPulse — dark, primary #4EAE8C
+        function _ui_fit(g, W, H) {
+          g.fillStyle = '#121714'; g.fillRect(0, 0, W, H);
+          _bar(g, W, '#1F4A3A', '#A8F5CF', 'FitPulse');
+          const cx = W / 2, cy = 196, r = 92;
+          g.strokeStyle = '#2A332E'; g.lineWidth = 20; g.lineCap = 'round';
+          g.beginPath(); g.arc(cx, cy, r, 0, 6.28); g.stroke();
+          g.strokeStyle = '#4EAE8C'; g.beginPath();
+          g.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + 6.28 * 0.72); g.stroke();
+          g.fillStyle = '#FFFFFF'; g.font = 'bold 42px sans-serif';
+          g.textAlign = 'center';
+          g.fillText('72%', cx, cy + 12);
+          g.fillStyle = '#A8F5CF'; g.font = '500 13px sans-serif';
+          g.fillText('DAILY GOAL', cx, cy + 40);
+          g.textAlign = 'left';
           const stats = [
-            { l: 'STEPS',    v: '8,420', c: '#00bfa5' },
-            { l: 'CALORIES', v: '1,280', c: '#ff5252' },
-            { l: 'DISTANCE', v: '6.2km',  c: '#448aff' },
-            { l: 'ACTIVE',   v: '58min',  c: '#ffd740' },
+            { l: 'STEPS',    v: '8,420', c: '#4EAE8C' },
+            { l: 'CALORIES', v: '1,280', c: '#FFB4AB' },
+            { l: 'DISTANCE', v: '6.2 km', c: '#A6C8FF' },
+            { l: 'ACTIVE',   v: '58 min', c: '#FFD36B' },
           ];
           stats.forEach((s, i) => {
-            const y = 340 + Math.floor(i / 2) * 75;
-            const x = 20 + (i % 2) * (W / 2);
-            g.fillStyle = '#37474f'; g.fillRect(x, y, W / 2 - 40, 65);
-            g.fillStyle = s.c; g.font = 'bold 10px sans-serif';
-            g.fillText(s.l, x + 12, y + 20);
-            g.fillStyle = '#fff'; g.font = 'bold 22px sans-serif';
-            g.fillText(s.v, x + 12, y + 50);
+            const col = i % 2, row = Math.floor(i / 2);
+            const cardW = (W - 48) / 2;
+            const x = 16 + col * (cardW + 16);
+            const y = 336 + row * 76;
+            g.fillStyle = '#1F2622'; _rr(g, x, y, cardW, 64, 18); g.fill();
+            g.fillStyle = s.c; g.font = '500 11px sans-serif';
+            g.fillText(s.l, x + 14, y + 22);
+            g.fillStyle = '#FFFFFF'; g.font = 'bold 22px sans-serif';
+            g.fillText(s.v, x + 14, y + 50);
           });
         }
         // 全 15 の drawer をテクスチャ化
@@ -2450,43 +2603,71 @@
             metalness: 0.0,
           });
         });
-        // 面の水平方向 extent が禁止エリアに入らないか判定
-        //   yaw 0 or 180 → 面は X 軸方向に w 広がる (法線 ±Z)
-        //   yaw 90 or 270 → 面は Z 軸方向に w 広がる (法線 ±X)
-        function _planeEntersForbidden(x, z, w, yawIdx) {
+        // 画像面の配置: 40m × 40m (スペース原点中心)、高さ上限 20m
+        // 建物と重ならないよう 3D AABB 衝突チェック + 古木 (10,-,-10 r=12) 回避
+        function _planeAABB(x, z, w, h, yawIdx, bottomY) {
           const extendsX = (yawIdx === 0 || yawIdx === 2);
+          const thin = 0.4;    // 面の厚み相当 (safety)
           if (extendsX) {
-            // 面の Z 位置が禁止エリア外なら OK
-            if (z > FORB || z < -FORB) return false;
-            // X 方向の線分 [x - w/2, x + w/2] が禁止 X 範囲 [-5, 5] と重なるか
-            const x1 = x - w / 2, x2 = x + w / 2;
-            return !(x2 <= -FORB || x1 >= FORB);
-          } else {
-            if (x > FORB || x < -FORB) return false;
-            const z1 = z - w / 2, z2 = z + w / 2;
-            return !(z2 <= -FORB || z1 >= FORB);
+            return {
+              minX: x - w / 2, maxX: x + w / 2,
+              minZ: z - thin,  maxZ: z + thin,
+              minY: bottomY,   maxY: bottomY + h,
+            };
           }
+          return {
+            minX: x - thin,  maxX: x + thin,
+            minZ: z - w / 2, maxZ: z + w / 2,
+            minY: bottomY,   maxY: bottomY + h,
+          };
+        }
+        function _aabbIntersect(a, b) {
+          return a.minX < b.maxX && a.maxX > b.minX
+              && a.minZ < b.maxZ && a.maxZ > b.minZ
+              && a.minY < b.maxY && a.maxY > b.minY;
+        }
+        // 古木 (center 10,-10, radius 12, 高さ 20m) との交差判定
+        function _hitAncientTree(ab) {
+          if (ab.minY > 20) return false;
+          const tx = 10, tz = -10, tr = 12;
+          const nx = Math.max(ab.minX, Math.min(tx, ab.maxX));
+          const nz = Math.max(ab.minZ, Math.min(tz, ab.maxZ));
+          const dx = nx - tx, dz = nz - tz;
+          return dx * dx + dz * dz < tr * tr;
         }
         let _imgPlanesPlaced = 0;
         let _imgPlaneAttempts = 0;
-        while (_imgPlanesPlaced < 60 && _imgPlaneAttempts < 600) {
+        while (_imgPlanesPlaced < 60 && _imgPlaneAttempts < 5000) {
           _imgPlaneAttempts++;
           const w = randInt(2, 6);
           const h = randInt(2, 6);
-          const x = randInt(-45, 45);
-          const z = randInt(-45, 45);
+          // 40m × 40m 原点中心: 面中心 x,z ∈ [-20+w/2, 20-w/2] 相当だが整数グリッド簡易化
+          const x = randInt(-18, 18);
+          const z = randInt(-18, 18);
           const yawIdx = randInt(0, 3);
-          if (_planeEntersForbidden(x, z, w, yawIdx)) continue;
+          // 高さ上限 20m: 面底辺 Y は [0, 20-h] の整数
+          const bottomY = randInt(0, 20 - h);
+          const aabb = _planeAABB(x, z, w, h, yawIdx, bottomY);
+          // 40m × 40m 内に AABB が収まるかチェック
+          if (aabb.minX < -20 || aabb.maxX > 20 || aabb.minZ < -20 || aabb.maxZ > 20) continue;
+          // 建物衝突チェック
+          let hit = false;
+          for (let bi = 0; bi < _buildingAABBs.length; bi++) {
+            if (_aabbIntersect(aabb, _buildingAABBs[bi])) { hit = true; break; }
+          }
+          if (hit) continue;
+          if (_hitAncientTree(aabb)) continue;
           const planeGeom = new THREE.PlaneGeometry(w, h);
-          // 15 種類の UI material からランダム選択 (deterministic: _rand シード経由)
           const uiIdx = randInt(0, _uiMaterials.length - 1);
           const plane = new THREE.Mesh(planeGeom, _uiMaterials[uiIdx]);
-          plane.position.set(x, h / 2, z);
+          plane.position.set(x, bottomY + h / 2, z);
           plane.rotation.y = yawIdx * (Math.PI / 2);
           plane.name = 'image-plane-' + _imgPlanesPlaced;
           plane.userData.imageTarget = true;
           plane.userData.uiType = uiIdx;
           cityRoot.add(plane);
+          // 配置済みの面も以降の衝突チェックに加える (面同士の重なり防止)
+          _buildingAABBs.push(aabb);
           _imgPlanesPlaced++;
         }
 
