@@ -1611,6 +1611,120 @@
       window.__skySyncUpdater = () => {
         camera.getWorldPosition(_skyCamPos);
       };
+
+      // ===== Google 検索エンジンをモチーフにした街の生成 =====
+      //   立方体・直方体・球体のみで構成
+      //   参考画像: アニメ風層状都市 + 浮遊キューブ + Google 4 色アクセント
+      //   決定論的 seed で全クライアント同一の街
+      (function _spawnGoogleCity() {
+        // deterministic LCG
+        let _seed = 20261109;
+        const rand = () => {
+          _seed = (_seed * 1664525 + 1013904223) >>> 0;
+          return _seed / 4294967296;
+        };
+        const googleHex = [0x4285F4, 0xEA4335, 0xFBBC04, 0x34A853];   // 青 / 赤 / 黄 / 緑
+        const whiteMat   = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.05 });
+        const lightMat   = new THREE.MeshStandardMaterial({ color: 0xe8ecef, roughness: 0.7, metalness: 0.02 });
+        const googleMats = googleHex.map((c) => new THREE.MeshStandardMaterial({
+          color: c, roughness: 0.4, metalness: 0.1,
+          emissive: c, emissiveIntensity: 0.06,
+        }));
+        const cityRoot = new THREE.Group();
+        cityRoot.name = 'google-city';
+        cityRoot.userData.themeRestrict = 'google';
+
+        // ─ 主要建物: 15m グリッドで配置、原点 (魚軌道) と ancientTree を回避 ─
+        const GRID_SIZE = 15;
+        const CELLS = 12;
+        const HALF = CELLS / 2;
+        for (let gx = 0; gx < CELLS; gx++) {
+          for (let gz = 0; gz < CELLS; gz++) {
+            const cx = (gx - HALF + 0.5) * GRID_SIZE;
+            const cz = (gz - HALF + 0.5) * GRID_SIZE;
+            // 魚軌道 (半径 6m) を回避
+            if (Math.sqrt(cx * cx + cz * cz) < 6) continue;
+            // ancientTree (10, -, -10) 半径 12m を回避
+            const dxt = cx - 10, dzt = cz + 10;
+            if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
+            // 道路用に 20% の確率でスキップ
+            if (rand() < 0.20) continue;
+            const W = 8 + rand() * 4;
+            const D = 8 + rand() * 4;
+            const H = 4 + Math.pow(rand(), 2) * 46;   // 低層寄りに偏った 4〜50m
+            // マテリアル: 8% で Google 色、52% で白、40% で薄灰
+            let mat;
+            const r1 = rand();
+            if (r1 < 0.08) mat = googleMats[Math.floor(rand() * 4)];
+            else if (r1 < 0.60) mat = whiteMat;
+            else mat = lightMat;
+            const building = new THREE.Mesh(new THREE.BoxGeometry(W, H, D), mat);
+            building.position.set(cx, H / 2, cz);
+            cityRoot.add(building);
+            // 窓風アクセント立方体: 35% の建物に 2〜4 個
+            if (rand() < 0.35) {
+              const n = 2 + Math.floor(rand() * 3);
+              for (let i = 0; i < n; i++) {
+                const asz = 0.5 + rand() * 0.6;
+                const amat = googleMats[Math.floor(rand() * 4)];
+                const theta = rand() * Math.PI * 2;
+                const ay = 2 + rand() * (H - 2);
+                const accent = new THREE.Mesh(new THREE.BoxGeometry(asz, asz, asz), amat);
+                accent.position.set(
+                  cx + Math.cos(theta) * (W / 2 + 0.3),
+                  ay,
+                  cz + Math.sin(theta) * (D / 2 + 0.3)
+                );
+                cityRoot.add(accent);
+              }
+            }
+          }
+        }
+
+        // ─ 空中の浮遊キューブ (画像4 インスパイア、ドリーミー) ─
+        for (let i = 0; i < 80; i++) {
+          const size = 0.6 + rand() * 1.4;
+          const x = (rand() - 0.5) * 180;
+          const z = (rand() - 0.5) * 180;
+          const y = 30 + rand() * 55;
+          const useColor = rand() < 0.4;
+          const mat = useColor ? googleMats[Math.floor(rand() * 4)] : whiteMat;
+          const f = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
+          f.position.set(x, y, z);
+          f.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
+          cityRoot.add(f);
+        }
+
+        // ─ Google ロゴ 4 色の大球 (象限に配置、Google 検索の "G" のイメージ) ─
+        const logoSpheres = [
+          { x:  35, z: -30, r: 3.0, c: 0 },   // 青 (青象限)
+          { x: -45, z:  25, r: 3.0, c: 1 },   // 赤
+          { x:  25, z:  45, r: 3.0, c: 2 },   // 黄
+          { x: -30, z: -50, r: 3.0, c: 3 },   // 緑
+        ];
+        logoSpheres.forEach((s) => {
+          const mesh = new THREE.Mesh(new THREE.SphereGeometry(s.r, 24, 16), googleMats[s.c]);
+          mesh.position.set(s.x, s.r, s.z);
+          cityRoot.add(mesh);
+        });
+
+        // ─ 小球をランダム散布 (画像2 の装飾要素) ─
+        for (let i = 0; i < 25; i++) {
+          const r = 0.7 + rand() * 1.5;
+          const x = (rand() - 0.5) * 150;
+          const z = (rand() - 0.5) * 150;
+          if (Math.sqrt(x * x + z * z) < 5) continue;
+          const y = r + rand() * 25;
+          const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(r, 16, 12),
+            googleMats[Math.floor(rand() * 4)]
+          );
+          sphere.position.set(x, y, z);
+          cityRoot.add(sphere);
+        }
+
+        _themeGoogleGroup.add(cityRoot);
+      })();
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
