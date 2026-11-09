@@ -1885,16 +1885,38 @@
         }
 
         // === グリッド配置 (角は 1m グリッドに整列) ===
-        //   原点中心 10m × 10m (|x|<5 && |z|<5) に建物角が入ることを禁止
+        //   方針2: 禁止エリア (10m × 10m = [-5,5]×[-5,5]) に重なるセルは、
+        //         セル矩形をクリップして残った "valid region" 内に建物を配置
+        //         結果として空白はちょうど 10m × 10m に収まる
         const CELL = 15;
         const CELLS = 12;
         const HALF = CELLS / 2;
-        // 建物フットプリントが 10x10 禁止エリアと重ならないか判定
-        function _overlapsForbidden(gx, gz, w, d) {
-          // 建物の範囲: [gx, gx+w] × [gz, gz+d]
-          // 禁止エリア: [-5, 5] × [-5, 5]
-          // 重なり条件: gx < 5 && gx+w > -5 && gz < 5 && gz+d > -5
-          return (gx < 5 && (gx + w) > -5 && gz < 5 && (gz + d) > -5);
+        const FORB = 5;   // 禁止エリア半径 (= 10m × 10m)
+        // セル矩形から禁止エリアを除いた "valid region" を返す (なければ null)
+        function _validRegionForCell(cellMinX, cellMinZ) {
+          const cellMaxX = cellMinX + CELL;
+          const cellMaxZ = cellMinZ + CELL;
+          // セルが禁止エリアと重なるか?
+          const overlapsX = (cellMinX < FORB && cellMaxX > -FORB);
+          const overlapsZ = (cellMinZ < FORB && cellMaxZ > -FORB);
+          if (!overlapsX || !overlapsZ) {
+            // 禁止エリアと重ならない → セル全体が使える
+            return { minX: cellMinX, maxX: cellMaxX, minZ: cellMinZ, maxZ: cellMaxZ };
+          }
+          // 両軸で重なる場合、セルを 1 象限に clip (禁止エリアから遠い側)
+          let nMinX = cellMinX, nMaxX = cellMaxX;
+          let nMinZ = cellMinZ, nMaxZ = cellMaxZ;
+          // X 方向 clip: セル中心が原点より負側なら右端を -5 に、正側なら左端を 5 に
+          const cxC = (cellMinX + cellMaxX) / 2;
+          if (cxC < 0) nMaxX = Math.min(nMaxX, -FORB);
+          else         nMinX = Math.max(nMinX,  FORB);
+          const czC = (cellMinZ + cellMaxZ) / 2;
+          if (czC < 0) nMaxZ = Math.min(nMaxZ, -FORB);
+          else         nMinZ = Math.max(nMinZ,  FORB);
+          const w = nMaxX - nMinX;
+          const d = nMaxZ - nMinZ;
+          if (w < 3 || d < 3) return null;   // valid region が小さすぎる
+          return { minX: nMinX, maxX: nMaxX, minZ: nMinZ, maxZ: nMaxZ };
         }
         for (let gcx = 0; gcx < CELLS; gcx++) {
           for (let gcz = 0; gcz < CELLS; gcz++) {
@@ -1907,14 +1929,19 @@
             if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
             // 道路: 20% の確率でセルをスキップ
             if (rand() < 0.20) continue;
-            const footW = randInt(8, 12);
-            const footD = randInt(8, 12);
-            const offX = randInt(0, CELL - footW);
-            const offZ = randInt(0, CELL - footD);
-            const gx = cellGx + offX;
-            const gz = cellGz + offZ;
-            // 10m×10m 禁止エリアに重なるならスキップ
-            if (_overlapsForbidden(gx, gz, footW, footD)) continue;
+            // valid region を計算 (禁止エリアで clip 済)
+            const vr = _validRegionForCell(cellGx, cellGz);
+            if (!vr) continue;
+            const availW = vr.maxX - vr.minX;
+            const availD = vr.maxZ - vr.minZ;
+            // フットプリント (1m 単位)、valid 領域に合わせて clip
+            let footW = Math.min(randInt(8, 12), availW);
+            let footD = Math.min(randInt(8, 12), availD);
+            if (footW < 3 || footD < 3) continue;
+            const offX = randInt(0, availW - footW);
+            const offZ = randInt(0, availD - footD);
+            const gx = vr.minX + offX;
+            const gz = vr.minZ + offZ;
             const maxH = randInt(5, 50);
             _buildComplex(gx, gz, footW, footD, maxH);
           }
@@ -1965,9 +1992,9 @@
           cityRoot.add(sphere);
         }
 
-        // === 画像貼り付け可能な白い面 × 30 (100m × 100m 内、max 6m × 6m) ===
-        //   床面接地で直立、Y 軸回りにランダム 90° 単位の yaw
-        //   10m × 10m 禁止エリア (|x|<5 && |z|<5) に重ならないよう再試行
+        // === 画像貼り付け可能な白い面 × 60 (100m × 100m 内、max 6m × 6m) ===
+        //   床面接地で直立、Y 軸回りに 0°/90°/180°/270° のいずれか
+        //   10m × 10m 禁止エリアに面の extent が入らないように厳密チェック
         //   userData.imageTarget = true で後段から画像/テクスチャ attach 可能
         const _imgPlaneMat = new THREE.MeshStandardMaterial({
           color: 0xffffff,
@@ -1975,21 +2002,37 @@
           roughness: 0.75,
           metalness: 0.0,
         });
+        // 面の水平方向 extent が禁止エリアに入らないか判定
+        //   yaw 0 or 180 → 面は X 軸方向に w 広がる (法線 ±Z)
+        //   yaw 90 or 270 → 面は Z 軸方向に w 広がる (法線 ±X)
+        function _planeEntersForbidden(x, z, w, yawIdx) {
+          const extendsX = (yawIdx === 0 || yawIdx === 2);
+          if (extendsX) {
+            // 面の Z 位置が禁止エリア外なら OK
+            if (z > FORB || z < -FORB) return false;
+            // X 方向の線分 [x - w/2, x + w/2] が禁止 X 範囲 [-5, 5] と重なるか
+            const x1 = x - w / 2, x2 = x + w / 2;
+            return !(x2 <= -FORB || x1 >= FORB);
+          } else {
+            if (x > FORB || x < -FORB) return false;
+            const z1 = z - w / 2, z2 = z + w / 2;
+            return !(z2 <= -FORB || z1 >= FORB);
+          }
+        }
         let _imgPlanesPlaced = 0;
         let _imgPlaneAttempts = 0;
-        while (_imgPlanesPlaced < 30 && _imgPlaneAttempts < 200) {
+        while (_imgPlanesPlaced < 60 && _imgPlaneAttempts < 600) {
           _imgPlaneAttempts++;
-          const w = randInt(2, 6);      // max 6m
-          const h = randInt(2, 6);      // max 6m
-          const x = randInt(-45, 45);   // 100m × 100m 範囲 (±50m 内)
+          const w = randInt(2, 6);
+          const h = randInt(2, 6);
+          const x = randInt(-45, 45);
           const z = randInt(-45, 45);
-          // 10m × 10m 禁止エリアをスキップ
-          if (Math.abs(x) < 5 && Math.abs(z) < 5) continue;
+          const yawIdx = randInt(0, 3);
+          if (_planeEntersForbidden(x, z, w, yawIdx)) continue;
           const planeGeom = new THREE.PlaneGeometry(w, h);
           const plane = new THREE.Mesh(planeGeom, _imgPlaneMat);
           plane.position.set(x, h / 2, z);
-          // Y 軸 90° 単位の 4 方向
-          plane.rotation.y = randInt(0, 3) * (Math.PI / 2);
+          plane.rotation.y = yawIdx * (Math.PI / 2);
           plane.name = 'image-plane-' + _imgPlanesPlaced;
           plane.userData.imageTarget = true;
           cityRoot.add(plane);
