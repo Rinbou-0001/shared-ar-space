@@ -1930,11 +1930,8 @@
           for (let gcz = 0; gcz < CELLS; gcz++) {
             const cellGx = Math.round((gcx - HALF) * CELL);
             const cellGz = Math.round((gcz - HALF) * CELL);
-            const cxCenter = cellGx + CELL / 2;
-            const czCenter = cellGz + CELL / 2;
-            // ancientTree (10, -, -10) 半径 12m を回避
-            const dxt = cxCenter - 10, dzt = czCenter + 10;
-            if (Math.sqrt(dxt * dxt + dzt * dzt) < 12) continue;
+            // (ancientTree は themeRestrict='default' で Google テーマでは非表示のため
+            //  回避ロジックを削除: 右下象限に建物を配置して均一化)
             // 道路: 20% の確率でセルをスキップ
             if (rand() < 0.20) continue;
             // valid region を計算 (禁止エリアで clip 済)
@@ -2636,15 +2633,7 @@
               && a.minZ < b.maxZ && a.maxZ > b.minZ
               && a.minY < b.maxY && a.maxY > b.minY;
         }
-        // 古木 (center 10,-10, radius 12, 高さ 20m) との交差判定
-        function _hitAncientTree(ab) {
-          if (ab.minY > 20) return false;
-          const tx = 10, tz = -10, tr = 12;
-          const nx = Math.max(ab.minX, Math.min(tx, ab.maxX));
-          const nz = Math.max(ab.minZ, Math.min(tz, ab.maxZ));
-          const dx = nx - tx, dz = nz - tz;
-          return dx * dx + dz * dz < tr * tr;
-        }
+        // (古木は Google テーマで非表示のため回避判定削除)
         // サイズ 3 スケール × 20 枚 = 60 枚目標
         const _sizeBuckets = [
           { lo: 5, hi: 6, target: 20, label: 'L' },
@@ -2678,7 +2667,6 @@
               if (_aabbIntersect(aabb, _buildingAABBs[bi])) { hit = true; break; }
             }
             if (hit) continue;
-            if (_hitAncientTree(aabb)) continue;
             // 面専用キャンバス・マテリアル生成 (アスペクト = w:h 比率)
             const uiIdx = randInt(0, _uiDrawers.length - 1);
             const tex = _makeUITexFor(_uiDrawers[uiIdx], w, h);
