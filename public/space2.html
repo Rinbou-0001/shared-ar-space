@@ -415,6 +415,12 @@
 <div id="master-panel">
   <h3>MASTER 制御</h3>
 
+  <!-- 建物選択タグ表示 (建築オブジェクト選択時のみ可視) -->
+  <div id="m-selected-building" style="display:none; margin-bottom:8px; padding:6px 10px; background:#0f172a; border-left:3px solid #06b6d4; border-radius:3px; font-size:11px;">
+    <span style="opacity:0.7;">選択中の建物:</span>
+    <span id="m-selected-building-tag" style="color:#fbbf24; font-weight:bold; margin-left:4px;"></span>
+  </div>
+
   <!-- ペイントタブ: camera ロールへ一括でスプレー色 (= paintMode) を割当 -->
   <div class="m-section">
     <details>

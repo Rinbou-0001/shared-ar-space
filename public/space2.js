@@ -713,6 +713,9 @@
     // 一時的に全移動オブジェクトを無効化 (ユーザー指示) — 空配列にすることで
     // 下流の物理 tick / spray 対象登録 / selectables 登録を全スキップ
     const movableCubes = [];
+    // Google city の建物選択用: 各建物 Group に 1 個の透明 hit mesh を登録
+    //   選択表示なし・ギズモ装着なし・タグ表示のみ
+    const _buildingHitMeshes = [];
     // 全 movable を transparent-capable に (opacity タグ中に任意の cube を opacity 制御するため)
     if (typeof window.__initCubeTransparent === 'function') window.__initCubeTransparent(movableCubes);
 
@@ -1665,7 +1668,17 @@
         }
 
         // === 複合建物の生成 (基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上) ===
+        //   各建物を THREE.Group にまとめ、命名タグ (bldg-NNN) を付与
+        let _bldgIdCounter = 0;
         function _buildComplex(gx, gz, footW, footD, maxH) {
+          // 建物グループ (以後 base/section/top はこの group の子にする)
+          _bldgIdCounter++;
+          const bldgTag = 'bldg-' + String(_bldgIdCounter).padStart(3, '0');
+          const bldgGroup = new THREE.Group();
+          bldgGroup.name = bldgTag;
+          bldgGroup.userData.buildingTag = bldgTag;
+          bldgGroup.userData.__isBuilding = true;
+          cityRoot.add(bldgGroup);
           // 衝突判定用 AABB (バルコニー・パイプの張り出し 1m + 屋上塔屋 +4m を加算)
           _buildingAABBs.push({
             minX: gx - 1, maxX: gx + footW + 1,
@@ -1677,7 +1690,7 @@
           const baseMat = (rand() < 0.5) ? whiteMat : lightMat;
           const base = new THREE.Mesh(new THREE.BoxGeometry(footW, baseH, footD), baseMat);
           base.position.set(gx + footW / 2, baseH / 2, gz + footD / 2);
-          cityRoot.add(base);
+          bldgGroup.add(base);
           // 建物全体の有効最大高 (後段の中層計算で使用)
           let curY = baseH;
           let curW = footW, curD = footD;
@@ -1705,7 +1718,7 @@
                                             : grayMat;
             const section = new THREE.Mesh(new THREE.BoxGeometry(nextW, sectH, nextD), sectMat);
             section.position.set(nextGx + nextW / 2, curY + sectH / 2, nextGz + nextD / 2);
-            cityRoot.add(section);
+            bldgGroup.add(section);
             curY += sectH;
             curW = nextW;
             curD = nextD;
@@ -1888,8 +1901,20 @@
             const topMat = rand() < 0.3 ? googleMats[randInt(0, 3)] : lightMat;
             const top = new THREE.Mesh(new THREE.BoxGeometry(tw, th, td), topMat);
             top.position.set(tx + tw / 2, curY + th / 2, tz + td / 2);
-            cityRoot.add(top);
+            bldgGroup.add(top);
           }
+          // ─ 建物選択用 hit mesh (透明・raycast のみ対象) ─
+          //   建物の XZ フットプリント × 高さ totalH の AABB を内包する invisible Box
+          const hitMat = new THREE.MeshBasicMaterial({
+            transparent: true, opacity: 0, depthWrite: false,
+          });
+          const hitMesh = new THREE.Mesh(new THREE.BoxGeometry(footW, totalH, footD), hitMat);
+          hitMesh.position.set(gx + footW / 2, totalH / 2, gz + footD / 2);
+          hitMesh.name = bldgTag;
+          hitMesh.userData.buildingTag = bldgTag;
+          hitMesh.userData.__isBuilding = true;
+          bldgGroup.add(hitMesh);
+          _buildingHitMeshes.push(hitMesh);
         }
 
         // === グリッド配置 (角は 1m グリッドに整列) ===
@@ -4301,8 +4326,8 @@
       }
     }
 
-    // selectables: raycast 対象。movable cube 全部を含める。
-    const selectables = [...movableCubes];
+    // selectables: raycast 対象。movable cube + 建物 hit mesh を含める。
+    const selectables = [...movableCubes, ..._buildingHitMeshes];
     let selectedObject = null;
     // Box 表示 (observer avatar の box オブジェクト + 格子 + 選択ハイライト) の ON/OFF フラグ。
     //   ・false: box.visible = false + avatar 選択枠 (apex/base edges) も強制非表示
@@ -4552,19 +4577,34 @@
       }
       _toggleEdges(selectedObject, false);
       selectedObject = obj;
+      // 建物は選択枠非表示 + ギズモ装着なし (回転・移動操作不可)
+      const isBuilding = !!(obj && obj.userData && obj.userData.__isBuilding);
       if (obj) {
-        _toggleEdges(obj, true);
+        if (!isBuilding) _toggleEdges(obj, true);
         log('select: ' + (obj.name || '(unnamed)'), 'ok');
       } else {
         log('deselect', 'ok');
       }
-      // master: TransformControls (移動ギズモ + 回転リング) 装着/取り外し
-      if (ROLE === 'master') _attachGizmosTo(obj);
+      // master: TransformControls (建物はスキップ、null を渡して detach)
+      if (ROLE === 'master') _attachGizmosTo(isBuilding ? null : obj);
       updateSelectionHint();
     }
     function updateSelectionHint() {
       const el = document.getElementById('obs-sel-info');
       if (el) el.textContent = selectedObject ? selectedObject.name : '--';
+      // master 接続確認パネルの建物タグ表示
+      const bldgBox = document.getElementById('m-selected-building');
+      const bldgTag = document.getElementById('m-selected-building-tag');
+      if (bldgBox && bldgTag) {
+        const u = selectedObject && selectedObject.userData;
+        if (u && u.__isBuilding) {
+          bldgTag.textContent = u.buildingTag || selectedObject.name || '(unnamed)';
+          bldgBox.style.display = 'block';
+        } else {
+          bldgBox.style.display = 'none';
+          bldgTag.textContent = '';
+        }
+      }
     }
 
     // ========================================================
