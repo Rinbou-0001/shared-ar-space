@@ -1540,15 +1540,25 @@
           objLoader.setMaterials(materials);
           objLoader.setPath(basePath);
           objLoader.load(tileName + '.obj', (obj) => {
+            // 案 W-2: 面を白化 + EdgesGeometry (20° 閾値) で黒エッジを重畳
+            //   photo texture を破棄、材質を白に差し替え、各 Mesh に LineSegments 子を追加
+            const _edgeLineMat = new THREE.LineBasicMaterial({ color: 0x000000 });
             obj.traverse((child) => {
               if (child.isMesh && child.material) {
                 const mats = Array.isArray(child.material) ? child.material : [child.material];
                 mats.forEach((m) => {
-                  if (m.map) m.map.encoding = THREE.sRGBEncoding;
+                  if (m.map) { try { m.map.dispose(); } catch (_) {} m.map = null; }
+                  if (m.color) m.color.setHex(0xffffff);
                 });
-                // 影を落とさず・受けない (負荷軽減)
                 child.castShadow = false;
                 child.receiveShadow = false;
+                // エッジ重畳 (法線角度 20° 以上の境界のみ)
+                try {
+                  const edges = new THREE.EdgesGeometry(child.geometry, 20);
+                  const lineSegs = new THREE.LineSegments(edges, _edgeLineMat);
+                  lineSegs.name = child.name + '-edges';
+                  child.add(lineSegs);
+                } catch (_) { /* 退化ジオメトリ等で失敗した場合はスキップ */ }
               }
             });
             obj.name = tileName;
@@ -1695,6 +1705,13 @@
       skyDome.renderOrder = -1000;
       skyDome.frustumCulled = false;
       _themeGoogleGroup.add(skyDome);
+      // Shibuya テーマ用に同じスカイマテリアルを別 Mesh でシェア (themeRestrict='shibuya')
+      const shibuyaSky = new THREE.Mesh(skyGeom, skyMat);
+      shibuyaSky.name = 'shibuya-skydome';
+      shibuyaSky.userData.themeRestrict = 'shibuya';
+      shibuyaSky.renderOrder = -1000;
+      shibuyaSky.frustumCulled = false;
+      _themeShibuyaGroup.add(shibuyaSky);
       // 毎フレーム カメラの world 座標を uniform に同期
       const _skyCamPos = skyUniforms.uCameraWorldPosition.value;
       window.__skySyncUpdater = () => {
