@@ -1514,6 +1514,188 @@
     _themeShibuyaGroup.visible = false;
     scene.add(_themeShibuyaGroup);
     let _shibuyaLoaded = false;
+    // ===== 案 CL-1: Shibuya 周辺 ±100m の 2D Height Field precompute =====
+    //   XZ 2m 間隔 × 101 × 101 = 10,201 セル、各セルに down-raycast の最大 Y を保存
+    function _buildShibuyaHF(tileRoot) {
+      const AREA = 100, STEP = 2;
+      const N = Math.floor((AREA * 2) / STEP) + 1;
+      const hf = new Float32Array(N * N);
+      const ray = new THREE.Raycaster();
+      ray.ray.direction.set(0, -1, 0);
+      ray.far = 2000;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          const x = -AREA + i * STEP;
+          const z = -AREA + j * STEP;
+          ray.ray.origin.set(x, 1000, z);
+          const hits = ray.intersectObject(tileRoot, true);
+          hf[i * N + j] = hits.length ? hits[0].point.y : -Infinity;
+        }
+      }
+      log('shibuya height field: ' + N + 'x' + N + ' cells', 'ok');
+      return { hf, N, AREA, STEP };
+    }
+    // XZ 矩形内の最大地形高を返す
+    function _hfMaxInRect(xMin, xMax, zMin, zMax, hfd) {
+      const i0 = Math.max(0, Math.floor((xMin + hfd.AREA) / hfd.STEP));
+      const i1 = Math.min(hfd.N - 1, Math.ceil((xMax + hfd.AREA) / hfd.STEP));
+      const j0 = Math.max(0, Math.floor((zMin + hfd.AREA) / hfd.STEP));
+      const j1 = Math.min(hfd.N - 1, Math.ceil((zMax + hfd.AREA) / hfd.STEP));
+      let maxY = -Infinity;
+      for (let i = i0; i <= i1; i++) {
+        for (let j = j0; j <= j1; j++) {
+          const y = hfd.hf[i * hfd.N + j];
+          if (y > maxY) maxY = y;
+        }
+      }
+      return maxY;
+    }
+    // ===== Shibuya テーマ 5 要素配置 =====
+    //   1: 浮遊キューブ群 (Image 4) InstancedMesh
+    //   2: MD3 UI 流用サインパネル
+    //   3: ポップカラー四角フレーム (Image 1) 8 色別 InstancedMesh
+    //   4: メカ構造パイプ (Image 3)
+    //   5: ロゴ球 4 個 (象限)
+    function _populateShibuyaContent(hfd) {
+      let _seed = 10110110;
+      const rand = () => { _seed = (_seed * 1664525 + 1013904223) >>> 0; return _seed / 4294967296; };
+      const randInt = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
+      const SAFE = 1;
+      const root = new THREE.Group();
+      root.name = 'shibuya-content';
+      _themeShibuyaGroup.add(root);
+      const _dummy = new THREE.Object3D();
+      // --- 1. 浮遊キューブ 200 (InstancedMesh、1 draw call) ---
+      const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
+      const cubeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.0 });
+      const cubeInst = new THREE.InstancedMesh(cubeGeom, cubeMat, 300);
+      let cubeN = 0, cAtt = 0;
+      while (cubeN < 200 && cAtt < 3000) {
+        cAtt++;
+        const s = randInt(1, 3);
+        const x = randInt(-95, 95), z = randInt(-95, 95);
+        const gY = _hfMaxInRect(x - s / 2, x + s / 2, z - s / 2, z + s / 2, hfd);
+        const minY = (gY > -Infinity) ? gY + SAFE : SAFE;
+        const yMax = 80;
+        if (minY + s > yMax) continue;
+        const y = randInt(Math.ceil(minY + s / 2), Math.floor(yMax - s / 2));
+        _dummy.position.set(x, y, z);
+        _dummy.scale.set(s, s, s);
+        _dummy.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
+        _dummy.updateMatrix();
+        cubeInst.setMatrixAt(cubeN, _dummy.matrix);
+        cubeN++;
+      }
+      cubeInst.count = cubeN;
+      cubeInst.instanceMatrix.needsUpdate = true;
+      cubeInst.frustumCulled = false;
+      root.add(cubeInst);
+      // --- 2. MD3 UI 流用サインパネル 30 ---
+      const uiDrawers = window.__uiDrawers;
+      let panelN = 0, pAtt = 0;
+      if (uiDrawers && uiDrawers.length > 0) {
+        while (panelN < 30 && pAtt < 2000) {
+          pAtt++;
+          const w = randInt(2, 4), h = randInt(2, 4);
+          const x = randInt(-90, 90), z = randInt(-90, 90);
+          const yawIdx = randInt(0, 3);
+          const gY = _hfMaxInRect(x - w / 2, x + w / 2, z - w / 2, z + w / 2, hfd);
+          const baseY = (gY > -Infinity) ? gY + SAFE + 1 : SAFE + 1;
+          const yUpper = 50;
+          if (baseY + h > yUpper) continue;
+          const bottomY = baseY + randInt(0, Math.max(0, yUpper - h - baseY));
+          const cv = document.createElement('canvas');
+          cv.width = w * 128; cv.height = h * 128;
+          const uiIdx = randInt(0, uiDrawers.length - 1);
+          try { uiDrawers[uiIdx](cv.getContext('2d'), cv.width, cv.height); } catch (_) {}
+          const tex = new THREE.CanvasTexture(cv);
+          tex.needsUpdate = true;
+          const mat = new THREE.MeshStandardMaterial({
+            map: tex, color: 0xffffff, side: THREE.DoubleSide,
+            roughness: 0.75, metalness: 0,
+          });
+          const pMesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+          pMesh.position.set(x, bottomY + h / 2, z);
+          pMesh.rotation.y = yawIdx * (Math.PI / 2);
+          pMesh.name = 'shibuya-panel-' + panelN;
+          pMesh.userData.imageTarget = true;
+          pMesh.userData.uiType = uiIdx;
+          root.add(pMesh);
+          panelN++;
+        }
+      }
+      // --- 3. ポップカラーフレーム 50 (8 色 × 最大 20 each、InstancedMesh) ---
+      const popColors = [0xff5252, 0x1a73e8, 0xffd600, 0x00c853, 0xaa00ff, 0x00bfa5, 0xff6f00, 0xec407a];
+      const frameGeom = new THREE.BoxGeometry(1, 1, 0.2);
+      const frameInsts = popColors.map((c) => {
+        const mat = new THREE.MeshStandardMaterial({ color: c, roughness: 0.4, metalness: 0.1 });
+        const im = new THREE.InstancedMesh(frameGeom, mat, 20);
+        im.count = 0;
+        return im;
+      });
+      const frameCounts = new Array(popColors.length).fill(0);
+      let frameTotal = 0, fAtt = 0;
+      while (frameTotal < 50 && fAtt < 1500) {
+        fAtt++;
+        const colIdx = Math.floor(rand() * popColors.length);
+        if (frameCounts[colIdx] >= 20) continue;
+        const s = 1 + rand() * 2;
+        const x = randInt(-90, 90), z = randInt(-90, 90);
+        const gY = _hfMaxInRect(x - s / 2, x + s / 2, z - s / 2, z + s / 2, hfd);
+        const minY = (gY > -Infinity) ? gY + SAFE : SAFE;
+        if (minY + s > 55) continue;
+        const y = minY + rand() * (50 - minY);
+        _dummy.position.set(x, y, z);
+        _dummy.scale.set(s, s, 0.2);
+        _dummy.rotation.set(0, rand() * Math.PI * 2, 0);
+        _dummy.updateMatrix();
+        frameInsts[colIdx].setMatrixAt(frameCounts[colIdx], _dummy.matrix);
+        frameCounts[colIdx]++;
+        frameTotal++;
+      }
+      frameInsts.forEach((fi, i) => {
+        fi.count = frameCounts[i];
+        fi.instanceMatrix.needsUpdate = true;
+        if (fi.count > 0) root.add(fi);
+      });
+      // --- 4. メカ構造パイプ 10 (水色シリンダ) ---
+      const pipeMat = new THREE.MeshStandardMaterial({ color: 0x81d4fa, roughness: 0.3, metalness: 0.4 });
+      let pipeN = 0, piAtt = 0;
+      while (pipeN < 10 && piAtt < 500) {
+        piAtt++;
+        const x = randInt(-80, 80), z = randInt(-80, 80);
+        const gY = _hfMaxInRect(x - 1, x + 1, z - 1, z + 1, hfd);
+        const baseY = (gY > -Infinity) ? gY + SAFE : SAFE;
+        const length = randInt(20, 50);
+        if (baseY + length > 80) continue;
+        const pipeGeom = new THREE.CylinderGeometry(0.4, 0.4, length, 10);
+        const pipe = new THREE.Mesh(pipeGeom, pipeMat);
+        pipe.position.set(x, baseY + length / 2, z);
+        pipe.name = 'shibuya-pipe-' + pipeN;
+        root.add(pipe);
+        pipeN++;
+      }
+      // --- 5. ロゴ球 4 (象限ごと) ---
+      const spheres = [
+        { x:  60, z: -50, c: 0xff5252, name: 'shibuya-logo-red' },
+        { x: -70, z:  40, c: 0x1a73e8, name: 'shibuya-logo-blue' },
+        { x:  40, z:  70, c: 0xffd600, name: 'shibuya-logo-yellow' },
+        { x: -55, z: -60, c: 0x00c853, name: 'shibuya-logo-green' },
+      ];
+      spheres.forEach((s) => {
+        const gY = _hfMaxInRect(s.x - 5, s.x + 5, s.z - 5, s.z + 5, hfd);
+        const centerY = (gY > -Infinity) ? gY + 8 : 10;
+        const sphereMat = new THREE.MeshStandardMaterial({
+          color: s.c, roughness: 0.4, metalness: 0.1,
+          emissive: s.c, emissiveIntensity: 0.2,
+        });
+        const sphere = new THREE.Mesh(new THREE.SphereGeometry(5, 16, 12), sphereMat);
+        sphere.position.set(s.x, centerY, s.z);
+        sphere.name = s.name;
+        root.add(sphere);
+      });
+      log('[shibuya content] cubes=' + cubeN + ' panels=' + panelN + ' frames=' + frameTotal + ' pipes=' + pipeN + ' spheres=4', 'ok');
+    }
     function _loadShibuyaIfNeeded() {
       if (_shibuyaLoaded) return;
       if (typeof THREE.OBJLoader !== 'function' || typeof THREE.MTLLoader !== 'function') {
@@ -1587,7 +1769,12 @@
               } else {
                 log('shibuya ground raycast miss (原点真下にメッシュなし)', 'warn');
               }
+              tileRoot.updateMatrixWorld(true);
               log('shibuya tiles loaded (' + tiles.length + ' tiles)', 'ok');
+              // ─ 案 CL-1: Shibuya 周辺 (±100m) の Height Field 構築 ─
+              const hfd = _buildShibuyaHF(tileRoot);
+              // ─ 5 要素を追加 (建物と非衝突、MD3 UI 流用) ─
+              _populateShibuyaContent(hfd);
             }
           }, undefined, (err) => log('shibuya tile ' + tileName + ' load err', 'err'));
         }, undefined, (err) => log('shibuya mtl ' + tileName + ' load err', 'err'));
@@ -2736,6 +2923,8 @@
           _ui_weather, _ui_news, _ui_music, _ui_photos, _ui_notes,
           _ui_translate, _ui_doc, _ui_search, _ui_chat, _ui_fit,
         ];
+        // Shibuya テーマ側から MD3 UI を流用できるようグローバル公開
+        window.__uiDrawers = _uiDrawers;
         // 画像面の配置: 50m × 50m (スペース原点中心)、高さ上限 20m
         //   - 面ごとに個別キャンバスを生成 (アスペクト歪みゼロ)
         //   - サイズを 大 (5-6m) / 中 (3-4m) / 小 (1-2m) の 3 スケールに分けて 20 枚ずつ
