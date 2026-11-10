@@ -1670,10 +1670,18 @@
         // === 複合建物の生成 (基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上) ===
         //   各建物を THREE.Group にまとめ、命名タグ (bldg-NNN) を付与
         let _bldgIdCounter = 0;
+        // 個別建物の z 方向シフト (m)。ユーザー指定による微調整
+        //   生成時 gz 自体をずらすため、以降の柱/梁/窓/パイプ等すべての子パーツと
+        //   AABB が追従。後段の画像面配置ループは更新後の AABB で衝突回避するため、
+        //   建物に衝突しうる白い面は自動的に別位置に配置される。
+        const _bldgZShiftTable = { 76: 3, 82: -1, 93: -2, 94: 2, 103: -2 };
         function _buildComplex(gx, gz, footW, footD, maxH) {
           // 建物グループ (以後 base/section/top はこの group の子にする)
           _bldgIdCounter++;
           const bldgTag = 'bldg-' + String(_bldgIdCounter).padStart(3, '0');
+          // 指定された z シフトを適用 (この後のすべての gz 利用箇所に反映)
+          const zShift = _bldgZShiftTable[_bldgIdCounter] || 0;
+          if (zShift !== 0) gz += zShift;
           const bldgGroup = new THREE.Group();
           bldgGroup.name = bldgTag;
           bldgGroup.userData.buildingTag = bldgTag;
