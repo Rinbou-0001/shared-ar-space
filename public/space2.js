@@ -229,8 +229,8 @@
       // カメラ XZ 距離ベースのフェード (案 F-2)
       //   FADE_START (m) から減衰開始、FADE_END (m) で完全透明
       //   cameraPosition は Three.js の ShaderMaterial が自動供給
-      uniforms.uFadeStart = { value: 20.0 };
-      uniforms.uFadeEnd   = { value: 80.0 };
+      uniforms.uFadeStart = { value: 10.0 };
+      uniforms.uFadeEnd   = { value: 60.0 };
       return new THREE.ShaderMaterial({
         defines,
         uniforms,
@@ -6484,16 +6484,20 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
           const btn = document.getElementById('m-effect-' + n);
           if (btn) {
             btn.dataset.on = on ? '1' : '0';
-            const _lbl = (n === 3) ? '効果3 (影)' : (n === 4) ? '効果4 (魚)' : (n === 5) ? '効果5 (Google テーマ)' : ('効果' + n);
+            const _lbl = (n === 3) ? '効果3 (影)'
+                       : (n === 4) ? '効果4 (魚)'
+                       : (n === 5) ? '効果5 (Google テーマ)'
+                       : (n === 6) ? '効果6 (Shibuya テーマ)'
+                       : ('効果' + n);
             btn.textContent = _lbl + ': ' + (on ? 'ON' : 'OFF');
             btn.style.background = on ? '#22c55e' : '#475569';
             btn.style.color = on ? '#052e16' : 'white';
@@ -8431,8 +8435,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false };
-      [1, 2, 3, 4, 5].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false };
+      [1, 2, 3, 4, 5, 6].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
