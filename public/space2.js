@@ -226,10 +226,16 @@
         uniforms.uFloorPaint = _gridLightUni.uFloorPaint;
         uniforms.uFieldHalf  = _gridLightUni.uFieldHalf;
       }
+      // カメラ XZ 距離ベースのフェード (案 F-2)
+      //   FADE_START (m) から減衰開始、FADE_END (m) で完全透明
+      //   cameraPosition は Three.js の ShaderMaterial が自動供給
+      uniforms.uFadeStart = { value: 30.0 };
+      uniforms.uFadeEnd   = { value: 80.0 };
       return new THREE.ShaderMaterial({
         defines,
         uniforms,
-        transparent: !!useFloorPaintMask,   // mask 使用時のみ alpha blending を有効化
+        // fade で透明化するので常に blending 有効化
+        transparent: true,
         vertexShader: `
           uniform vec3 uNormalLocal;
           varying vec3 vNormalWorld;
@@ -251,6 +257,8 @@
           uniform float uPointRange;
           uniform vec3  uPointColor;
           uniform vec3  uColor;
+          uniform float uFadeStart;
+          uniform float uFadeEnd;
           #ifdef USE_FLOOR_PAINT_MASK
             uniform sampler2D uFloorPaint;
             uniform float     uFieldHalf;
@@ -268,13 +276,18 @@
             float ptContrib = diffPt * falloff * uPointIntensity;
             col += uPointColor * ptContrib;
             float alpha = 1.0;
+            // カメラ XZ 距離フェード (案 F-2)
+            vec2 dXZ = vWorldPos.xz - cameraPosition.xz;
+            float rCam = length(dXZ);
+            float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, rCam);
+            alpha *= fade;
             #ifdef USE_FLOOR_PAINT_MASK
               vec2 fuv = (vWorldPos.xz + vec2(uFieldHalf)) / (uFieldHalf * 2.0);
               float pA = texture2D(uFloorPaint, fuv).a;
               // 塗装された所ではグリッドの alpha を 0 に (= 下層扱い、塗りが上に見える)
               alpha *= (1.0 - pA);
-              if (alpha < 0.01) discard;
             #endif
+            if (alpha < 0.01) discard;
             gl_FragColor = vec4(col, alpha);
           }
         `,
