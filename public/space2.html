@@ -321,6 +321,9 @@
   <!-- fflate (FBXLoader の zlib 展開依存) + FBXLoader (r147 UMD) -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/libs/fflate.min.js" onload="uiLog('fflate loaded','ok')" onerror="uiLog('fflate load failed','err')"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/FBXLoader.js" onload="uiLog('FBXLoader loaded','ok')" onerror="uiLog('FBXLoader load failed','err')"></script>
+  <!-- OBJ + MTL Loader (Shibuya photogrammetry 用、r147 UMD) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/MTLLoader.js" onload="uiLog('MTLLoader loaded','ok')" onerror="uiLog('MTLLoader load failed','err')"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/OBJLoader.js" onload="uiLog('OBJLoader loaded','ok')" onerror="uiLog('OBJLoader load failed','err')"></script>
   <!-- Postprocessing (Bloom) — 試験: スプレー塗装を発光させる emissive+bloom パイプライン -->
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/EffectComposer.js" onload="uiLog('EffectComposer loaded','ok')" onerror="uiLog('EffectComposer load failed','err')"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/RenderPass.js" onload="uiLog('RenderPass loaded','ok')" onerror="uiLog('RenderPass load failed','err')"></script>
@@ -667,6 +670,7 @@
         <!-- 2段目: テーマ切替 (案D) -->
         <div class="row" style="gap:6px; flex-wrap:wrap; margin-top:4px;">
           <button id="m-effect-5" class="m-effect-btn" data-effect="5" data-on="1" style="background:#22c55e; color:#052e16; padding:6px 10px;">効果5 (Google テーマ): ON</button>
+          <button id="m-effect-6" class="m-effect-btn" data-effect="6" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果6 (Shibuya テーマ): OFF</button>
         </div>
         <!-- スカイドーム診断 (マスターローカル、同期なし) -->
         <div class="hint" style="color:#67e8f9; margin-top:8px;">スカイドーム診断 (マスターローカル、他クライアント非同期)</div>

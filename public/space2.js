@@ -229,7 +229,7 @@
       // カメラ XZ 距離ベースのフェード (案 F-2)
       //   FADE_START (m) から減衰開始、FADE_END (m) で完全透明
       //   cameraPosition は Three.js の ShaderMaterial が自動供給
-      uniforms.uFadeStart = { value: 30.0 };
+      uniforms.uFadeStart = { value: 20.0 };
       uniforms.uFadeEnd   = { value: 80.0 };
       return new THREE.ShaderMaterial({
         defines,
@@ -1507,6 +1507,67 @@
     _themeGoogleGroup.name = 'theme-google-root';
     _themeGoogleGroup.userData.themeRestrict = 'google';
     scene.add(_themeGoogleGroup);
+    // Shibuya テーマ (photogrammetry モデル)、初回表示時に lazy load
+    const _themeShibuyaGroup = new THREE.Group();
+    _themeShibuyaGroup.name = 'theme-shibuya-root';
+    _themeShibuyaGroup.userData.themeRestrict = 'shibuya';
+    _themeShibuyaGroup.visible = false;
+    scene.add(_themeShibuyaGroup);
+    let _shibuyaLoaded = false;
+    function _loadShibuyaIfNeeded() {
+      if (_shibuyaLoaded) return;
+      if (typeof THREE.OBJLoader !== 'function' || typeof THREE.MTLLoader !== 'function') {
+        log('OBJLoader/MTLLoader not loaded, shibuya skipped', 'warn');
+        return;
+      }
+      _shibuyaLoaded = true;
+      const tiles = [
+        'Tile_173078_LD_010_017_L15', 'Tile_173078_LD_010_018_L15', 'Tile_173078_LD_010_019_L15',
+        'Tile_173078_LD_011_017_L15', 'Tile_173078_LD_011_018_L15', 'Tile_173078_LD_011_019_L15',
+        'Tile_173078_LD_012_017_L15', 'Tile_173078_LD_012_018_L15', 'Tile_173078_LD_012_019_L15',
+      ];
+      const basePath = '/assets/shibuya/';
+      const tileRoot = new THREE.Group();
+      tileRoot.name = 'shibuya-tiles-raw';
+      _themeShibuyaGroup.add(tileRoot);
+      let loadedCount = 0;
+      tiles.forEach((tileName) => {
+        const mtlLoader = new THREE.MTLLoader();
+        mtlLoader.setPath(basePath);
+        mtlLoader.load(tileName + '.mtl', (materials) => {
+          materials.preload();
+          const objLoader = new THREE.OBJLoader();
+          objLoader.setMaterials(materials);
+          objLoader.setPath(basePath);
+          objLoader.load(tileName + '.obj', (obj) => {
+            obj.traverse((child) => {
+              if (child.isMesh && child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach((m) => {
+                  if (m.map) m.map.encoding = THREE.sRGBEncoding;
+                });
+                // 影を落とさず・受けない (負荷軽減)
+                child.castShadow = false;
+                child.receiveShadow = false;
+              }
+            });
+            obj.name = tileName;
+            tileRoot.add(obj);
+            loadedCount++;
+            if (loadedCount === tiles.length) {
+              // 全タイル完了: Z-up → Y-up 回転、XZ 中心を原点・Y 最小を 0 に平行移動
+              tileRoot.rotation.x = -Math.PI / 2;
+              tileRoot.updateMatrixWorld(true);
+              const bbox = new THREE.Box3().setFromObject(tileRoot);
+              const center = new THREE.Vector3(); bbox.getCenter(center);
+              tileRoot.position.set(-center.x, -bbox.min.y, -center.z);
+              log('shibuya tiles loaded (' + tiles.length + ' tiles)', 'ok');
+            }
+          }, undefined, (err) => log('shibuya tile ' + tileName + ' load err', 'err'));
+        }, undefined, (err) => log('shibuya mtl ' + tileName + ' load err', 'err'));
+      });
+    }
+    window.__loadShibuyaIfNeeded = _loadShibuyaIfNeeded;
     let _currentTheme = 'default';
     // 日中プリセット: Google テーマ有効時に適用する光源強度
     const _googleLightPreset = { ambient: 0.87, dir: 1.0, point: 0.0 };
@@ -1515,7 +1576,9 @@
     const _defaultLightCache = { ambient: null, dir: null, point: null };
     window.__defaultLightCache = _defaultLightCache;
     window.__applyTheme = function(name) {
-      if (name !== 'default' && name !== 'google') return;
+      if (name !== 'default' && name !== 'google' && name !== 'shibuya') return;
+      // Shibuya 選択時は初回ロードをトリガー
+      if (name === 'shibuya') _loadShibuyaIfNeeded();
       const prev = _currentTheme;
       // ライティングプリセットの配信は master のみが担当。
       //   master が emit → 全クライアントが sceneAmbient/Dir/Point handler で受信・適用。
@@ -6478,6 +6541,14 @@
             window.__applyTheme(on ? 'google' : 'default');
           }
           log('theme → ' + (on ? 'Google' : 'default') + ' (effect5)', 'ok');
+        }
+        if (n === 6) {
+          // 効果6: Shibuya テーマ (ON = shibuya、OFF = default)
+          //   効果5 と排他: ON の時は 'shibuya' を強制、OFF 時は default に戻す
+          if (typeof window.__applyTheme === 'function') {
+            window.__applyTheme(on ? 'shibuya' : 'default');
+          }
+          log('theme → ' + (on ? 'Shibuya' : 'default') + ' (effect6)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
