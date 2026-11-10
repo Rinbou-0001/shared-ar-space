@@ -1561,6 +1561,22 @@
               const bbox = new THREE.Box3().setFromObject(tileRoot);
               const center = new THREE.Vector3(); bbox.getCenter(center);
               tileRoot.position.set(-center.x, -bbox.min.y, -center.z);
+              tileRoot.updateMatrixWorld(true);
+              // 案 SH-A: 原点真下に対して raycast し、ヒット高を Y=0 に合わせて接地
+              //   これで (0, 1.3, 0) のプレイヤー視点がモデルの地面に立つ形になる
+              const _rayDown = new THREE.Raycaster(
+                new THREE.Vector3(0, 1000, 0),
+                new THREE.Vector3(0, -1, 0),
+                0, 2000
+              );
+              const _hits = _rayDown.intersectObject(tileRoot, true);
+              if (_hits.length > 0) {
+                const groundY = _hits[0].point.y;
+                tileRoot.position.y -= groundY;
+                log('shibuya ground raycast hit Y=' + groundY.toFixed(2) + ' → shifted', 'ok');
+              } else {
+                log('shibuya ground raycast miss (原点真下にメッシュなし)', 'warn');
+              }
               log('shibuya tiles loaded (' + tiles.length + ' tiles)', 'ok');
             }
           }, undefined, (err) => log('shibuya tile ' + tileName + ' load err', 'err'));
