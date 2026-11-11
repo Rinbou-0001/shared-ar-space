@@ -1818,6 +1818,29 @@
           obj.visible = (obj.userData.themeRestrict === name);
         }
       });
+      // 現在の選択対象が非表示になったら選択解除
+      //   (建物選択パネル #m-selected-building の残留表示を防ぐ)
+      if (typeof selectObject === 'function' && typeof selectedObject !== 'undefined' && selectedObject) {
+        let node = selectedObject;
+        let hidden = false;
+        while (node) {
+          if (node.userData && node.userData.themeRestrict && node.userData.themeRestrict !== name) {
+            hidden = true; break;
+          }
+          node = node.parent;
+        }
+        if (hidden) selectObject(null);
+      }
+      // 念のため建物選択パネルを明示的に閉じる (選択対象が非建物のケースでも安全)
+      const _bldgBox = document.getElementById('m-selected-building');
+      const _bldgTagEl = document.getElementById('m-selected-building-tag');
+      if (_bldgBox && _bldgTagEl) {
+        const _u = (typeof selectedObject !== 'undefined' && selectedObject) ? selectedObject.userData : null;
+        if (!_u || !_u.__isBuilding || (_u.themeRestrict && _u.themeRestrict !== name)) {
+          _bldgBox.style.display = 'none';
+          _bldgTagEl.textContent = '';
+        }
+      }
     };
     window.__getCurrentTheme = () => _currentTheme;
     window.__themeGoogleGroup = _themeGoogleGroup;
