@@ -141,6 +141,60 @@
       if (_bloomComposer) {
         _bloomComposer.setSize(winW, winH);
       }
+      // 効果7: 窓枠オーバーレイ ortho カメラのアスペクト更新
+      if (_overlayCamera) {
+        const aspect = winW / winH;
+        _overlayCamera.left   = -aspect;
+        _overlayCamera.right  =  aspect;
+        _overlayCamera.top    =  1;
+        _overlayCamera.bottom = -1;
+        _overlayCamera.updateProjectionMatrix();
+      }
+    }
+
+    // ===== 効果7: 窓枠オーバーレイ (OrthographicCamera 重畳) =====
+    //   メイン描画後に ortho カメラで額縁を前景として重ねる。
+    //   ・独立 scene + 専用光源 (DirectionalLight + AmbientLight) でメイン光源と無関係に照明
+    //   ・opening 1.7×1.7 ユニット (ortho 高さ 2 基準) = 画面縦の 85%
+    //   ・左右は aspect に応じて窓枠が太くなる (縦フィットの額縁)
+    const _overlayScene  = new THREE.Scene();
+    const _overlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 10);
+    _overlayCamera.position.set(0, 0, 5);
+    _overlayCamera.lookAt(0, 0, 0);
+    const _frameGroup = new THREE.Group();
+    _overlayScene.add(_frameGroup);
+    const _frameMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.6, metalness: 0.0,
+    });
+    const FRAME_THICK = 0.12;
+    const FRAME_DEPTH = 0.3;
+    const OPENING_W = 1.7;
+    const OPENING_H = 1.7;
+    function _addFramePart(w, h, x, y) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, FRAME_DEPTH), _frameMaterial);
+      m.position.set(x, y, 0);
+      _frameGroup.add(m);
+    }
+    // 上/下 (角を含む幅) → 左/右 (内側高さのみ) の順で配置、コーナー重複なし
+    _addFramePart(OPENING_W + FRAME_THICK * 2, FRAME_THICK,  0,  OPENING_H / 2 + FRAME_THICK / 2);
+    _addFramePart(OPENING_W + FRAME_THICK * 2, FRAME_THICK,  0, -OPENING_H / 2 - FRAME_THICK / 2);
+    _addFramePart(FRAME_THICK, OPENING_H, -OPENING_W / 2 - FRAME_THICK / 2, 0);
+    _addFramePart(FRAME_THICK, OPENING_H,  OPENING_W / 2 + FRAME_THICK / 2, 0);
+    const _frameDir = new THREE.DirectionalLight(0xffffff, 2.0);
+    _frameDir.position.set(-2, 3, 5);
+    _frameDir.target.position.set(0, 0, 0);
+    _overlayScene.add(_frameDir);
+    _overlayScene.add(_frameDir.target);
+    _overlayScene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    // メイン描画直後に呼び出すヘルパ。_renderMain および off-axis 分岐から利用。
+    //   autoClear を一時 false にして clearDepth → overlay 描画 → 元に戻す
+    function _renderWindowFrameOverlay() {
+      if (!window.__effect || !window.__effect[7]) return;
+      const prevAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      renderer.render(_overlayScene, _overlayCamera);
+      renderer.autoClear = prevAutoClear;
     }
 
     // ===== 試験: スプレー塗装 Emissive + UnrealBloom =====
@@ -6729,9 +6783,9 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -6740,8 +6794,7 @@
             btn.dataset.on = on ? '1' : '0';
             const _lbl = (n === 3) ? '効果3 (影)'
                        : (n === 4) ? '効果4 (魚)'
-                       : (n === 5) ? '効果5 (Google テーマ)'
-                       : (n === 6) ? '効果6 (Shibuya テーマ)'
+                       : (n === 7) ? '効果7 (窓枠)'
                        : ('効果' + n);
             btn.textContent = _lbl + ': ' + (on ? 'ON' : 'OFF');
             btn.style.background = on ? '#22c55e' : '#475569';
@@ -8693,8 +8746,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false };
-      [1, 2, 3, 4, 5, 6].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false };
+      [1, 2, 3, 4, 5, 6, 7].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
@@ -9117,15 +9170,18 @@
         _renderMain();
       }
       // 試験: bloom 有効なら composer 経由、無効なら従来通り renderer.render
+      //   どちらの経路でも最終出力後に効果7 の窓枠オーバーレイを重畳
       function _renderMain() {
         if (window.__paintBloomEnabled) {
           const composer = _ensureBloomComposer();
           if (composer) {
             composer.render();
+            _renderWindowFrameOverlay();
             return;
           }
         }
         renderer.render(scene, camera);
+        _renderWindowFrameOverlay();
       }
     }
     tick();
