@@ -180,12 +180,16 @@
     _addFramePart(OPENING_W + FRAME_THICK * 2, FRAME_THICK,  0, -OPENING_H / 2 - FRAME_THICK / 2);
     _addFramePart(FRAME_THICK, OPENING_H, -OPENING_W / 2 - FRAME_THICK / 2, 0);
     _addFramePart(FRAME_THICK, OPENING_H,  OPENING_W / 2 + FRAME_THICK / 2, 0);
-    const _frameDir = new THREE.DirectionalLight(0xffffff, 2.0);
+    // 案 F-1: ortho 平行投影で奥行きを視認可能にするため枠全体をわずかに傾ける
+    //   (右側面と下側面が投影面積を持ち、額縁の厚みが見える)
+    _frameGroup.rotation.set(-0.04, 0.08, 0);
+    // 案 F-4: 光源強度を抑えて飽和を防ぎ、側面の陰影を活かす
+    const _frameDir = new THREE.DirectionalLight(0xffffff, 1.0);
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
     _overlayScene.add(_frameDir);
     _overlayScene.add(_frameDir.target);
-    _overlayScene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    _overlayScene.add(new THREE.AmbientLight(0xffffff, 0.3));
     // メイン描画直後に呼び出すヘルパ。_renderMain および off-axis 分岐から利用。
     //   autoClear を一時 false にして clearDepth → overlay 描画 → 元に戻す
     function _renderWindowFrameOverlay() {
