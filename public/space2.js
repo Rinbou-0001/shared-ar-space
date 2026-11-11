@@ -7185,12 +7185,24 @@
       // 現在の press 座標で raycast → 最初のヒット (mesh) を返す (なければ null)
       //   ・選択安定化: 移動 Box (cube1..4) を最優先。距離が近くても apex/base/light を
       //     間違って掴まないよう、まず movable cube のヒットを探し、無ければ他 selectable。
+      // 祖先も含めて実際に表示されているかチェック (Three.js の intersectObjects は
+      //   visible=false のオブジェクト・祖先も raycast 対象になるため手動除外が必要)
+      function _isTreeVisible(obj) {
+        let n = obj;
+        while (n) {
+          if (n.visible === false) return false;
+          n = n.parent;
+        }
+        return true;
+      }
       function _raycastAt(x, y) {
         const rect = _canvas.getBoundingClientRect();
         _ndcTap.x = ((x - rect.left) / rect.width) * 2 - 1;
         _ndcTap.y = -((y - rect.top) / rect.height) * 2 + 1;
         _rayTap.setFromCamera(_ndcTap, camera);
-        const hits = _rayTap.intersectObjects(selectables, false);
+        const rawHits = _rayTap.intersectObjects(selectables, false);
+        // 非表示オブジェクト (テーマ制限等で不可視) は無視
+        const hits = rawHits.filter((h) => _isTreeVisible(h.object));
         if (hits.length === 0) return null;
         // Priority 1: movable cube
         for (const h of hits) {
@@ -7520,7 +7532,8 @@
         _obsNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
         _obsNDC.y = -((clientY - rect.top) / rect.height) * 2 + 1;
         _obsRay.setFromCamera(_obsNDC, camera);
-        const hits = _obsRay.intersectObjects(selectables, false);
+        const rawHits = _obsRay.intersectObjects(selectables, false);
+        const hits = rawHits.filter((h) => (typeof _isTreeVisible === 'function') ? _isTreeVisible(h.object) : true);
         if (hits.length === 0) return false;
         const obj = hits[0].object;
         // 移動 Box (cube1..4) は全ロールで cube grab に譲る (camera 回転はスキップ)
