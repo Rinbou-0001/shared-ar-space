@@ -141,7 +141,7 @@
       if (_bloomComposer) {
         _bloomComposer.setSize(winW, winH);
       }
-      // 効果7: 窓枠オーバーレイ ortho カメラのアスペクト更新
+      // 効果7: 窓枠オーバーレイ ortho カメラのアスペクト更新 + frame 再生成
       if (_overlayCamera) {
         const aspect = winW / winH;
         _overlayCamera.left   = -aspect;
@@ -149,6 +149,7 @@
         _overlayCamera.top    =  1;
         _overlayCamera.bottom = -1;
         _overlayCamera.updateProjectionMatrix();
+        if (typeof _rebuildFrame === 'function') _rebuildFrame(aspect);
       }
     }
 
@@ -166,24 +167,55 @@
     const _frameMaterial = new THREE.MeshStandardMaterial({
       color: 0xffffff, roughness: 0.6, metalness: 0.0,
     });
-    const FRAME_THICK = 0.12;
-    const FRAME_DEPTH = 0.3;
-    const OPENING_W = 1.7;
-    const OPENING_H = 1.7;
-    function _addFramePart(w, h, x, y) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, FRAME_DEPTH), _frameMaterial);
-      m.position.set(x, y, 0);
-      _frameGroup.add(m);
+    const FRAME_THICK   = 0.12;   // 枠太さ (XY)
+    const FRAME_DEPTH   = 0.3;    // 枠奥行き (Z)
+    // 推奨 bevel (試験値): 内側斜面で straight-on ortho でも奥行き視認可能にする
+    const BEVEL_THICK   = 0.08;   // 斜面の Z 方向深さ
+    const BEVEL_SIZE    = 0.10;   // 斜面の XY 方向幅 (内側に広がる)
+    const BEVEL_SEG     = 1;
+    // Frame は 1 本の ExtrudeGeometry Mesh で構築、aspect 変化時に再生成
+    let _frameMesh = null;
+    function _rebuildFrame(aspect) {
+      // 既存の Mesh を破棄
+      if (_frameMesh) {
+        _frameGroup.remove(_frameMesh);
+        if (_frameMesh.geometry) _frameMesh.geometry.dispose();
+        _frameMesh = null;
+      }
+      // 外周 = viewport 縁、内周 = 外周から FRAME_THICK だけ内側
+      const outerW = aspect;
+      const outerH = 1;
+      const innerW = outerW - FRAME_THICK;
+      const innerH = outerH - FRAME_THICK;
+      if (innerW <= 0 || innerH <= 0) return;   // 極端な縦長/横長で opening が負になるガード
+      const shape = new THREE.Shape();
+      shape.moveTo(-outerW, -outerH);
+      shape.lineTo( outerW, -outerH);
+      shape.lineTo( outerW,  outerH);
+      shape.lineTo(-outerW,  outerH);
+      shape.lineTo(-outerW, -outerH);
+      const hole = new THREE.Path();
+      hole.moveTo(-innerW, -innerH);
+      hole.lineTo( innerW, -innerH);
+      hole.lineTo( innerW,  innerH);
+      hole.lineTo(-innerW,  innerH);
+      hole.lineTo(-innerW, -innerH);
+      shape.holes.push(hole);
+      const geom = new THREE.ExtrudeGeometry(shape, {
+        depth: FRAME_DEPTH,
+        bevelEnabled: true,
+        bevelThickness: BEVEL_THICK,
+        bevelSize: BEVEL_SIZE,
+        bevelOffset: 0,
+        bevelSegments: BEVEL_SEG,
+      });
+      geom.translate(0, 0, -FRAME_DEPTH / 2);   // Z 中心を 0 に合わせる
+      _frameMesh = new THREE.Mesh(geom, _frameMaterial);
+      _frameGroup.add(_frameMesh);
     }
-    // 上/下 (角を含む幅) → 左/右 (内側高さのみ) の順で配置、コーナー重複なし
-    _addFramePart(OPENING_W + FRAME_THICK * 2, FRAME_THICK,  0,  OPENING_H / 2 + FRAME_THICK / 2);
-    _addFramePart(OPENING_W + FRAME_THICK * 2, FRAME_THICK,  0, -OPENING_H / 2 - FRAME_THICK / 2);
-    _addFramePart(FRAME_THICK, OPENING_H, -OPENING_W / 2 - FRAME_THICK / 2, 0);
-    _addFramePart(FRAME_THICK, OPENING_H,  OPENING_W / 2 + FRAME_THICK / 2, 0);
-    // 案 F-1: ortho 平行投影で奥行きを視認可能にするため枠全体をわずかに傾ける
-    //   (右側面と下側面が投影面積を持ち、額縁の厚みが見える)
-    _frameGroup.rotation.set(-0.04, 0.08, 0);
-    // 案 F-4: 光源強度を抑えて飽和を防ぎ、側面の陰影を活かす
+    // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
+    _rebuildFrame(window.innerWidth / window.innerHeight);
+    // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
     const _frameDir = new THREE.DirectionalLight(0xffffff, 1.0);
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
@@ -8111,6 +8143,8 @@
           if (Math.abs(r.width - lastW) > 0.5 || Math.abs(r.height - lastH) > 0.5) {
             lastW = r.width; lastH = r.height;
             computeAndApplyEffectiveSize(tag + ' settle#' + attempts);
+            // 効果7 窓枠も fullscreen 遷移中のサイズ変化に追従させる
+            applyCanvasLayout();
           }
           attempts++;
           if (attempts < 5) setTimeout(settle, 120);
