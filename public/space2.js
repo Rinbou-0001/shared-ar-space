@@ -171,8 +171,9 @@
     const _overlayScene  = new THREE.Scene();
     // PerspectiveCamera: FOV 72°, near/far は小さな物理寸法に合わせ 0.001/1.0
     //   位置 Z は applyCanvasLayout で display サイズ + FOV から自動計算
+    // FOV 72° は inline (FRAME_FOV 定数は後段で宣言されるため TDZ 回避)
     const _overlayCamera = new THREE.PerspectiveCamera(
-      FRAME_FOV,
+      72,
       window.innerWidth / window.innerHeight,
       0.001, 1.0
     );
