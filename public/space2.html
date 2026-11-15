@@ -683,6 +683,25 @@
     </details>
   </div>
 
+  <!-- 窓枠グリッド (効果7 窓枠オブジェクトのセル開閉エディタ、マスターローカル、同期なし) -->
+  <div class="m-section">
+    <details>
+      <summary>窓枠グリッド</summary>
+      <div class="m-body">
+        <div class="hint" style="color:#67e8f9;">
+          20×10 グリッドの各セルをクリックで開閉切替 (マスターローカル)<br>
+          黄 = 開 (穴)、灰 = 閉 (枠材)
+        </div>
+        <div id="m-frame-grid-editor" style="display:inline-grid; grid-template-columns:repeat(20,14px); gap:1px; padding:4px; background:#1f2937; border-radius:3px; margin-top:4px;"></div>
+        <div class="row" style="gap:6px; margin-top:6px;">
+          <button id="m-frame-grid-all-open" style="background:#475569; color:white; padding:4px 10px; font-size:10px;">全開</button>
+          <button id="m-frame-grid-all-close" style="background:#475569; color:white; padding:4px 10px; font-size:10px;">全閉</button>
+          <button id="m-frame-grid-invert" style="background:#475569; color:white; padding:4px 10px; font-size:10px;">反転</button>
+        </div>
+      </div>
+    </details>
+  </div>
+
   <!-- スカイドーム診断 (マスターローカル、他クライアント非同期) -->
   <div class="m-section">
     <details>

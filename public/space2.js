@@ -176,41 +176,72 @@
     const FRAME_DEPTH   = 0.3;    // 枠奥行き (Z)
     // 推奨 bevel (試験値): 内側斜面で straight-on ortho でも奥行き視認可能にする
     const BEVEL_THICK   = 0.08;   // 斜面の Z 方向深さ
-    const BEVEL_SIZE    = 0.10;   // 斜面の XY 方向幅 (内側に広がる)
+    const BEVEL_SIZE    = 0.10;   // 斜面の XY 方向幅 (内側に広がる、セルサイズに応じて動的縮小)
     const BEVEL_SEG     = 1;
-    // Frame は 1 本の ExtrudeGeometry Mesh で構築、aspect 変化時に再生成
+    // === グリッド構造 (20×10 固定、マスターローカル) ===
+    const FRAME_GRID_COLS = 20;
+    const FRAME_GRID_ROWS = 10;
+    const INNER_WALL_THICK = FRAME_THICK;   // セル間の仕切り太さ = 外周と同じ
+    // 開閉マスク (true = 穴、false = 枠材) — 既定: 中央 cols 5-14 × rows 2-7 を開く
+    const _openMask = [];
+    for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+      const row = [];
+      for (let c = 0; c < FRAME_GRID_COLS; c++) {
+        row.push(c >= 5 && c <= 14 && r >= 2 && r <= 7);
+      }
+      _openMask.push(row);
+    }
+    // Frame は 1 本の ExtrudeGeometry Mesh で構築、aspect/マスク変化時に再生成
     let _frameMesh = null;
+    let _lastFrameAspect = window.innerWidth / window.innerHeight;
     function _rebuildFrame(aspect) {
+      _lastFrameAspect = aspect;
       // 既存の Mesh を破棄
       if (_frameMesh) {
         _frameGroup.remove(_frameMesh);
         if (_frameMesh.geometry) _frameMesh.geometry.dispose();
         _frameMesh = null;
       }
-      // 外周 = viewport 縁、内周 = 外周から FRAME_THICK だけ内側
+      // 外周 = viewport 縁
       const outerW = aspect;
       const outerH = 1;
-      const innerW = outerW - FRAME_THICK;
-      const innerH = outerH - FRAME_THICK;
-      if (innerW <= 0 || innerH <= 0) return;   // 極端な縦長/横長で opening が負になるガード
+      // グリッドセル寸法 (全セル分 + 内壁 + 外周厚みを差し引いた残りをセル数で分割)
+      const availW = 2 * outerW - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
+      const availH = 2 * outerH - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
+      if (availW <= 0 || availH <= 0) return;
+      const cellW = availW / FRAME_GRID_COLS;
+      const cellH = availH / FRAME_GRID_ROWS;
+      if (cellW <= 0 || cellH <= 0) return;
+      // bevel をセル内に収まるよう動的スケール (bevel 2 本分が cell の 60% 以下)
+      const dynBevelSize = Math.max(0.001, Math.min(BEVEL_SIZE, Math.min(cellW, cellH) * 0.3));
       const shape = new THREE.Shape();
       shape.moveTo(-outerW, -outerH);
       shape.lineTo( outerW, -outerH);
       shape.lineTo( outerW,  outerH);
       shape.lineTo(-outerW,  outerH);
       shape.lineTo(-outerW, -outerH);
-      const hole = new THREE.Path();
-      hole.moveTo(-innerW, -innerH);
-      hole.lineTo( innerW, -innerH);
-      hole.lineTo( innerW,  innerH);
-      hole.lineTo(-innerW,  innerH);
-      hole.lineTo(-innerW, -innerH);
-      shape.holes.push(hole);
+      // 開くセルごとに hole Path を追加 (案 GR-A: 隣接 open セル間に仕切り残す)
+      for (let row = 0; row < FRAME_GRID_ROWS; row++) {
+        for (let col = 0; col < FRAME_GRID_COLS; col++) {
+          if (!_openMask[row] || !_openMask[row][col]) continue;
+          const x0 = -outerW + FRAME_THICK + col * (cellW + INNER_WALL_THICK);
+          const x1 = x0 + cellW;
+          const y1 = outerH - FRAME_THICK - row * (cellH + INNER_WALL_THICK);
+          const y0 = y1 - cellH;
+          const hole = new THREE.Path();
+          hole.moveTo(x0, y0);
+          hole.lineTo(x1, y0);
+          hole.lineTo(x1, y1);
+          hole.lineTo(x0, y1);
+          hole.lineTo(x0, y0);
+          shape.holes.push(hole);
+        }
+      }
       const geom = new THREE.ExtrudeGeometry(shape, {
         depth: FRAME_DEPTH,
         bevelEnabled: true,
         bevelThickness: BEVEL_THICK,
-        bevelSize: BEVEL_SIZE,
+        bevelSize: dynBevelSize,
         bevelOffset: 0,
         bevelSegments: BEVEL_SEG,
       });
@@ -220,6 +251,31 @@
       _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial]);
       _frameGroup.add(_frameMesh);
     }
+    // マスク制御 API (master UI から呼び出し)
+    window.__frameGridDims = function() {
+      return { cols: FRAME_GRID_COLS, rows: FRAME_GRID_ROWS };
+    };
+    window.__getFrameCellState = function(row, col) {
+      if (row < 0 || row >= FRAME_GRID_ROWS || col < 0 || col >= FRAME_GRID_COLS) return false;
+      return !!(_openMask[row] && _openMask[row][col]);
+    };
+    window.__toggleFrameCell = function(row, col) {
+      if (row < 0 || row >= FRAME_GRID_ROWS || col < 0 || col >= FRAME_GRID_COLS) return;
+      _openMask[row][col] = !_openMask[row][col];
+      _rebuildFrame(_lastFrameAspect);
+    };
+    window.__setAllFrameCells = function(open) {
+      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+        for (let c = 0; c < FRAME_GRID_COLS; c++) _openMask[r][c] = !!open;
+      }
+      _rebuildFrame(_lastFrameAspect);
+    };
+    window.__invertFrameCells = function() {
+      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+        for (let c = 0; c < FRAME_GRID_COLS; c++) _openMask[r][c] = !_openMask[r][c];
+      }
+      _rebuildFrame(_lastFrameAspect);
+    };
     // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
     _rebuildFrame(window.innerWidth / window.innerHeight);
     // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
@@ -8683,6 +8739,48 @@
           }
           if (_flVal) _flVal.textContent = String(n);
         });
+      }
+
+      // ==================================================
+      // 窓枠グリッドエディタ (20×10、マスターローカル、同期なし)
+      //   各セルをクリックで開閉トグル、黄=open 灰=closed
+      // ==================================================
+      const _gridEditor = _by('m-frame-grid-editor');
+      if (_gridEditor && typeof window.__frameGridDims === 'function'
+          && typeof window.__toggleFrameCell === 'function'
+          && typeof window.__getFrameCellState === 'function') {
+        const dims = window.__frameGridDims();
+        _gridEditor.style.gridTemplateColumns = 'repeat(' + dims.cols + ',14px)';
+        const colOpen  = '#fef3c7';   // 開 (黄)
+        const colClose = '#475569';   // 閉 (灰)
+        const _refreshGridEditorCells = () => {
+          _gridEditor.querySelectorAll('[data-row]').forEach((cell) => {
+            const r = parseInt(cell.dataset.row, 10);
+            const c = parseInt(cell.dataset.col, 10);
+            cell.style.background = window.__getFrameCellState(r, c) ? colOpen : colClose;
+          });
+        };
+        // 20×10 セル生成
+        for (let r = 0; r < dims.rows; r++) {
+          for (let c = 0; c < dims.cols; c++) {
+            const cell = document.createElement('div');
+            cell.dataset.row = r;
+            cell.dataset.col = c;
+            cell.style.width = '14px';
+            cell.style.height = '14px';
+            cell.style.cursor = 'pointer';
+            cell.style.borderRadius = '2px';
+            cell.style.background = window.__getFrameCellState(r, c) ? colOpen : colClose;
+            cell.addEventListener('click', () => {
+              window.__toggleFrameCell(r, c);
+              cell.style.background = window.__getFrameCellState(r, c) ? colOpen : colClose;
+            });
+            _gridEditor.appendChild(cell);
+          }
+        }
+        _bind('m-frame-grid-all-open',  'click', () => { window.__setAllFrameCells(true);  _refreshGridEditorCells(); });
+        _bind('m-frame-grid-all-close', 'click', () => { window.__setAllFrameCells(false); _refreshGridEditorCells(); });
+        _bind('m-frame-grid-invert',    'click', () => { window.__invertFrameCells();      _refreshGridEditorCells(); });
       }
 
       // ==================================================
