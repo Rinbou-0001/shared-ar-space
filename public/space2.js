@@ -141,13 +141,23 @@
       if (_bloomComposer) {
         _bloomComposer.setSize(winW, winH);
       }
-      // 効果7: 窓枠オーバーレイ ortho カメラのアスペクト更新 + frame 再生成
+      // 効果7: 窓枠オーバーレイ (PerspectiveCamera) のアスペクト + 距離更新 + frame 再生成
       if (_overlayCamera) {
         const aspect = winW / winH;
-        _overlayCamera.left   = -aspect;
-        _overlayCamera.right  =  aspect;
-        _overlayCamera.top    =  1;
-        _overlayCamera.bottom = -1;
+        _overlayCamera.aspect = aspect;
+        // ディスプレイサイズを viewport にフィットさせる距離を計算
+        //   距離 d: 縦フィット d_v = dispH / (2 × tan(fov/2))
+        //            横フィット d_h = dispW / (2 × tan(fov/2) × aspect)
+        //   max(d_v, d_h) で全体が確実に収まる
+        const dispW = (typeof myDisplay !== 'undefined' && myDisplay.width)  || 0.30;
+        const dispH = (typeof myDisplay !== 'undefined' && myDisplay.height) || 0.20;
+        const fovRad = _overlayCamera.fov * Math.PI / 180;
+        const halfTan = Math.tan(fovRad / 2);
+        const distV = dispH / (2 * halfTan);
+        const distH = dispW / (2 * halfTan * aspect);
+        const dist = Math.max(distV, distH);
+        _overlayCamera.position.set(0, 0, dist);
+        _overlayCamera.lookAt(0, 0, 0);
         _overlayCamera.updateProjectionMatrix();
         if (typeof _rebuildFrame === 'function') _rebuildFrame(aspect);
       }
@@ -159,8 +169,14 @@
     //   ・opening 1.7×1.7 ユニット (ortho 高さ 2 基準) = 画面縦の 85%
     //   ・左右は aspect に応じて窓枠が太くなる (縦フィットの額縁)
     const _overlayScene  = new THREE.Scene();
-    const _overlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 10);
-    _overlayCamera.position.set(0, 0, 5);
+    // PerspectiveCamera: FOV 72°, near/far は小さな物理寸法に合わせ 0.001/1.0
+    //   位置 Z は applyCanvasLayout で display サイズ + FOV から自動計算
+    const _overlayCamera = new THREE.PerspectiveCamera(
+      FRAME_FOV,
+      window.innerWidth / window.innerHeight,
+      0.001, 1.0
+    );
+    _overlayCamera.position.set(0, 0, 0.2);   // 仮、applyCanvasLayout で上書き
     _overlayCamera.lookAt(0, 0, 0);
     const _frameGroup = new THREE.Group();
     _overlayScene.add(_frameGroup);
@@ -172,16 +188,17 @@
     //   ExtrudeGeometry の material group 0 = caps (前後の平面)
     //   group 1 = sides + bevel。_rebuildFrame で配列 [caps, sides] として Mesh に渡す
     const _capsMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const FRAME_THICK   = 0.12;   // 枠太さ (XY)
-    const FRAME_DEPTH   = 0.3;    // 枠奥行き (Z)
-    // 推奨 bevel (試験値): 内側斜面で straight-on ortho でも奥行き視認可能にする
-    const BEVEL_THICK   = 0.08;   // 斜面の Z 方向深さ
-    const BEVEL_SIZE    = 0.10;   // 斜面の XY 方向幅 (内側に広がる、セルサイズに応じて動的縮小)
+    // ===== 物理メートル値での窓枠定数 (PerspectiveCamera 使用) =====
+    const FRAME_THICK   = 0.008;   // 8mm 外周枠太さ
+    const FRAME_DEPTH   = 0.03;    // 3cm 奥行き (指定)
+    const BEVEL_THICK   = 0.006;   // 6mm 斜面 Z 方向
+    const BEVEL_SIZE    = 0.004;   // 4mm 斜面 XY 方向 (セルサイズに応じ動的縮小)
     const BEVEL_SEG     = 1;
+    const FRAME_FOV     = 72;      // PerspectiveCamera 垂直 FOV (度)
     // === グリッド構造 (20×10 固定、マスターローカル) ===
     const FRAME_GRID_COLS = 20;
     const FRAME_GRID_ROWS = 10;
-    const INNER_WALL_THICK = FRAME_THICK;   // セル間の仕切り太さ = 外周と同じ
+    const INNER_WALL_THICK = FRAME_THICK;   // セル間の仕切り太さ = 外周と同じ (指定)
     // 開閉マスク (true = 穴、false = 枠材) — 既定: 中央 cols 5-14 × rows 2-7 を開く
     const _openMask = [];
     for (let r = 0; r < FRAME_GRID_ROWS; r++) {
@@ -310,18 +327,20 @@
         if (_frameMesh.geometry) _frameMesh.geometry.dispose();
         _frameMesh = null;
       }
-      // 外周 = viewport 縁
-      const outerW = aspect;
-      const outerH = 1;
+      // 外周 = ディスプレイサイズ (物理メートル)、画面中央固定
+      const dispW = (typeof myDisplay !== 'undefined' && myDisplay.width)  || 0.30;
+      const dispH = (typeof myDisplay !== 'undefined' && myDisplay.height) || 0.20;
+      const outerW = dispW / 2;   // 半幅 (中心が原点)
+      const outerH = dispH / 2;
       // グリッドセル寸法 (全セル分 + 内壁 + 外周厚みを差し引いた残りをセル数で分割)
-      const availW = 2 * outerW - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
-      const availH = 2 * outerH - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
+      const availW = dispW - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
+      const availH = dispH - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
       if (availW <= 0 || availH <= 0) return;
       const cellW = availW / FRAME_GRID_COLS;
       const cellH = availH / FRAME_GRID_ROWS;
       if (cellW <= 0 || cellH <= 0) return;
       // bevel をセル内に収まるよう動的スケール (bevel 2 本分が cell の 60% 以下)
-      const dynBevelSize = Math.max(0.001, Math.min(BEVEL_SIZE, Math.min(cellW, cellH) * 0.3));
+      const dynBevelSize = Math.max(0.0001, Math.min(BEVEL_SIZE, Math.min(cellW, cellH) * 0.3));
       const shape = new THREE.Shape();
       shape.moveTo(-outerW, -outerH);
       shape.lineTo( outerW, -outerH);
@@ -410,11 +429,18 @@
     const FRAME_AMB_BASE = 0.4;
     // 初期値は標準スライダー値 6 で起動 (base × 0.6)
     const FRAME_LIGHT_INITIAL = 6;
+    const FRAME_FILL_RATIO = 0.5;   // fill light の main 対比強度
     const _frameDir = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE * (FRAME_LIGHT_INITIAL / 10));
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
     _overlayScene.add(_frameDir);
     _overlayScene.add(_frameDir.target);
+    // 案 L-X1: 反対側 (右下前方) からの fill light、main の 50% で TOP/LEFT 内側 jamb を補助照射
+    const _frameFill = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE * FRAME_FILL_RATIO * (FRAME_LIGHT_INITIAL / 10));
+    _frameFill.position.set(2, -3, 5);
+    _frameFill.target.position.set(0, 0, 0);
+    _overlayScene.add(_frameFill);
+    _overlayScene.add(_frameFill.target);
     const _frameAmbient = new THREE.AmbientLight(0xffffff, FRAME_AMB_BASE * (FRAME_LIGHT_INITIAL / 10));
     _overlayScene.add(_frameAmbient);
     // マスターローカル専用: 窓枠光強度 (0〜10)、10 = 最大基準値
@@ -422,6 +448,7 @@
       const n = Math.max(0, Math.min(10, level | 0));
       const m = n / 10;
       _frameDir.intensity = FRAME_DIR_BASE * m;
+      _frameFill.intensity = FRAME_DIR_BASE * FRAME_FILL_RATIO * m;
       _frameAmbient.intensity = FRAME_AMB_BASE * m;
     };
     // メイン描画直後に呼び出すヘルパ。_renderMain および off-axis 分岐から利用。
