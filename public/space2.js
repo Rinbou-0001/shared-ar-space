@@ -163,11 +163,15 @@
       }
     }
 
-    // ===== 効果7: 窓枠オーバーレイ (OrthographicCamera 重畳) =====
-    //   メイン描画後に ortho カメラで額縁を前景として重ねる。
-    //   ・独立 scene + 専用光源 (DirectionalLight + AmbientLight) でメイン光源と無関係に照明
-    //   ・opening 1.7×1.7 ユニット (ortho 高さ 2 基準) = 画面縦の 85%
-    //   ・左右は aspect に応じて窓枠が太くなる (縦フィットの額縁)
+    // myDisplay は後段 (L6400 付近) で本初期化されるが、overlay setup で早期参照されるため
+    //   ここで const 宣言を前倒し (TDZ 回避)。中身はデフォルト、後段で動的に更新される
+    const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
+
+    // ===== 効果7: 窓枠オーバーレイ (PerspectiveCamera 重畳) =====
+    //   メイン描画後に perspective カメラで額縁を前景として重ねる。
+    //   ・独立 scene + 専用光源 (DirectionalLight ×2 + AmbientLight) でメイン光源と無関係に照明
+    //   ・寸法は myDisplay (物理メートル) 参照、画面中央固定、奥行き 3cm
+    //   ・内側 20×10 グリッドで open セルを指定可能
     const _overlayScene  = new THREE.Scene();
     // PerspectiveCamera: FOV 72°, near/far は小さな物理寸法に合わせ 0.001/1.0
     //   位置 Z は applyCanvasLayout で display サイズ + FOV から自動計算
@@ -6408,7 +6412,7 @@
       //   受信側はこの role を元に mode spawn を発火する (無い場合は色から逆引き)
       myRole: null,
     };
-    const myDisplay = { width: 0.30, height: 0.20, yaw: 0, pitch: 0, roll: 0, offaxis: false };
+    // myDisplay は上記 overlay setup 前で既に宣言済 (TDZ 回避のため前倒し、同一変数)
     // 手動編集フラグ: obs-display-w/h をユーザーが変更した後は自動値で上書きしない
     let _displaySizeManuallyEdited = false;
 
