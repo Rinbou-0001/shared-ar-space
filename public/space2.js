@@ -224,12 +224,23 @@
     _rebuildFrame(window.innerWidth / window.innerHeight);
     // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
     // 案 L-1: 光強度を比例縮小、明暗を 1.0 未満に収めて飽和解消
-    const _frameDir = new THREE.DirectionalLight(0xffffff, 0.5);
+    // 両ライトの基準値 (スライダー 10/10 時の値)。master ローカルスライダーで乗算
+    const FRAME_DIR_BASE = 0.5;
+    const FRAME_AMB_BASE = 0.2;
+    const _frameDir = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE);
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
     _overlayScene.add(_frameDir);
     _overlayScene.add(_frameDir.target);
-    _overlayScene.add(new THREE.AmbientLight(0xffffff, 0.2));
+    const _frameAmbient = new THREE.AmbientLight(0xffffff, FRAME_AMB_BASE);
+    _overlayScene.add(_frameAmbient);
+    // マスターローカル専用: 窓枠光強度 (0〜10)、10 = 現状 (基準値)
+    window.__setFrameLightLevel = function(level) {
+      const n = Math.max(0, Math.min(10, level | 0));
+      const m = n / 10;
+      _frameDir.intensity = FRAME_DIR_BASE * m;
+      _frameAmbient.intensity = FRAME_AMB_BASE * m;
+    };
     // メイン描画直後に呼び出すヘルパ。_renderMain および off-axis 分岐から利用。
     //   autoClear を一時 false にして clearDepth → overlay 描画 → 元に戻す
     function _renderWindowFrameOverlay() {
@@ -8652,6 +8663,23 @@
         });
       }
       if (window.__syncMasterPointSlider) window.__syncMasterPointSlider();
+
+      // ==================================================
+      // 窓枠内面ライト強度スライダー (0〜10、マスターローカル、同期なし)
+      //   スライダー値 10 = 現状 (基準値)。window.__setFrameLightLevel を介して反映
+      // ==================================================
+      const _flInp = _by('m-frame-light');
+      const _flVal = _by('m-frame-light-val');
+      if (_flInp) {
+        _flInp.addEventListener('input', () => {
+          const n = parseInt(_flInp.value, 10);
+          if (!isFinite(n)) return;
+          if (typeof window.__setFrameLightLevel === 'function') {
+            window.__setFrameLightLevel(n);
+          }
+          if (_flVal) _flVal.textContent = String(n);
+        });
+      }
 
       // ==================================================
       // 移動 Box 質量 (cube 選択 + 数値入力、Enter で即時適用)
