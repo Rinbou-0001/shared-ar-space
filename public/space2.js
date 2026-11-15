@@ -128,6 +128,11 @@
     renderer.toneMappingExposure = 1.0;
     document.getElementById('stage').appendChild(renderer.domElement);
 
+    // _bloomComposer / _bloomPass: applyCanvasLayout 内で参照されるため、
+    //   TDZ 回避のためここで null で先行宣言 (本来の初期化は L474+ の _ensureBloomComposer で行う)
+    let _bloomComposer = null;
+    let _bloomPass = null;
+
     // canvas レイアウト: canvas は常に window 全体を占有 (letterbox しない)。
     //   同期 ON/OFF はカメラ視野内で「self の視錐台 base 面が canvas をちょうど埋める」
     //   ように、self avatar 側の base 距離 (depth) を動的計算することで実現する。
@@ -471,8 +476,7 @@
     //   注: このフラグは _makePaintable (shader 注入) と render ループ (composer 使用) の両方で参照
     window.__paintBloomEnabled = (typeof window.__paintBloomEnabled === 'boolean') ? window.__paintBloomEnabled : false;
     // Composer 遅延生成: three postprocessing スクリプトのロードを待つため
-    let _bloomComposer = null;
-    let _bloomPass = null;
+    //   (変数 _bloomComposer / _bloomPass は上部で先行宣言済、ここでは重複宣言しない)
     function _ensureBloomComposer() {
       if (_bloomComposer) return _bloomComposer;
       if (typeof THREE.EffectComposer !== 'function' || typeof THREE.UnrealBloomPass !== 'function' || typeof THREE.RenderPass !== 'function') {
