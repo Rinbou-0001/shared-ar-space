@@ -216,12 +216,13 @@
     // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
     _rebuildFrame(window.innerWidth / window.innerHeight);
     // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
-    const _frameDir = new THREE.DirectionalLight(0xffffff, 1.0);
+    // 案 L-1: 光強度を比例縮小、明暗を 1.0 未満に収めて飽和解消
+    const _frameDir = new THREE.DirectionalLight(0xffffff, 0.5);
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
     _overlayScene.add(_frameDir);
     _overlayScene.add(_frameDir.target);
-    _overlayScene.add(new THREE.AmbientLight(0xffffff, 0.3));
+    _overlayScene.add(new THREE.AmbientLight(0xffffff, 0.2));
     // メイン描画直後に呼び出すヘルパ。_renderMain および off-axis 分岐から利用。
     //   autoClear を一時 false にして clearDepth → overlay 描画 → 元に戻す
     function _renderWindowFrameOverlay() {
