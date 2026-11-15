@@ -344,8 +344,8 @@
       const cellW = availW / FRAME_GRID_COLS;
       const cellH = availH / FRAME_GRID_ROWS;
       if (cellW <= 0 || cellH <= 0) return;
-      // bevel をセル内に収まるよう動的スケール (bevel 2 本分が cell の 60% 以下)
-      const dynBevelSize = Math.max(0.0001, Math.min(BEVEL_SIZE, Math.min(cellW, cellH) * 0.3));
+      // PerspectiveCamera では内側斜面 (bevel) は不要 — 側面は perspective により自然に可視化
+      //   bevel を完全に無効化し、ジャム (jamb) を視線に対して垂直な平面として描画
       const shape = new THREE.Shape();
       shape.moveTo(-outerW, -outerH);
       shape.lineTo( outerW, -outerH);
@@ -378,15 +378,11 @@
       }
       const geom = new THREE.ExtrudeGeometry(shape, {
         depth: FRAME_DEPTH,
-        bevelEnabled: true,
-        bevelThickness: BEVEL_THICK,
-        bevelSize: dynBevelSize,
-        bevelOffset: 0,
-        bevelSegments: BEVEL_SEG,
+        bevelEnabled: false,   // perspective 投影で側面が自然に見える、bevel 不要
       });
       geom.translate(0, 0, -FRAME_DEPTH / 2);   // Z 中心を 0 に合わせる
       // 案 M-1: material 配列 [caps, sides] — 前面は _capsMaterial (unlit 固定色)、
-      //   側面・bevel は _frameMaterial (shaded)
+      //   側面 (jamb) は _frameMaterial (shaded)
       _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial]);
       _frameGroup.add(_frameMesh);
     }
@@ -423,8 +419,9 @@
     window.__getFrameMergeAdjacent = function() {
       return _frameMergeAdjacent;
     };
-    // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
-    _rebuildFrame(window.innerWidth / window.innerHeight);
+    // 初回: applyCanvasLayout 経由でカメラ距離 + 窓枠を正しくディスプレイサイズへフィット
+    //   (以降は resize/fullscreenchange が同じ処理をトリガー)
+    applyCanvasLayout();
     // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
     // 案 L-1: 光強度を比例縮小、明暗を 1.0 未満に収めて飽和解消
     // 両ライトの基準値 (スライダー 10/10 時の値)。master ローカルスライダーで乗算
