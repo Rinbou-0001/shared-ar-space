@@ -229,14 +229,16 @@
     //   (slider 10 で過剰に感じる場合は下げて使用、スライダー 5 で旧 L-1 相当)
     const FRAME_DIR_BASE = 1.0;
     const FRAME_AMB_BASE = 0.4;
-    const _frameDir = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE);
+    // 初期値は標準スライダー値 6 で起動 (base × 0.6)
+    const FRAME_LIGHT_INITIAL = 6;
+    const _frameDir = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE * (FRAME_LIGHT_INITIAL / 10));
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
     _overlayScene.add(_frameDir);
     _overlayScene.add(_frameDir.target);
-    const _frameAmbient = new THREE.AmbientLight(0xffffff, FRAME_AMB_BASE);
+    const _frameAmbient = new THREE.AmbientLight(0xffffff, FRAME_AMB_BASE * (FRAME_LIGHT_INITIAL / 10));
     _overlayScene.add(_frameAmbient);
-    // マスターローカル専用: 窓枠光強度 (0〜10)、10 = 現状 (基準値)
+    // マスターローカル専用: 窓枠光強度 (0〜10)、10 = 最大基準値
     window.__setFrameLightLevel = function(level) {
       const n = Math.max(0, Math.min(10, level | 0));
       const m = n / 10;
