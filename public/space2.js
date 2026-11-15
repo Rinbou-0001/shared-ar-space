@@ -164,9 +164,14 @@
     _overlayCamera.lookAt(0, 0, 0);
     const _frameGroup = new THREE.Group();
     _overlayScene.add(_frameGroup);
+    // 側面・bevel 用 (shaded)。光源強度は案 L-1 (Dir 0.5 + Ambient 0.2)
     const _frameMaterial = new THREE.MeshStandardMaterial({
       color: 0xffffff, roughness: 0.6, metalness: 0.0,
     });
+    // 前面 (caps) 用 (unlit、常に指定色固定)。
+    //   ExtrudeGeometry の material group 0 = caps (前後の平面)
+    //   group 1 = sides + bevel。_rebuildFrame で配列 [caps, sides] として Mesh に渡す
+    const _capsMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const FRAME_THICK   = 0.12;   // 枠太さ (XY)
     const FRAME_DEPTH   = 0.3;    // 枠奥行き (Z)
     // 推奨 bevel (試験値): 内側斜面で straight-on ortho でも奥行き視認可能にする
@@ -210,7 +215,9 @@
         bevelSegments: BEVEL_SEG,
       });
       geom.translate(0, 0, -FRAME_DEPTH / 2);   // Z 中心を 0 に合わせる
-      _frameMesh = new THREE.Mesh(geom, _frameMaterial);
+      // 案 M-1: material 配列 [caps, sides] — 前面は _capsMaterial (unlit 固定色)、
+      //   側面・bevel は _frameMaterial (shaded)
+      _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial]);
       _frameGroup.add(_frameMesh);
     }
     // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
