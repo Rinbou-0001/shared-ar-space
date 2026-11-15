@@ -225,8 +225,10 @@
     // 傾けは削除 (bevel で内側斜面が投影面積を持つため不要)
     // 案 L-1: 光強度を比例縮小、明暗を 1.0 未満に収めて飽和解消
     // 両ライトの基準値 (スライダー 10/10 時の値)。master ローカルスライダーで乗算
-    const FRAME_DIR_BASE = 0.5;
-    const FRAME_AMB_BASE = 0.2;
+    //   スライダー 10 = 最大光度として、十分な明るさを確保するよう上限を引き上げ
+    //   (slider 10 で過剰に感じる場合は下げて使用、スライダー 5 で旧 L-1 相当)
+    const FRAME_DIR_BASE = 1.0;
+    const FRAME_AMB_BASE = 0.4;
     const _frameDir = new THREE.DirectionalLight(0xffffff, FRAME_DIR_BASE);
     _frameDir.position.set(-2, 3, 5);
     _frameDir.target.position.set(0, 0, 0);
