@@ -194,6 +194,114 @@
     // Frame は 1 本の ExtrudeGeometry Mesh で構築、aspect/マスク変化時に再生成
     let _frameMesh = null;
     let _lastFrameAspect = window.innerWidth / window.innerHeight;
+    // 案 GR-B: 隣接する open セルを融合 (仕切り消去) するフラグ (一時要素、OFF で案 GR-A 復帰)
+    let _frameMergeAdjacent = true;
+
+    // ===== 案 GR-B: open セル連結領域を融合し境界 Path を構築 =====
+    //   ・サブピクセル格子 (cell + 壁 + コーナー) でラスタライズ
+    //   ・各 open サブピクセルの 4 辺で「隣接する closed/OOB があれば境界」判定
+    //   ・CCW 方向付き辺を map に収集 → 連結チェーンで多角形トレース
+    //   ・共線頂点を簡素化
+    function _computeFrameHolesMerged(aspect, cellW, cellH, outerW, outerH) {
+      const SR = 2 * FRAME_GRID_ROWS + 1;
+      const SC = 2 * FRAME_GRID_COLS + 1;
+      // サブセル境界の世界 x/y 座標
+      const sx = new Array(SC + 1);
+      const sy = new Array(SR + 1);
+      sx[0] = -outerW;
+      sx[1] = -outerW + FRAME_THICK;
+      for (let c = 0; c < FRAME_GRID_COLS; c++) {
+        const xL = -outerW + FRAME_THICK + c * (cellW + INNER_WALL_THICK);
+        const xR = xL + cellW;
+        sx[2 * c + 1] = xL;
+        sx[2 * c + 2] = xR;
+      }
+      sx[SC] = outerW;
+      sy[0] = outerH;
+      sy[1] = outerH - FRAME_THICK;
+      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+        const yT = outerH - FRAME_THICK - r * (cellH + INNER_WALL_THICK);
+        const yB = yT - cellH;
+        sy[2 * r + 1] = yT;
+        sy[2 * r + 2] = yB;
+      }
+      sy[SR] = -outerH;
+      // 各サブピクセルの open/closed 判定
+      const open = Array.from({ length: SR }, () => new Array(SC).fill(false));
+      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+        for (let c = 0; c < FRAME_GRID_COLS; c++) {
+          if (!_openMask[r] || !_openMask[r][c]) continue;
+          open[2 * r + 1][2 * c + 1] = true;  // セル本体
+          // 水平壁 (下、row r と r+1 の間)
+          if (r + 1 < FRAME_GRID_ROWS && _openMask[r + 1] && _openMask[r + 1][c]) {
+            open[2 * r + 2][2 * c + 1] = true;
+          }
+          // 垂直壁 (右、col c と c+1 の間)
+          if (c + 1 < FRAME_GRID_COLS && _openMask[r][c + 1]) {
+            open[2 * r + 1][2 * c + 2] = true;
+          }
+          // コーナー (4 セル全てが open の時のみ)
+          if (r + 1 < FRAME_GRID_ROWS && c + 1 < FRAME_GRID_COLS
+              && _openMask[r + 1] && _openMask[r + 1][c] && _openMask[r][c + 1] && _openMask[r + 1][c + 1]) {
+            open[2 * r + 2][2 * c + 2] = true;
+          }
+        }
+      }
+      // 各 open サブピクセルの 4 辺で境界判定、CCW 方向付き辺を map に収集
+      //   頂点キー: 'sr,sc' (sx[sc], sy[sr])
+      const edgesFrom = new Map();
+      const vKey = (r, c) => r + ',' + c;
+      for (let sr = 0; sr < SR; sr++) {
+        for (let sc = 0; sc < SC; sc++) {
+          if (!open[sr][sc]) continue;
+          const up    = (sr - 1 >= 0) && open[sr - 1][sc];
+          const down  = (sr + 1 < SR) && open[sr + 1][sc];
+          const left  = (sc - 1 >= 0) && open[sr][sc - 1];
+          const right = (sc + 1 < SC) && open[sr][sc + 1];
+          if (!up)    edgesFrom.set(vKey(sr, sc + 1), vKey(sr, sc));           // TOP 辺: 右→左
+          if (!down)  edgesFrom.set(vKey(sr + 1, sc), vKey(sr + 1, sc + 1));   // BOTTOM 辺: 左→右
+          if (!left)  edgesFrom.set(vKey(sr, sc), vKey(sr + 1, sc));           // LEFT 辺: 上→下
+          if (!right) edgesFrom.set(vKey(sr + 1, sc + 1), vKey(sr, sc + 1));   // RIGHT 辺: 下→上
+        }
+      }
+      // 辺を連結してポリゴンを抽出
+      const paths = [];
+      while (edgesFrom.size > 0) {
+        const startKey = edgesFrom.keys().next().value;
+        const seq = [];
+        let current = startKey;
+        const maxIter = edgesFrom.size + 10;
+        for (let i = 0; i < maxIter; i++) {
+          seq.push(current);
+          const next = edgesFrom.get(current);
+          edgesFrom.delete(current);
+          if (!next || next === startKey) break;
+          current = next;
+        }
+        if (seq.length < 3) continue;
+        // 世界座標へ
+        const worldPts = seq.map((k) => {
+          const parts = k.split(',');
+          return [sx[+parts[1]], sy[+parts[0]]];
+        });
+        // 共線頂点を除去して簡素化
+        const simp = [];
+        for (let i = 0; i < worldPts.length; i++) {
+          const p0 = worldPts[(i - 1 + worldPts.length) % worldPts.length];
+          const p1 = worldPts[i];
+          const p2 = worldPts[(i + 1) % worldPts.length];
+          const cross = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0]);
+          if (Math.abs(cross) > 1e-9) simp.push(p1);
+        }
+        if (simp.length < 3) continue;
+        const path = new THREE.Path();
+        path.moveTo(simp[0][0], simp[0][1]);
+        for (let i = 1; i < simp.length; i++) path.lineTo(simp[i][0], simp[i][1]);
+        path.lineTo(simp[0][0], simp[0][1]);
+        paths.push(path);
+      }
+      return paths;
+    }
     function _rebuildFrame(aspect) {
       _lastFrameAspect = aspect;
       // 既存の Mesh を破棄
@@ -220,21 +328,28 @@
       shape.lineTo( outerW,  outerH);
       shape.lineTo(-outerW,  outerH);
       shape.lineTo(-outerW, -outerH);
-      // 開くセルごとに hole Path を追加 (案 GR-A: 隣接 open セル間に仕切り残す)
-      for (let row = 0; row < FRAME_GRID_ROWS; row++) {
-        for (let col = 0; col < FRAME_GRID_COLS; col++) {
-          if (!_openMask[row] || !_openMask[row][col]) continue;
-          const x0 = -outerW + FRAME_THICK + col * (cellW + INNER_WALL_THICK);
-          const x1 = x0 + cellW;
-          const y1 = outerH - FRAME_THICK - row * (cellH + INNER_WALL_THICK);
-          const y0 = y1 - cellH;
-          const hole = new THREE.Path();
-          hole.moveTo(x0, y0);
-          hole.lineTo(x1, y0);
-          hole.lineTo(x1, y1);
-          hole.lineTo(x0, y1);
-          hole.lineTo(x0, y0);
-          shape.holes.push(hole);
+      // Hole 生成: 案 GR-B (融合) か 案 GR-A (仕切り残す) を切替
+      if (_frameMergeAdjacent) {
+        // 案 GR-B: 隣接 open セルを融合、連結領域を 1 つの多角形 hole として生成
+        const mergedPaths = _computeFrameHolesMerged(aspect, cellW, cellH, outerW, outerH);
+        for (const p of mergedPaths) shape.holes.push(p);
+      } else {
+        // 案 GR-A: 各 open セルを独立 hole として追加 (仕切り残す、フォールバック)
+        for (let row = 0; row < FRAME_GRID_ROWS; row++) {
+          for (let col = 0; col < FRAME_GRID_COLS; col++) {
+            if (!_openMask[row] || !_openMask[row][col]) continue;
+            const x0 = -outerW + FRAME_THICK + col * (cellW + INNER_WALL_THICK);
+            const x1 = x0 + cellW;
+            const y1 = outerH - FRAME_THICK - row * (cellH + INNER_WALL_THICK);
+            const y0 = y1 - cellH;
+            const hole = new THREE.Path();
+            hole.moveTo(x0, y0);
+            hole.lineTo(x1, y0);
+            hole.lineTo(x1, y1);
+            hole.lineTo(x0, y1);
+            hole.lineTo(x0, y0);
+            shape.holes.push(hole);
+          }
         }
       }
       const geom = new THREE.ExtrudeGeometry(shape, {
@@ -275,6 +390,14 @@
         for (let c = 0; c < FRAME_GRID_COLS; c++) _openMask[r][c] = !_openMask[r][c];
       }
       _rebuildFrame(_lastFrameAspect);
+    };
+    // 案 GR-B の ON/OFF 切替 (一時要素、OFF で案 GR-A フォールバック)
+    window.__setFrameMergeAdjacent = function(on) {
+      _frameMergeAdjacent = !!on;
+      _rebuildFrame(_lastFrameAspect);
+    };
+    window.__getFrameMergeAdjacent = function() {
+      return _frameMergeAdjacent;
     };
     // 初回ビルド (以降は applyCanvasLayout が resize/fullscreenchange で再呼び出し)
     _rebuildFrame(window.innerWidth / window.innerHeight);
@@ -8781,6 +8904,18 @@
         _bind('m-frame-grid-all-open',  'click', () => { window.__setAllFrameCells(true);  _refreshGridEditorCells(); });
         _bind('m-frame-grid-all-close', 'click', () => { window.__setAllFrameCells(false); _refreshGridEditorCells(); });
         _bind('m-frame-grid-invert',    'click', () => { window.__invertFrameCells();      _refreshGridEditorCells(); });
+        // 隣接セル融合トグル (案 GR-B の ON/OFF)
+        const _mergeBtn = _by('m-frame-grid-merge');
+        if (_mergeBtn && typeof window.__setFrameMergeAdjacent === 'function') {
+          _mergeBtn.addEventListener('click', () => {
+            const next = _mergeBtn.dataset.on !== '1';
+            window.__setFrameMergeAdjacent(next);
+            _mergeBtn.dataset.on = next ? '1' : '0';
+            _mergeBtn.textContent = '隣接セル融合: ' + (next ? 'ON' : 'OFF');
+            _mergeBtn.style.background = next ? '#22c55e' : '#475569';
+            _mergeBtn.style.color = next ? '#052e16' : 'white';
+          });
+        }
       }
 
       // ==================================================
