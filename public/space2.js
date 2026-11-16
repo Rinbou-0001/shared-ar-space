@@ -7619,10 +7619,10 @@
 
     // ========== メインループ用: フレーム更新関数のレジストリ (setupObserver が push するので先に宣言) ==========
     const updaters = [];
-    // snap タグ: 視錐台 base を壁ボックスへスナップ (pose 上書き、全 avatar 対象)
-    //   pose 更新 (socket event) は非同期、updaters は毎フレーム。
-    //   snap 判定を pose 適用後に走らせることで、snap が正しく上書きされる
-    if (typeof _snapTick === 'function') updaters.push(_snapTick);
+    // snap タグ: 自身の視点 (camera.position/quaternion) を壁面にスナップ
+    //   → render ループ内で面タグ直前に処理 (下記 _snapApplyToSelf)。updaters からは外した。
+    // self 用 cache (直前に選択した壁面)
+    let _snapSelfCache = null;
     // camera role の held cube 追従 (毎フレーム targetPos を camera + forward·GRAB_DIST に更新)
     //   ・物理 tick より先に実行することで、Spring-Damper が最新 targetPos を即座に参照できる
     //     → スマホ回転 → 1 フレーム以内に spring 加速度が反映 → cube が phone 方向に追従
@@ -8285,6 +8285,8 @@
         const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
         yaw = e.y; pitch = e.x;
       };
+      // snap 用: render ループが camera.quaternion を上書きした後、yaw/pitch を再同期できるよう公開
+      window.__obsResync = _obsResync;
 
       const dom = renderer.domElement;
       dom.style.cursor = 'grab';
@@ -9856,8 +9858,60 @@
       if (!_plateGrpForDisplay && ROLE === 'observer' && typeof window.__getMyFacePanel === 'function') {
         _faceGrpForDisplay = window.__getMyFacePanel();
       }
+      // ===== snap タグ: 壁ボックス内で視線先の壁面に camera.position をスナップ =====
+      //   ・対象: observer / master / camera 全ロール (自身に snap タグがあれば発動)
+      //   ・法線方向のみロック (壁面に沿ったスライドは自由)
+      //   ・camera.quaternion は壁正対方向 (normal 方向を forward) に強制
+      //   ・box 内側 (|x|≤1.5, 0≤y≤3, |z|≤1.5) でのみ発動 (外側では解除してキャッシュクリア)
+      //   ・向きキャッシュ: 以前選んだ面が視野内なら継続、外れたら random で再選択
+      let _snapApplied = false;
+      if (myId != null) {
+        const _self = avatars.get(myId);
+        const _hasSnap = !!(_self && _self.customTags && _self.customTags.indexOf('snap') >= 0);
+        if (_hasSnap) {
+          const _cx = camera.position.x, _cy = camera.position.y, _cz = camera.position.z;
+          const _inside = (_cx >= -1.5 && _cx <= 1.5 && _cy >= 0 && _cy <= 3 && _cz >= -1.5 && _cz <= 1.5);
+          if (_inside) {
+            const _fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            // 内側から壁を見ている場合: forward と外向き normal の内積 > 0
+            const _visible = [];
+            for (let i = 0; i < _snapWallFaces.length; i++) {
+              const f = _snapWallFaces[i];
+              if (_fwd.dot(f.normal) > 0.1) _visible.push(f);
+            }
+            if (_visible.length > 0) {
+              let _picked = _snapSelfCache;
+              if (!_picked || _visible.indexOf(_picked) < 0) {
+                _picked = (_visible.length === 1)
+                  ? _visible[0]
+                  : _visible[Math.floor(Math.random() * _visible.length)];
+                _snapSelfCache = _picked;
+              }
+              // 法線方向ロック
+              if (Math.abs(_picked.normal.x) > 0.5)      camera.position.x = _picked.center.x;
+              else if (Math.abs(_picked.normal.y) > 0.5) camera.position.y = _picked.center.y;
+              else if (Math.abs(_picked.normal.z) > 0.5) camera.position.z = _picked.center.z;
+              // 接線方向は壁面範囲内にクランプ
+              camera.position.x = Math.max(-1.5, Math.min(1.5, camera.position.x));
+              camera.position.y = Math.max(0,    Math.min(3,   camera.position.y));
+              camera.position.z = Math.max(-1.5, Math.min(1.5, camera.position.z));
+              // 壁正対方向 (= 外向き normal 方向) を forward に
+              const _lookTarget = new THREE.Vector3().copy(camera.position).addScaledVector(_picked.normal, 10);
+              camera.lookAt(_lookTarget);
+              // observer の yaw/pitch を再同期 (マウス drag 後のジャンプ防止)
+              if (typeof window.__obsResync === 'function') window.__obsResync();
+              _snapApplied = true;
+            }
+          } else {
+            _snapSelfCache = null;
+          }
+        } else {
+          _snapSelfCache = null;
+        }
+      }
       // 面タグ ON → camera position/quaternion を apex へ毎フレーム snap (off-axis とは無関係)
-      if (_faceGrpForDisplay && _faceGrpForDisplay.userData.faceMesh) {
+      //   snap タグ適用時はスキップ (snap が優先)
+      if (!_snapApplied && _faceGrpForDisplay && _faceGrpForDisplay.userData.faceMesh) {
         _faceGrpForDisplay.updateMatrixWorld(true);
         const fMesh = _faceGrpForDisplay.userData.faceMesh;
         fMesh.updateMatrixWorld(true);
