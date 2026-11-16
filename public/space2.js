@@ -329,6 +329,126 @@
       }
       return paths;
     }
+
+    // ===== 窓枠グリッド自動生成 (案 E: seed 配信 + Perlin + 連結化 + 二分探索) =====
+    //   条件:
+    //     ① open 比率 20〜60%
+    //     ② 全 open セルが 1 つの連結領域
+    //     ③ Noise-based (Perlin) 分布
+    //     ④ noiseScale = 4.0、最大 5 回 retry、全失敗時は中央 10×6 全開
+    function _makePerlin2D(seed) {
+      // seed から permutation table を shuffle
+      const p = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) p[i] = i;
+      let s = (seed >>> 0) || 1;
+      const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+      for (let i = 255; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        const tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+      }
+      const perm = new Uint8Array(512);
+      for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+      const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+      const lerp = (a, b, t) => a + t * (b - a);
+      const grad = (hash, x, y) => {
+        const h = hash & 3;
+        const u = h < 2 ? x : y;
+        const v = h < 2 ? y : x;
+        return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
+      };
+      return function perlin2(x, y) {
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        const xf = x - Math.floor(x);
+        const yf = y - Math.floor(y);
+        const u = fade(xf);
+        const v = fade(yf);
+        const aa = perm[perm[X] + Y];
+        const ab = perm[perm[X] + Y + 1];
+        const ba = perm[perm[X + 1] + Y];
+        const bb = perm[perm[X + 1] + Y + 1];
+        const x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1, yf), u);
+        const x2 = lerp(grad(ab, xf, yf - 1), grad(bb, xf - 1, yf - 1), u);
+        return lerp(x1, x2, v);   // 概ね [-1, 1] 範囲
+      };
+    }
+    function _extractLargestConnected(rawMask, rows, cols) {
+      const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
+      let bestSize = 0;
+      let bestComp = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          if (!rawMask[r][c] || visited[r][c]) continue;
+          const comp = [];
+          const stack = [[r, c]];
+          visited[r][c] = true;
+          while (stack.length) {
+            const [cr, cc] = stack.pop();
+            comp.push([cr, cc]);
+            const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+            for (let di = 0; di < 4; di++) {
+              const nr = cr + dirs[di][0], nc = cc + dirs[di][1];
+              if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+              if (!rawMask[nr][nc] || visited[nr][nc]) continue;
+              visited[nr][nc] = true;
+              stack.push([nr, nc]);
+            }
+          }
+          if (comp.length > bestSize) {
+            bestSize = comp.length;
+            bestComp = comp;
+          }
+        }
+      }
+      const newMask = Array.from({ length: rows }, () => new Array(cols).fill(false));
+      for (const [r, c] of bestComp) newMask[r][c] = true;
+      return { mask: newMask, size: bestSize };
+    }
+    function _generateAutoMask(baseSeed) {
+      const COLS = FRAME_GRID_COLS;
+      const ROWS = FRAME_GRID_ROWS;
+      const SCALE = 4.0;
+      const TOTAL = COLS * ROWS;
+      const MIN_RATIO = 0.20;
+      const MAX_RATIO = 0.60;
+      const MAX_RETRY = 5;
+      for (let retry = 0; retry < MAX_RETRY; retry++) {
+        const seed = ((baseSeed >>> 0) + retry * 1337) >>> 0;
+        const perlin = _makePerlin2D(seed);
+        // ノイズフィールドを生成
+        const field = [];
+        for (let r = 0; r < ROWS; r++) {
+          const row = [];
+          for (let c = 0; c < COLS; c++) {
+            row.push(perlin(c / SCALE, r / SCALE));
+          }
+          field.push(row);
+        }
+        // 二分探索で threshold を調整
+        let low = -1.0, high = 1.0;
+        for (let iter = 0; iter < 30; iter++) {
+          const mid = (low + high) / 2;
+          const rawMask = field.map(row => row.map(v => v > mid));
+          const { mask: connected, size } = _extractLargestConnected(rawMask, ROWS, COLS);
+          const ratio = size / TOTAL;
+          if (ratio >= MIN_RATIO && ratio <= MAX_RATIO) {
+            log('[frame] auto-mask ok: seed=' + seed + ' retry=' + retry + ' iter=' + iter + ' ratio=' + ratio.toFixed(3), 'ok');
+            return connected;
+          }
+          if (ratio < MIN_RATIO) high = mid;   // open 増やす → threshold 下げる
+          else                    low = mid;    // open 減らす → threshold 上げる
+        }
+        // この seed では収束失敗 → retry
+      }
+      // 全 retry 失敗: フォールバック 中央 10×6 全開
+      log('[frame] auto-mask fallback: center 10x6', 'warn');
+      const fallback = Array.from({ length: FRAME_GRID_ROWS }, () => new Array(FRAME_GRID_COLS).fill(false));
+      for (let r = 2; r <= 7; r++) {
+        for (let c = 5; c <= 14; c++) fallback[r][c] = true;
+      }
+      return fallback;
+    }
+
     function _rebuildFrame(aspect) {
       _lastFrameAspect = aspect;
       // 既存の Mesh を破棄
@@ -7049,6 +7169,26 @@
 
       // 検証用トグル (effect1..3) の全クライアント同期
       //   ・window.__effect[n] を上書き
+      // 窓枠グリッド自動生成 seed 受信 (入室時 1 回、全ロール共通)
+      //   サーバーの frameSeed を元に Perlin + 連結化で _openMask を生成し frame を再構築
+      socket.on('frameSeed', (data) => {
+        if (!data || typeof data.seed !== 'number') return;
+        if (typeof _generateAutoMask !== 'function' || typeof _openMask === 'undefined') return;
+        const mask = _generateAutoMask(data.seed);
+        for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+          for (let c = 0; c < FRAME_GRID_COLS; c++) {
+            _openMask[r][c] = !!(mask[r] && mask[r][c]);
+          }
+        }
+        if (typeof _rebuildFrame === 'function') {
+          _rebuildFrame(_lastFrameAspect || (window.innerWidth / window.innerHeight));
+        }
+        // master のグリッドエディタ UI も同期更新
+        if (typeof window.__refreshFrameGridEditorUI === 'function') {
+          window.__refreshFrameGridEditorUI();
+        }
+      });
+
       //   ・master はボタン UI を同期 (dirty なし、サーバー値が真)
       //   ・camera + effect1 の場合は空間表示モード (AR / VR) を即時切替
       socket.on('effectState', (data) => {
@@ -8916,6 +9056,8 @@
             cell.style.background = window.__getFrameCellState(r, c) ? colOpen : colClose;
           });
         };
+        // 自動生成 seed 受信時にグリッドエディタ UI も同期させるため global 公開
+        window.__refreshFrameGridEditorUI = _refreshGridEditorCells;
         // 20×10 セル生成
         for (let r = 0; r < dims.rows; r++) {
           for (let c = 0; c < dims.cols; c++) {

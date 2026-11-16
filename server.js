@@ -111,6 +111,8 @@ let moveConfig = { sensitivity: 10 };
 //   新規接続時にも initEffects で現在値を送る
 // 効果2 (camera のスプレー缶 UI モード) はデフォルト ON 恒常化
 let effectState = { 1: true, 2: true, 3: false, 4: true, 5: true, 6: false, 7: true };
+// 窓枠グリッド自動生成用 seed (サーバー起動時に 1 回生成、全クライアントへ配信)
+const frameSeed = Math.floor(Math.random() * 0xFFFFFFFF);
 
 // space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。
 //   各要素: { u, v, c (hex 6文字) } — 1 件 ~24 bytes
@@ -205,6 +207,8 @@ io.on('connection', (socket) => {
   for (const n of [1, 2, 3, 4, 5, 6, 7]) {
     socket.emit('effectState', { effect: n, on: !!effectState[n] });
   }
+  // 窓枠グリッド seed を配信 (接続直後、1 回のみ)
+  socket.emit('frameSeed', { seed: frameSeed });
   // 接続直後に space3 スプレー履歴をまとめて配信 (チャンク化して送信、新規接続者に塗りを同期)
   if (sprayHistory.length > 0) {
     const CHUNK = 1000;
