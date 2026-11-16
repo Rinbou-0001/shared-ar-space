@@ -8533,12 +8533,22 @@
       };
       syncObsOaBtn();
       _bind('obs-offaxis-toggle', 'click', () => {
+        const wasOn = !!myDisplay.offaxis;
         myDisplay.offaxis = !myDisplay.offaxis;
         syncObsOaBtn();
         if (socket && socket.connected) {
           socket.emit('displayConfig', { offaxis: myDisplay.offaxis });
         }
         log('observer offaxis → ' + (myDisplay.offaxis ? 'ON' : 'OFF'), 'ok');
+        // snap と offaxis を連動: 両方 ON の状態から offaxis を OFF にしたら snap も OFF
+        if (wasOn && !myDisplay.offaxis) {
+          const self = (myId != null) ? avatars.get(myId) : null;
+          const hasSnap = !!(self && self.customTags && self.customTags.indexOf('snap') >= 0);
+          if (hasSnap && socket && socket.connected) {
+            socket.emit('avatarTag', { targetId: myId, tag: 'snap', on: false });
+            log('offaxis OFF に連動して snap → OFF', 'ok');
+          }
+        }
       });
 
       // ========== Canvas 同期 トグル ==========
@@ -8647,6 +8657,22 @@
           const nextOn = !(tags.indexOf(tag) >= 0);
           socket.emit('avatarTag', { targetId: myId, tag: tag, on: nextOn });
           log('self ' + tag + ' → ' + (nextOn ? 'ON' : 'OFF'), 'ok');
+          // snap と offaxis を連動
+          if (tag === 'snap') {
+            if (nextOn && !myDisplay.offaxis) {
+              // snap ON → offaxis も ON
+              myDisplay.offaxis = true;
+              if (typeof syncObsOaBtn === 'function') syncObsOaBtn();
+              socket.emit('displayConfig', { offaxis: true });
+              log('snap ON に連動して offaxis → ON', 'ok');
+            } else if (!nextOn && myDisplay.offaxis) {
+              // 両方 ON の状態から snap を OFF → offaxis も OFF
+              myDisplay.offaxis = false;
+              if (typeof syncObsOaBtn === 'function') syncObsOaBtn();
+              socket.emit('displayConfig', { offaxis: false });
+              log('snap OFF に連動して offaxis → OFF', 'ok');
+            }
+          }
         });
       });
       _syncObsPlateButtons();
