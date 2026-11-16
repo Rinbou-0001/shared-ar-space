@@ -8532,7 +8532,7 @@
       // ========== plate1 / plate2 / top / left / right セルフタグ付与ボタン (観測者用) ==========
       //   クリックで自分自身に対して avatarTag(tag名) を toggle emit
       //   サーバー側は role!=master の自己 plate タグに限り受理するよう緩和済み
-      const _obsSelfTags = ['plate1', 'plate2', 'top', 'left', 'right'];
+      const _obsSelfTags = ['plate1', 'plate2', 'top', 'left', 'right', 'snap'];
       function _syncObsPlateButtons() {
         const self = (myId != null) ? avatars.get(myId) : null;
         const tags = (self && self.customTags) ? self.customTags : [];
