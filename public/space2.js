@@ -313,36 +313,85 @@
         const inRegion = new Set();
         for (let i = 0; i < region.length; i++) inRegion.add(region[i][0] * SC + region[i][1]);
         const isOpenInRegion = (sr, sc) => (sr >= 0 && sr < SR && sc >= 0 && sc < SC && inRegion.has(sr * SC + sc));
-        const edgesFrom = new Map();
+        // ★ 案 B-1: マルチマップで複数出力エッジを許容
+        //   同一領域内の pinch point (斜め接触で頂点共有) で、1 頂点から 2 本の
+        //   出力エッジが生じるケースを正しく分離するため
+        const edgesFrom = new Map();   // Map<key, Array<nextKey>>
+        const addEdge = (from, to) => {
+          if (!edgesFrom.has(from)) edgesFrom.set(from, []);
+          edgesFrom.get(from).push(to);
+        };
+        let totalEdges = 0;
         for (let i = 0; i < region.length; i++) {
           const sr = region[i][0], sc = region[i][1];
           const up    = isOpenInRegion(sr - 1, sc);
           const down  = isOpenInRegion(sr + 1, sc);
           const left  = isOpenInRegion(sr, sc - 1);
           const right = isOpenInRegion(sr, sc + 1);
-          if (!up)    edgesFrom.set(vKey(sr, sc + 1), vKey(sr, sc));
-          if (!down)  edgesFrom.set(vKey(sr + 1, sc), vKey(sr + 1, sc + 1));
-          if (!left)  edgesFrom.set(vKey(sr, sc), vKey(sr + 1, sc));
-          if (!right) edgesFrom.set(vKey(sr + 1, sc + 1), vKey(sr, sc + 1));
+          if (!up)    { addEdge(vKey(sr, sc + 1), vKey(sr, sc));               totalEdges++; }
+          if (!down)  { addEdge(vKey(sr + 1, sc), vKey(sr + 1, sc + 1));       totalEdges++; }
+          if (!left)  { addEdge(vKey(sr, sc), vKey(sr + 1, sc));               totalEdges++; }
+          if (!right) { addEdge(vKey(sr + 1, sc + 1), vKey(sr, sc + 1));       totalEdges++; }
         }
-        // 領域内の境界は複数ポリゴン (外周 + 内穴) になる場合もあるため、while で全て取り出す
+        // 右手則 walker: 複数出力時に左折 (CCW 90°) を最優先に選択
+        //   cross > 0 → 左折、cross = 0 && dot > 0 → 直進、cross < 0 → 右折、cross = 0 && dot < 0 → U ターン
+        //   スコア: 左折=3 > 直進=2 > 右折=1 > U=0
+        const pickNextIdx = (currKey, incomingDir, outsArr) => {
+          if (outsArr.length === 1) return 0;
+          const cparts = currKey.split(',');
+          const cr = +cparts[0], cc = +cparts[1];
+          let bestIdx = 0, bestScore = -Infinity;
+          for (let j = 0; j < outsArr.length; j++) {
+            const nparts = outsArr[j].split(',');
+            const nr = +nparts[0], nc = +nparts[1];
+            const odr = nr - cr, odc = nc - cc;
+            const cross = incomingDir[0] * odc - incomingDir[1] * odr;
+            const dot   = incomingDir[0] * odr + incomingDir[1] * odc;
+            let score;
+            if (cross > 0)                  score = 3;   // 左折 (最優先)
+            else if (cross === 0 && dot > 0) score = 2;   // 直進
+            else if (cross < 0)              score = 1;   // 右折
+            else                              score = 0;   // U ターン (ほぼ発生しない)
+            if (score > bestScore) { bestScore = score; bestIdx = j; }
+          }
+          return bestIdx;
+        };
+        // 全エッジを消費するまで複数ポリゴンを抽出
+        const safetyMax = totalEdges + 10;
+        let safety = 0;
         while (edgesFrom.size > 0) {
-          const startKey = edgesFrom.keys().next().value;
+          if (++safety > safetyMax * 2) break;
+          // 開始頂点: 残っている最初の頂点
+          let startKey = null;
+          for (const [k, outs] of edgesFrom) {
+            if (outs && outs.length > 0) { startKey = k; break; }
+          }
+          if (!startKey) break;
           const seq = [];
           let current = startKey;
-          const maxIter = edgesFrom.size + 10;
-          for (let i = 0; i < maxIter; i++) {
+          let incomingDir = null;
+          for (let i = 0; i < safetyMax; i++) {
             seq.push(current);
-            const next = edgesFrom.get(current);
-            edgesFrom.delete(current);
-            if (!next || next === startKey) break;
+            const outs = edgesFrom.get(current);
+            if (!outs || outs.length === 0) break;
+            const idx = (incomingDir === null) ? 0 : pickNextIdx(current, incomingDir, outs);
+            const next = outs[idx];
+            outs.splice(idx, 1);
+            if (outs.length === 0) edgesFrom.delete(current);
+            // 新しい incomingDir を計算
+            const cparts = current.split(',');
+            const nparts = next.split(',');
+            incomingDir = [(+nparts[0]) - (+cparts[0]), (+nparts[1]) - (+cparts[1])];
+            if (next === startKey) break;
             current = next;
           }
           if (seq.length < 3) continue;
+          // 世界座標へ
           const worldPts = seq.map((k) => {
             const parts = k.split(',');
             return [sx[+parts[1]], sy[+parts[0]]];
           });
+          // 共線頂点を除去
           const simp = [];
           for (let i = 0; i < worldPts.length; i++) {
             const p0 = worldPts[(i - 1 + worldPts.length) % worldPts.length];
@@ -352,10 +401,23 @@
             if (Math.abs(cross) > 1e-9) simp.push(p1);
           }
           if (simp.length < 3) continue;
+          // ★ 頂点を微小に重心方向へインセット
+          //   earcut が「頂点共有する 2 つの hole」を誤 triangulation しないよう、
+          //   世界座標を 10 µm (= 1e-5 m) 分だけ重心に近づけてエッジ/頂点の一致を回避
+          let gx = 0, gy = 0;
+          for (const p of simp) { gx += p[0]; gy += p[1]; }
+          gx /= simp.length; gy /= simp.length;
+          const EPS = 1e-5;
+          const inset = simp.map((p) => {
+            const dx = gx - p[0], dy = gy - p[1];
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len < 1e-9) return [p[0], p[1]];
+            return [p[0] + (dx / len) * EPS, p[1] + (dy / len) * EPS];
+          });
           const path = new THREE.Path();
-          path.moveTo(simp[0][0], simp[0][1]);
-          for (let i = 1; i < simp.length; i++) path.lineTo(simp[i][0], simp[i][1]);
-          path.lineTo(simp[0][0], simp[0][1]);
+          path.moveTo(inset[0][0], inset[0][1]);
+          for (let i = 1; i < inset.length; i++) path.lineTo(inset[i][0], inset[i][1]);
+          path.lineTo(inset[0][0], inset[0][1]);
           paths.push(path);
         }
       }
