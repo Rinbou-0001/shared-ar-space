@@ -32,6 +32,9 @@
 
   let socket = null;
   let selfId = null;
+  // 共通視点 (viewerEye) — 全クライアントで共有される 3D 視点座標
+  //   各面に (u, v) として投影し、ドラッグ中の矩形中心をスナップ可能な点として表示
+  let viewerEye = { x: 0, y: 1.5, z: 0 };
   const clients = new Map();   // id → { entryTag, display:{width,height}, customTags:[], snapFace, pos:{x,y,z} }
   let activeFaceLabel = 'A';
   let hoverClientId = null;
@@ -164,6 +167,35 @@
       x: MARGIN + PLOT_SIZE - 6, y: MARGIN + 14,
       fill: '#e2e8f0', 'font-size': 13, 'text-anchor': 'end', 'font-weight': 700,
     }, `${face.label}  (${face.name})`));
+
+    // 共通視点 (viewerEye) を面に投影した点 — スナップターゲット
+    {
+      const vuv = worldToUV(face, viewerEye);
+      // 面の (u, v) 範囲内のときのみ描画 (範囲外なら non-informative)
+      if (vuv.u >= face.uRange[0] - 0.01 && vuv.u <= face.uRange[1] + 0.01 &&
+          vuv.v >= face.vRange[0] - 0.01 && vuv.v <= face.vRange[1] + 0.01) {
+        const vpx = uvToPx(face, vuv.u, vuv.v);
+        // 十字マーク + 円
+        svg.appendChild(svgEl('line', {
+          x1: vpx.x - 8, y1: vpx.y, x2: vpx.x + 8, y2: vpx.y,
+          stroke: '#f472b6', 'stroke-width': 1.2, 'pointer-events': 'none',
+        }));
+        svg.appendChild(svgEl('line', {
+          x1: vpx.x, y1: vpx.y - 8, x2: vpx.x, y2: vpx.y + 8,
+          stroke: '#f472b6', 'stroke-width': 1.2, 'pointer-events': 'none',
+        }));
+        svg.appendChild(svgEl('circle', {
+          cx: vpx.x, cy: vpx.y, r: 3,
+          fill: 'none', stroke: '#f472b6', 'stroke-width': 1.2,
+          'pointer-events': 'none',
+        }));
+        svg.appendChild(svgEl('text', {
+          x: vpx.x + 10, y: vpx.y - 6,
+          fill: '#f472b6', 'font-size': 10, 'font-family': 'monospace',
+          'pointer-events': 'none',
+        }, `eye (${viewerEye.x.toFixed(2)},${viewerEye.y.toFixed(2)},${viewerEye.z.toFixed(2)})`));
+      }
+    }
 
     // 各クライアントの base 矩形を描画
     //   ・ドラッグ中はその対象のみ dragState.lastU/lastV に差し替え表示 (移動確定前のプレビュー)
@@ -364,6 +396,17 @@
         }
       }
     }
+    // 共通視点 (viewerEye) を面へ投影した点に矩形中心をスナップ
+    {
+      const vuv = worldToUV(face, viewerEye);
+      if (vuv.u >= face.uRange[0] - 0.01 && vuv.u <= face.uRange[1] + 0.01 &&
+          vuv.v >= face.vRange[0] - 0.01 && vuv.v <= face.vRange[1] + 0.01) {
+        const du = vuv.u - dragU;
+        const dv = vuv.v - dragV;
+        if (Math.abs(du) < bestDuAbs) { bestDuAbs = Math.abs(du); bestDu = du; }
+        if (Math.abs(dv) < bestDvAbs) { bestDvAbs = Math.abs(dv); bestDv = dv; }
+      }
+    }
     return {
       u: dragU + (bestDuAbs <= T ? bestDu : 0),
       v: dragV + (bestDvAbs <= T ? bestDv : 0),
@@ -530,6 +573,13 @@
       if (!data || !data.id) return;
       const c = ensureClient(data.id);
       c.snapFace = data.face || null;
+      render();
+    });
+    socket.on('viewerEye', (data) => {
+      if (!data) return;
+      if (typeof data.x === 'number') viewerEye.x = data.x;
+      if (typeof data.y === 'number') viewerEye.y = data.y;
+      if (typeof data.z === 'number') viewerEye.z = data.z;
       render();
     });
   }
