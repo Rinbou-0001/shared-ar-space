@@ -274,58 +274,90 @@
           }
         }
       }
-      // 各 open サブピクセルの 4 辺で境界判定、CCW 方向付き辺を map に収集
-      //   頂点キー: 'sr,sc' (sx[sc], sy[sr])
-      const edgesFrom = new Map();
+      // ★ バグ修正: サブピクセル間で対角接触する「別領域同士」が同一頂点を共有するとき、
+      //   edgesFrom.set が後勝ちで上書きされてしまい、ウォーカーが斜めに切り裂かれた
+      //   不正ポリゴンを生成し、ExtrudeGeometry の triangulation で斜線になる。
+      //   対策: 4-連結 flood fill で "open サブピクセルの連結領域" を分離し、
+      //   各領域ごとに独立した edgesFrom を構築してウォーク。
+      //   対角接触の 2 領域は 4-連結では同じ領域にならないため、頂点衝突が解消。
       const vKey = (r, c) => r + ',' + c;
+      const visited = Array.from({ length: SR }, () => new Array(SC).fill(false));
+      const regions = [];
       for (let sr = 0; sr < SR; sr++) {
         for (let sc = 0; sc < SC; sc++) {
-          if (!open[sr][sc]) continue;
-          const up    = (sr - 1 >= 0) && open[sr - 1][sc];
-          const down  = (sr + 1 < SR) && open[sr + 1][sc];
-          const left  = (sc - 1 >= 0) && open[sr][sc - 1];
-          const right = (sc + 1 < SC) && open[sr][sc + 1];
-          if (!up)    edgesFrom.set(vKey(sr, sc + 1), vKey(sr, sc));           // TOP 辺: 右→左
-          if (!down)  edgesFrom.set(vKey(sr + 1, sc), vKey(sr + 1, sc + 1));   // BOTTOM 辺: 左→右
-          if (!left)  edgesFrom.set(vKey(sr, sc), vKey(sr + 1, sc));           // LEFT 辺: 上→下
-          if (!right) edgesFrom.set(vKey(sr + 1, sc + 1), vKey(sr, sc + 1));   // RIGHT 辺: 下→上
+          if (!open[sr][sc] || visited[sr][sc]) continue;
+          const region = [];
+          const stack = [[sr, sc]];
+          visited[sr][sc] = true;
+          while (stack.length) {
+            const cur = stack.pop();
+            region.push(cur);
+            const cr = cur[0], cc = cur[1];
+            const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+            for (let di = 0; di < 4; di++) {
+              const nr = cr + dirs[di][0], nc = cc + dirs[di][1];
+              if (nr < 0 || nr >= SR || nc < 0 || nc >= SC) continue;
+              if (!open[nr][nc] || visited[nr][nc]) continue;
+              visited[nr][nc] = true;
+              stack.push([nr, nc]);
+            }
+          }
+          regions.push(region);
         }
       }
-      // 辺を連結してポリゴンを抽出
+      // 各領域ごとに境界 Path を構築
       const paths = [];
-      while (edgesFrom.size > 0) {
-        const startKey = edgesFrom.keys().next().value;
-        const seq = [];
-        let current = startKey;
-        const maxIter = edgesFrom.size + 10;
-        for (let i = 0; i < maxIter; i++) {
-          seq.push(current);
-          const next = edgesFrom.get(current);
-          edgesFrom.delete(current);
-          if (!next || next === startKey) break;
-          current = next;
+      for (let ri = 0; ri < regions.length; ri++) {
+        const region = regions[ri];
+        // この領域のみの open set (他領域のサブピクセルは "closed" 扱い)
+        const inRegion = new Set();
+        for (let i = 0; i < region.length; i++) inRegion.add(region[i][0] * SC + region[i][1]);
+        const isOpenInRegion = (sr, sc) => (sr >= 0 && sr < SR && sc >= 0 && sc < SC && inRegion.has(sr * SC + sc));
+        const edgesFrom = new Map();
+        for (let i = 0; i < region.length; i++) {
+          const sr = region[i][0], sc = region[i][1];
+          const up    = isOpenInRegion(sr - 1, sc);
+          const down  = isOpenInRegion(sr + 1, sc);
+          const left  = isOpenInRegion(sr, sc - 1);
+          const right = isOpenInRegion(sr, sc + 1);
+          if (!up)    edgesFrom.set(vKey(sr, sc + 1), vKey(sr, sc));
+          if (!down)  edgesFrom.set(vKey(sr + 1, sc), vKey(sr + 1, sc + 1));
+          if (!left)  edgesFrom.set(vKey(sr, sc), vKey(sr + 1, sc));
+          if (!right) edgesFrom.set(vKey(sr + 1, sc + 1), vKey(sr, sc + 1));
         }
-        if (seq.length < 3) continue;
-        // 世界座標へ
-        const worldPts = seq.map((k) => {
-          const parts = k.split(',');
-          return [sx[+parts[1]], sy[+parts[0]]];
-        });
-        // 共線頂点を除去して簡素化
-        const simp = [];
-        for (let i = 0; i < worldPts.length; i++) {
-          const p0 = worldPts[(i - 1 + worldPts.length) % worldPts.length];
-          const p1 = worldPts[i];
-          const p2 = worldPts[(i + 1) % worldPts.length];
-          const cross = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0]);
-          if (Math.abs(cross) > 1e-9) simp.push(p1);
+        // 領域内の境界は複数ポリゴン (外周 + 内穴) になる場合もあるため、while で全て取り出す
+        while (edgesFrom.size > 0) {
+          const startKey = edgesFrom.keys().next().value;
+          const seq = [];
+          let current = startKey;
+          const maxIter = edgesFrom.size + 10;
+          for (let i = 0; i < maxIter; i++) {
+            seq.push(current);
+            const next = edgesFrom.get(current);
+            edgesFrom.delete(current);
+            if (!next || next === startKey) break;
+            current = next;
+          }
+          if (seq.length < 3) continue;
+          const worldPts = seq.map((k) => {
+            const parts = k.split(',');
+            return [sx[+parts[1]], sy[+parts[0]]];
+          });
+          const simp = [];
+          for (let i = 0; i < worldPts.length; i++) {
+            const p0 = worldPts[(i - 1 + worldPts.length) % worldPts.length];
+            const p1 = worldPts[i];
+            const p2 = worldPts[(i + 1) % worldPts.length];
+            const cross = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0]);
+            if (Math.abs(cross) > 1e-9) simp.push(p1);
+          }
+          if (simp.length < 3) continue;
+          const path = new THREE.Path();
+          path.moveTo(simp[0][0], simp[0][1]);
+          for (let i = 1; i < simp.length; i++) path.lineTo(simp[i][0], simp[i][1]);
+          path.lineTo(simp[0][0], simp[0][1]);
+          paths.push(path);
         }
-        if (simp.length < 3) continue;
-        const path = new THREE.Path();
-        path.moveTo(simp[0][0], simp[0][1]);
-        for (let i = 1; i < simp.length; i++) path.lineTo(simp[i][0], simp[i][1]);
-        path.lineTo(simp[0][0], simp[0][1]);
-        paths.push(path);
       }
       return paths;
     }
@@ -7187,6 +7219,9 @@
         if (typeof window.__refreshFrameGridEditorUI === 'function') {
           window.__refreshFrameGridEditorUI();
         }
+        // #status の my-frame-seed span に seed を表示 (hex)
+        const _seedEl = document.getElementById('my-frame-seed');
+        if (_seedEl) _seedEl.textContent = 'seed:0x' + (data.seed >>> 0).toString(16).toUpperCase().padStart(8, '0');
       });
 
       //   ・master はボタン UI を同期 (dirty なし、サーバー値が真)
