@@ -498,6 +498,31 @@
       for (const [r, c] of bestComp) newMask[r][c] = true;
       return { mask: newMask, size: bestSize };
     }
+    // 2×2 セルブロックの「斜めのみ open」パターンを除去
+    //   NW+SE open & NE+SW closed → NE を open に
+    //   NE+SW open & NW+SE closed → NW を open に
+    //   iterate で再帰的に発生する新しい斜めも解消
+    function _removeCellDiagonals(mask, rows, cols) {
+      let iter = 0;
+      let changed;
+      do {
+        changed = false;
+        for (let r = 0; r < rows - 1; r++) {
+          for (let c = 0; c < cols - 1; c++) {
+            const tl = !!mask[r][c], tr = !!mask[r][c + 1];
+            const bl = !!mask[r + 1][c], br = !!mask[r + 1][c + 1];
+            if (tl && !tr && !bl && br) {
+              mask[r][c + 1] = true;   // Pinch 1: NE 側を open に
+              changed = true;
+            } else if (!tl && tr && bl && !br) {
+              mask[r][c] = true;       // Pinch 2: NW 側を open に
+              changed = true;
+            }
+          }
+        }
+        iter++;
+      } while (changed && iter < 10);
+    }
     function _generateAutoMask(baseSeed) {
       const COLS = FRAME_GRID_COLS;
       const ROWS = FRAME_GRID_ROWS;
@@ -526,8 +551,11 @@
           const { mask: connected, size } = _extractLargestConnected(rawMask, ROWS, COLS);
           const ratio = size / TOTAL;
           if (ratio >= MIN_RATIO && ratio <= MAX_RATIO) {
-            log('[frame] auto-mask ok: seed=' + seed + ' retry=' + retry + ' iter=' + iter + ' ratio=' + ratio.toFixed(3), 'ok');
-            return connected;
+            // 斜めパターンを除去 → 再度 largest connected を抽出 (孤立セル解消)
+            _removeCellDiagonals(connected, ROWS, COLS);
+            const re = _extractLargestConnected(connected, ROWS, COLS);
+            log('[frame] auto-mask ok: seed=' + seed + ' retry=' + retry + ' iter=' + iter + ' ratio=' + ratio.toFixed(3) + ' → cleaned ratio=' + (re.size / TOTAL).toFixed(3), 'ok');
+            return re.mask;
           }
           if (ratio < MIN_RATIO) high = mid;   // open 増やす → threshold 下げる
           else                    low = mid;    // open 減らす → threshold 上げる
