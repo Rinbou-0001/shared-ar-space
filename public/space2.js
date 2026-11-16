@@ -401,9 +401,19 @@
             if (Math.abs(cross) > 1e-9) simp.push(p1);
           }
           if (simp.length < 3) continue;
+          // ===== 診断ログ (inset 前): 符号付面積・頂点数・最初の 3 頂点 =====
+          let sArea = 0;
+          for (let i = 0; i < simp.length; i++) {
+            const a = simp[i], b = simp[(i + 1) % simp.length];
+            sArea += (a[0] * b[1] - b[0] * a[1]);
+          }
+          sArea *= 0.5;
+          const windingPre = sArea > 0 ? 'CCW' : sArea < 0 ? 'CW' : 'ZERO';
+          let vertsStr = '';
+          for (let i = 0; i < Math.min(simp.length, 4); i++) {
+            vertsStr += ' (' + simp[i][0].toFixed(4) + ',' + simp[i][1].toFixed(4) + ')';
+          }
           // ★ 頂点を微小に重心方向へインセット
-          //   earcut が「頂点共有する 2 つの hole」を誤 triangulation しないよう、
-          //   世界座標を 10 µm (= 1e-5 m) 分だけ重心に近づけてエッジ/頂点の一致を回避
           let gx = 0, gy = 0;
           for (const p of simp) { gx += p[0]; gy += p[1]; }
           gx /= simp.length; gy /= simp.length;
@@ -414,6 +424,20 @@
             if (len < 1e-9) return [p[0], p[1]];
             return [p[0] + (dx / len) * EPS, p[1] + (dy / len) * EPS];
           });
+          // ===== 診断ログ (inset 後): 符号付面積・サイズ変化 =====
+          let sAreaPost = 0;
+          for (let i = 0; i < inset.length; i++) {
+            const a = inset[i], b = inset[(i + 1) % inset.length];
+            sAreaPost += (a[0] * b[1] - b[0] * a[1]);
+          }
+          sAreaPost *= 0.5;
+          const areaChange = Math.abs(sArea) > 1e-12 ? (sAreaPost / sArea) : 0;
+          log('[poly-diag] region#' + ri + ' poly=' + paths.length + ' verts=' + simp.length +
+              ' winding=' + windingPre + ' area=' + sArea.toFixed(6) +
+              ' → postArea=' + sAreaPost.toFixed(6) +
+              ' ratio=' + areaChange.toFixed(3) +
+              (areaChange < 0.5 || areaChange > 1.5 ? ' ⚠️ large area change!' : '') +
+              ' first:' + vertsStr, 'ok');
           const path = new THREE.Path();
           path.moveTo(inset[0][0], inset[0][1]);
           for (let i = 1; i < inset.length; i++) path.lineTo(inset[i][0], inset[i][1]);
@@ -554,7 +578,32 @@
             // 斜めパターンを除去 → 再度 largest connected を抽出 (孤立セル解消)
             _removeCellDiagonals(connected, ROWS, COLS);
             const re = _extractLargestConnected(connected, ROWS, COLS);
-            log('[frame] auto-mask ok: seed=' + seed + ' retry=' + retry + ' iter=' + iter + ' ratio=' + ratio.toFixed(3) + ' → cleaned ratio=' + (re.size / TOTAL).toFixed(3), 'ok');
+            // ===== 診断ログ =====
+            //   seed 16 進、cleaned ratio、Perlin 出力の範囲 (NaN/異常値検出)
+            //   マスクを ASCII グリッドで出力 (console にコピーして解析用)
+            const seedHex = '0x' + (seed >>> 0).toString(16).toUpperCase().padStart(8, '0');
+            let perlinMin = Infinity, perlinMax = -Infinity, hasNaN = false;
+            for (let rr = 0; rr < ROWS; rr++) {
+              for (let cc = 0; cc < COLS; cc++) {
+                const v = field[rr][cc];
+                if (isNaN(v)) hasNaN = true;
+                if (v < perlinMin) perlinMin = v;
+                if (v > perlinMax) perlinMax = v;
+              }
+            }
+            let maskStr = '';
+            for (let rr = 0; rr < ROWS; rr++) {
+              let line = '';
+              for (let cc = 0; cc < COLS; cc++) {
+                line += re.mask[rr][cc] ? 'O ' : '. ';
+              }
+              maskStr += '\n  ' + line;
+            }
+            log('[frame-diag] seed=' + seedHex + ' retry=' + retry + ' iter=' + iter +
+                ' ratio=' + ratio.toFixed(3) + ' → cleaned=' + (re.size / TOTAL).toFixed(3) +
+                ' perlin=[' + perlinMin.toFixed(3) + ',' + perlinMax.toFixed(3) + ']' +
+                (hasNaN ? ' ⚠️ NaN!' : '') +
+                ' MASK:' + maskStr, 'ok');
             return re.mask;
           }
           if (ratio < MIN_RATIO) high = mid;   // open 増やす → threshold 下げる
@@ -603,6 +652,9 @@
       if (_frameMergeAdjacent) {
         // 案 GR-B: 隣接 open セルを融合、連結領域を 1 つの多角形 hole として生成
         const mergedPaths = _computeFrameHolesMerged(aspect, cellW, cellH, outerW, outerH);
+        log('[frame-diag] merged paths count=' + mergedPaths.length +
+            ' cellW=' + cellW.toFixed(5) + ' cellH=' + cellH.toFixed(5) +
+            ' outerW=' + outerW.toFixed(5) + ' outerH=' + outerH.toFixed(5), 'ok');
         for (const p of mergedPaths) shape.holes.push(p);
       } else {
         // 案 GR-A: 各 open セルを独立 hole として追加 (仕切り残す、フォールバック)
