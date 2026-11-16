@@ -1017,6 +1017,29 @@
     centerMarker.position.set(0, 0.035, 0);
     scene.add(centerMarker);
 
+    // ===== 原点中心 3m × 3m × 3m の壁ボックス =====
+    //   ・X ∈ [-1.5, +1.5]、Z ∈ [-1.5, +1.5]、Y ∈ [0, +3] (床面接地)
+    //   ・透明 (無色、描画なし)、raycast 対象外 (選択・判定なし)、selectables 未登録
+    //   ・マスターのみ: 1px マゼンタの edges 枠線を表示
+    const _wallBox = new THREE.Mesh(
+      new THREE.BoxGeometry(3, 3, 3),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    _wallBox.position.set(0, 1.5, 0);   // 床から 3m の高さ、中心 Y=1.5
+    _wallBox.name = 'wall-box-3m';
+    _wallBox.raycast = () => {};         // raycast 対象から完全に除外 (選択・当たり判定なし)
+    scene.add(_wallBox);
+    // マスター専用 edges (1px マゼンタ)
+    if (ROLE === 'master') {
+      const _wallEdges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(_wallBox.geometry),
+        new THREE.LineBasicMaterial({ color: 0xff00ff, linewidth: 1 })
+      );
+      _wallEdges.raycast = () => {};
+      _wallEdges.name = 'wall-box-3m-edges';
+      _wallBox.add(_wallEdges);
+    }
+
     // ===== 移動 Box (cube1..4) =====
     //   ・1m 立方体、物理挙動 (重力 + 床反発 + 摩擦)
     //   ・observer/master: マウス/タッチでドラッグ → XZ 平面 1m スナップ移動 (従来)
