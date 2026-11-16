@@ -166,20 +166,31 @@
     }, `${face.label}  (${face.name})`));
 
     // 各クライアントの base 矩形を描画
+    //   ・ドラッグ中はその対象のみ dragState.lastU/lastV に差し替え表示 (移動確定前のプレビュー)
     const list = clientsOnActiveFace();
     for (const { id, c } of list) {
-      const uv = worldToUV(face, c.pos);
+      let uv;
+      if (dragState && dragState.clientId === id && dragState.face.name === face.name
+          && dragState.lastU != null && dragState.lastV != null) {
+        uv = { u: dragState.lastU, v: dragState.lastV };
+      } else {
+        uv = worldToUV(face, c.pos);
+      }
       const w = Number(c.display.width) || 0.5;
       const h = Number(c.display.height) || 0.3;
       const centerPx = uvToPx(face, uv.u, uv.v);
       // base 矩形の半幅/半高 (pixel)
       const halfWpx = (w / uSpan) * PLOT_SIZE / 2;
       const halfHpx = (h / vSpan) * PLOT_SIZE / 2;
+      const isHover = (id === hoverClientId);
+      const strokeCol = isHover ? '#facc15' : '#22d3ee';
+      const fillCol   = isHover ? '#facc15' : '#22d3ee';
       const rect = svgEl('rect', {
         x: centerPx.x - halfWpx, y: centerPx.y - halfHpx,
         width: halfWpx * 2, height: halfHpx * 2,
-        fill: 'none',
-        stroke: (id === hoverClientId) ? '#facc15' : '#22d3ee',
+        fill: fillCol,
+        'fill-opacity': isHover ? 0.35 : 0.22,
+        stroke: strokeCol,
         'stroke-width': 2,
         'data-client-id': id,
         'data-role': 'base-rect',
@@ -299,8 +310,64 @@
     const { px, py } = svgLocalPx(evt);
     const uv = pxToUV(face, px, py);
     const centerUV = worldToUV(face, c.pos);
-    dragState = { clientId: id, face, grabOffset: { du: centerUV.u - uv.u, dv: centerUV.v - uv.v } };
+    dragState = {
+      clientId: id, face,
+      grabOffset: { du: centerUV.u - uv.u, dv: centerUV.v - uv.v },
+      others: otherRectsOnFace(face, id),
+      lastU: centerUV.u, lastV: centerUV.v,
+    };
     evt.preventDefault();
+  }
+
+  // 他ディスプレイの辺にスナップ可能な距離 (メートル)
+  const EDGE_SNAP_THRESHOLD_M = 0.05;
+
+  // ドラッグ中の対象を除いた、同じ面にスナップ中の他クライアントの base 矩形 (u,v 空間)
+  function otherRectsOnFace(face, excludeId) {
+    const result = [];
+    for (const [id, c] of clients.entries()) {
+      if (id === excludeId) continue;
+      if (!isVisibleOnPanel(c)) continue;
+      if (c.snapFace !== face.name) continue;
+      const uv = worldToUV(face, c.pos);
+      const w = Number(c.display.width) || 0.5;
+      const h = Number(c.display.height) || 0.3;
+      result.push({ id, cu: uv.u, cv: uv.v, w, h });
+    }
+    return result;
+  }
+
+  // ドラッグ中矩形 (center u,v + w,h) を周囲矩形の辺にスナップ
+  //   ・自身の辺 (left/right/top/bottom + center) が他矩形の辺に threshold 以内なら吸着
+  //   ・u 軸と v 軸は独立に判定
+  function applyEdgeSnap(face, dragU, dragV, dragW, dragH, others) {
+    const T = EDGE_SNAP_THRESHOLD_M;
+    const myHalfW = dragW / 2, myHalfH = dragH / 2;
+    // 自身の候補 "辺の u 座標" リスト: [leftEdge, centerU, rightEdge]
+    const myU = [dragU - myHalfW, dragU, dragU + myHalfW];
+    const myV = [dragV - myHalfH, dragV, dragV + myHalfH];
+    let bestDu = 0, bestDuAbs = T + 1;
+    let bestDv = 0, bestDvAbs = T + 1;
+    for (const o of others) {
+      const oU = [o.cu - o.w / 2, o.cu, o.cu + o.w / 2];
+      const oV = [o.cv - o.h / 2, o.cv, o.cv + o.h / 2];
+      for (const mu of myU) {
+        for (const ou of oU) {
+          const d = ou - mu;
+          if (Math.abs(d) < bestDuAbs) { bestDuAbs = Math.abs(d); bestDu = d; }
+        }
+      }
+      for (const mv of myV) {
+        for (const ov of oV) {
+          const d = ov - mv;
+          if (Math.abs(d) < bestDvAbs) { bestDvAbs = Math.abs(d); bestDv = d; }
+        }
+      }
+    }
+    return {
+      u: dragU + (bestDuAbs <= T ? bestDu : 0),
+      v: dragV + (bestDvAbs <= T ? bestDv : 0),
+    };
   }
 
   function onSvgMouseMove(evt) {
@@ -308,28 +375,33 @@
     const { px, py } = svgLocalPx(evt);
     const face = dragState.face;
     const uv0 = pxToUV(face, px, py);
-    const target = clampUV(face, uv0.u + dragState.grabOffset.du, uv0.v + dragState.grabOffset.dv);
-    // 対象クライアントの pos を楽観的更新 (サーバーからの broadcast で確定)
+    let targetU = uv0.u + dragState.grabOffset.du;
+    let targetV = uv0.v + dragState.grabOffset.dv;
+    // 他ディスプレイの辺にスナップ
     const c = clients.get(dragState.clientId);
-    if (c) {
-      c.pos[face.ua] = target.u;
-      c.pos[face.va] = target.v;
-      render();
-    }
-    // サーバーへ強制位置送信 (throttle 50ms)
-    throttledEmitForce(dragState.clientId, face.name, target.u, target.v);
+    const w = c ? (Number(c.display.width)  || 0.5) : 0.5;
+    const h = c ? (Number(c.display.height) || 0.3) : 0.3;
+    const snapped = applyEdgeSnap(face, targetU, targetV, w, h, dragState.others);
+    const clamped = clampUV(face, snapped.u, snapped.v);
+    dragState.lastU = clamped.u;
+    dragState.lastV = clamped.v;
+    // 描画のみ更新 (サーバーへは mouseup 時のみ送信)
+    //   クライアント pos は書き換えず、drag 専用のオーバーレイで描画
+    render();
   }
 
   function onSvgMouseUp(evt) {
     if (!dragState) return;
-    // 最終位置を確実に送る
+    const face = dragState.face;
     const c = clients.get(dragState.clientId);
-    if (c) {
-      const face = dragState.face;
-      const uv = worldToUV(face, c.pos);
-      emitForce(dragState.clientId, face.name, uv.u, uv.v);
+    if (c && dragState.lastU != null && dragState.lastV != null) {
+      // 最終位置をクライアント pos に反映 + サーバーへ送信 (移動動作完了時のみ)
+      c.pos[face.ua] = dragState.lastU;
+      c.pos[face.va] = dragState.lastV;
+      emitForce(dragState.clientId, face.name, dragState.lastU, dragState.lastV);
     }
     dragState = null;
+    render();
   }
 
   function onSvgHover(evt) {
@@ -348,26 +420,7 @@
     showJumpMenu(evt.clientX, evt.clientY, id);
   }
 
-  // 強制位置 emit (50ms throttle)
-  let _emitLast = 0;
-  let _emitPending = null;
-  function throttledEmitForce(clientId, face, u, v) {
-    const now = performance.now();
-    if (now - _emitLast < 50) {
-      _emitPending = { clientId, face, u, v };
-      return;
-    }
-    _emitLast = now;
-    _emitPending = null;
-    emitForce(clientId, face, u, v);
-  }
-  setInterval(() => {
-    if (_emitPending && performance.now() - _emitLast >= 50) {
-      const p = _emitPending; _emitPending = null; _emitLast = performance.now();
-      emitForce(p.clientId, p.face, p.u, p.v);
-    }
-  }, 50);
-
+  // 強制位置 emit — ドラッグ終了 (mouseup) または ジャンプタブ選択時のみ発火
   function emitForce(clientId, face, u, v) {
     if (!socket || !socket.connected) return;
     socket.emit('forceSnapPos', { targetId: clientId, face, u, v });
