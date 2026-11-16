@@ -1040,6 +1040,59 @@
       _wallBox.add(_wallEdges);
     }
 
+    // ===== Snap タグ用: 壁 6 面の中心と外向き法線 =====
+    //   avatar が snap タグを持つ時、視錐台 base の位置 (= grp.position) を
+    //   「映している方向の壁面中心」へスナップさせる。
+    //   複数の壁面が camera forward 方向と内積 < 0 の場合、ランダム 1 面を選択 (キャッシュで安定化)
+    const _snapWallFaces = [
+      { name: '+X', center: new THREE.Vector3(+1.5, 1.5, 0),  normal: new THREE.Vector3(+1, 0, 0) },
+      { name: '-X', center: new THREE.Vector3(-1.5, 1.5, 0),  normal: new THREE.Vector3(-1, 0, 0) },
+      { name: '+Z', center: new THREE.Vector3(0,  1.5, +1.5), normal: new THREE.Vector3(0, 0, +1) },
+      { name: '-Z', center: new THREE.Vector3(0,  1.5, -1.5), normal: new THREE.Vector3(0, 0, -1) },
+      { name: '+Y', center: new THREE.Vector3(0,  3.0, 0),    normal: new THREE.Vector3(0, +1, 0) },
+      { name: '-Y', center: new THREE.Vector3(0,  0.0, 0),    normal: new THREE.Vector3(0, -1, 0) },
+    ];
+    const _snapForwardTmp = new THREE.Vector3();
+    const _snapLocalFwd   = new THREE.Vector3(0, 0, -1);
+    function _snapTick() {
+      if (typeof avatars === 'undefined' || !avatars) return;
+      avatars.forEach((a) => {
+        if (!a || !a.grp || !a.customTags) return;
+        const hasSnap = a.customTags.indexOf('snap') >= 0;
+        if (!hasSnap) {
+          // snap 解除時はキャッシュクリア、位置は socket pose に委ねる (自動復帰)
+          a._snapFaceCache = null;
+          return;
+        }
+        // avatar の forward を計算
+        _snapForwardTmp.copy(_snapLocalFwd).applyQuaternion(a.grp.quaternion);
+        // 映っている壁面を列挙 (forward と normal の内積 < -0.1 → その壁に向いている)
+        const visibleFaces = [];
+        for (let i = 0; i < _snapWallFaces.length; i++) {
+          const f = _snapWallFaces[i];
+          const d = _snapForwardTmp.dot(f.normal);
+          if (d < -0.1) visibleFaces.push(f);
+        }
+        if (visibleFaces.length === 0) {
+          a._snapFaceCache = null;
+          return;   // どの壁も向いていない → snap 無効
+        }
+        // キャッシュ: 以前選んだ面がまだ visible なら維持、そうでなければ random pick
+        let pickedFace = a._snapFaceCache;
+        if (!pickedFace || visibleFaces.indexOf(pickedFace) < 0) {
+          if (visibleFaces.length === 1) {
+            pickedFace = visibleFaces[0];
+          } else {
+            pickedFace = visibleFaces[Math.floor(Math.random() * visibleFaces.length)];
+          }
+          a._snapFaceCache = pickedFace;
+        }
+        // 位置を壁面中心へスナップ (socket pose を上書き)
+        a.grp.position.copy(pickedFace.center);
+      });
+    }
+    window.__snapTick = _snapTick;
+
     // ===== 移動 Box (cube1..4) =====
     //   ・1m 立方体、物理挙動 (重力 + 床反発 + 摩擦)
     //   ・observer/master: マウス/タッチでドラッグ → XZ 平面 1m スナップ移動 (従来)
@@ -7566,6 +7619,10 @@
 
     // ========== メインループ用: フレーム更新関数のレジストリ (setupObserver が push するので先に宣言) ==========
     const updaters = [];
+    // snap タグ: 視錐台 base を壁ボックスへスナップ (pose 上書き、全 avatar 対象)
+    //   pose 更新 (socket event) は非同期、updaters は毎フレーム。
+    //   snap 判定を pose 適用後に走らせることで、snap が正しく上書きされる
+    if (typeof _snapTick === 'function') updaters.push(_snapTick);
     // camera role の held cube 追従 (毎フレーム targetPos を camera + forward·GRAB_DIST に更新)
     //   ・物理 tick より先に実行することで、Spring-Damper が最新 targetPos を即座に参照できる
     //     → スマホ回転 → 1 フレーム以内に spring 加速度が反映 → cube が phone 方向に追従
