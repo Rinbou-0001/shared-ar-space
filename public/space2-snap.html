@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>space2 snap panel</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --fg: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --wall: #475569;
+    --wall-grid: #64748b;
+    --client: #22d3ee;
+    --client-sel: #facc15;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  body {
+    display: flex; flex-direction: column;
+    user-select: none;
+  }
+  #header {
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap;
+  }
+  #header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  #status {
+    color: var(--muted); font-size: 11px;
+    padding: 2px 6px; border-radius: 3px; background: #0f172a;
+  }
+  #face-tabs {
+    display: flex; gap: 4px; margin-left: auto;
+  }
+  .face-tab {
+    padding: 4px 10px; background: var(--panel); border: 1px solid var(--border);
+    color: var(--fg); cursor: pointer; border-radius: 3px; font-size: 12px;
+    font-weight: 600; min-width: 36px;
+  }
+  .face-tab.active { background: var(--accent); color: #0f172a; border-color: var(--accent); }
+  .face-tab:hover:not(.active) { background: #334155; }
+  #main {
+    flex: 1; display: flex;
+    overflow: hidden;
+  }
+  #canvas-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 20px; position: relative;
+  }
+  #svg {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    max-width: 100%; max-height: 100%;
+  }
+  #sidebar {
+    width: 240px; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 10px; overflow-y: auto;
+  }
+  #sidebar h2 {
+    font-size: 12px; margin: 0 0 6px 0; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .client-row {
+    padding: 6px 8px; border-radius: 3px; margin-bottom: 4px;
+    background: #0f172a; border: 1px solid var(--border);
+    font-size: 12px; cursor: pointer;
+  }
+  .client-row.sel { border-color: var(--client-sel); }
+  .client-row .ctag { font-weight: 600; color: var(--accent); }
+  .client-row .ccoords { color: var(--muted); font-size: 10px; margin-top: 2px; font-family: monospace; }
+  #jump-menu {
+    position: absolute; display: none; z-index: 100;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.4); min-width: 140px;
+  }
+  #jump-menu .jm-header {
+    padding: 4px 10px; font-size: 10px; color: var(--muted); text-transform: uppercase;
+    border-bottom: 1px solid var(--border); margin-bottom: 2px;
+  }
+  #jump-menu .jm-item {
+    padding: 5px 12px; cursor: pointer; font-size: 12px;
+  }
+  #jump-menu .jm-item:hover { background: var(--accent); color: #0f172a; }
+  #axis-label-u, #axis-label-v {
+    position: absolute; color: var(--muted); font-size: 10px; font-family: monospace;
+  }
+  #log {
+    position: fixed; bottom: 4px; left: 4px; right: 4px;
+    font-size: 10px; color: var(--muted); font-family: monospace;
+    pointer-events: none; opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>space2 snap panel</h1>
+  <span id="status">接続中…</span>
+  <span id="face-info" style="color:var(--muted);font-size:11px;"></span>
+  <div id="face-tabs">
+    <!-- tabs injected by JS -->
+  </div>
+</div>
+
+<div id="main">
+  <div id="canvas-wrap">
+    <svg id="svg" width="500" height="500" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+      <!-- content injected -->
+    </svg>
+  </div>
+  <div id="sidebar">
+    <h2>選択面のクライアント</h2>
+    <div id="client-list"></div>
+    <h2 style="margin-top:12px;">全 snap タグ</h2>
+    <div id="all-snap-list"></div>
+  </div>
+</div>
+
+<div id="jump-menu">
+  <div class="jm-header">ジャンプ先</div>
+</div>
+
+<div id="log"></div>
+
+<script src="/config.js"></script>
+<script>
+  (function () {
+    const cfg = window.APP_CONFIG || {};
+    const base = cfg.socketUrl ? cfg.socketUrl.replace(/\/$/, '') : '';
+    const s = document.createElement('script');
+    s.src = base + '/socket.io/socket.io.js';
+    s.onload = () => { if (window.__panelInit) window.__panelInit(); };
+    document.head.appendChild(s);
+  })();
+</script>
+<script src="/space2-snap.js"></script>
+</body>
+</html>

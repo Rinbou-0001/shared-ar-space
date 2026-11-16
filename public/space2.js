@@ -7598,6 +7598,39 @@
           a.grp.quaternion.set(data.qx, data.qy, data.qz, data.qw);
         }
       });
+
+      // スナップパネルからの位置強制 (snap タグ ON クライアントのみ対象)
+      //   data: { face: '+X'|..., u, v }
+      //     - u, v: 壁面上の接線座標 (世界座標)
+      //   camera.position を face+u,v の世界座標に、camera.quaternion を壁正対方向に設定。
+      //   以後は通常の snap render ループが維持する (壁から外れなければ継続スナップ)。
+      socket.on('forceSnapPos', (data) => {
+        if (!data || typeof data.face !== 'string') return;
+        const face = (typeof _snapWallFaces !== 'undefined')
+          ? _snapWallFaces.find((f) => f.name === data.face) : null;
+        if (!face) return;
+        const u = Number(data.u), v = Number(data.v);
+        if (!isFinite(u) || !isFinite(v)) return;
+        const p = new THREE.Vector3().copy(face.center);
+        if (Math.abs(face.normal.x) > 0.5) {
+          // +X/-X 面: u = world z, v = world y
+          p.z = Math.max(-1.5, Math.min(1.5, u));
+          p.y = Math.max(0,    Math.min(3,   v));
+        } else if (Math.abs(face.normal.y) > 0.5) {
+          // +Y/-Y 面: u = world x, v = world z
+          p.x = Math.max(-1.5, Math.min(1.5, u));
+          p.z = Math.max(-1.5, Math.min(1.5, v));
+        } else if (Math.abs(face.normal.z) > 0.5) {
+          // +Z/-Z 面: u = world x, v = world y
+          p.x = Math.max(-1.5, Math.min(1.5, u));
+          p.y = Math.max(0,    Math.min(3,   v));
+        }
+        camera.position.copy(p);
+        const lookAt = p.clone().addScaledVector(face.normal, 10);
+        camera.lookAt(lookAt);
+        _snapSelfCache = face;
+        if (typeof _obsResync === 'function') _obsResync();
+      });
     }
 
     // ========== pose 送信 (60Hz スロットル) ==========
@@ -7623,6 +7656,8 @@
     //   → render ループ内で面タグ直前に処理 (下記 _snapApplyToSelf)。updaters からは外した。
     // self 用 cache (直前に選択した壁面)
     let _snapSelfCache = null;
+    // サーバーへ最後に送った snap 面 (変化時のみ emit)
+    let _snapLastSentFace = undefined;
     // camera role の held cube 追従 (毎フレーム targetPos を camera + forward·GRAB_DIST に更新)
     //   ・物理 tick より先に実行することで、Spring-Damper が最新 targetPos を即座に参照できる
     //     → スマホ回転 → 1 フレーム以内に spring 加速度が反映 → cube が phone 方向に追従
@@ -9901,12 +9936,26 @@
               // observer の yaw/pitch を再同期 (マウス drag 後のジャンプ防止)
               if (typeof window.__obsResync === 'function') window.__obsResync();
               _snapApplied = true;
+              // サーバーへ現在の snap 面を通知 (変化時のみ)
+              if (_snapLastSentFace !== _picked.name) {
+                if (typeof socket !== 'undefined' && socket && socket.emit) {
+                  socket.emit('snapFace', { face: _picked.name });
+                }
+                _snapLastSentFace = _picked.name;
+              }
             }
           } else {
             _snapSelfCache = null;
           }
         } else {
           _snapSelfCache = null;
+        }
+        // snap が今フレームで適用されなかった → サーバーに null を通知 (1 回のみ)
+        if (!_snapApplied && _snapLastSentFace !== null) {
+          if (typeof socket !== 'undefined' && socket && socket.emit) {
+            socket.emit('snapFace', { face: null });
+          }
+          _snapLastSentFace = null;
         }
       }
       // 面タグ ON → camera position/quaternion を apex へ毎フレーム snap (off-axis とは無関係)

@@ -57,6 +57,7 @@ function randomColor() { return `hsl(${Math.floor(Math.random() * 360)}, 70%, 60
 let observerCounter = 0;
 // 付与可能なカスタムタグの一覧 (master が付け外し可能)
 const ALLOWED_CUSTOM_TAGS = new Set(['hole_test', 'plate1', 'plate2', 'top', 'left', 'right', 'snap']);
+const ALLOWED_SNAP_FACES = new Set(['+X', '-X', '+Y', '-Y', '+Z', '-Z']);
 
 // space3 のシーンオブジェクト (master が空間に生成する光源等)
 //   sceneObjects: id → { id, type, tags, x, y, z, config }
@@ -179,6 +180,8 @@ io.on('connection', (socket) => {
     entryTag: null,
     // master が付与するカスタムタグ (ALLOWED_CUSTOM_TAGS のみ)
     customTags: [],
+    // snap タグ ON 時にクライアントが報告する、現在スナップ中の壁面 ('+X' 等、未スナップは null)
+    snapFace: null,
   };
   users.set(socket.id, me);
   console.log(`[+] ${socket.id} (total=${users.size})`);
@@ -306,6 +309,7 @@ io.on('connection', (socket) => {
         id: socket.id, color: u.color, role: u.role, lightOn: u.lightOn,
         display: u.display,
         entryTag: u.entryTag, customTags: u.customTags,
+        snapFace: u.snapFace,
         x: u.x, y: u.y, z: u.z,
         qx: u.qx, qy: u.qy, qz: u.qz, qw: u.qw,
       });
@@ -748,6 +752,33 @@ io.on('connection', (socket) => {
       id: data.targetId, tag: data.tag, on,
       tags: target.customTags.slice(),
     });
+  });
+
+  // snap タグ ON クライアントが現在スナップ中の壁面を報告 (未スナップは face=null)
+  //   data: { face: '+X' | ... | null }
+  //   → 全クライアントへ 'snapFace' broadcast (スナップパネル UI の描画用)
+  socket.on('snapFace', (data) => {
+    const u = users.get(socket.id);
+    if (!u) return;
+    const face = (data && typeof data.face === 'string') ? data.face : null;
+    if (face !== null && !ALLOWED_SNAP_FACES.has(face)) return;
+    u.snapFace = face;
+    io.emit('snapFace', { id: socket.id, face });
+  });
+
+  // スナップパネルから特定クライアントへの位置強制
+  //   data: { targetId, face, u, v }
+  //     - face: '+X' | '-X' | '+Y' | '-Y' | '+Z' | '-Z'
+  //     - u, v: 壁面上の接線座標 (世界座標、壁面範囲内)
+  //   → 対象クライアントにのみ 'forceSnapPos' を送信
+  socket.on('forceSnapPos', (data) => {
+    if (!data || typeof data.targetId !== 'string') return;
+    if (!ALLOWED_SNAP_FACES.has(data.face)) return;
+    const u = Number(data.u), v = Number(data.v);
+    if (!isFinite(u) || !isFinite(v)) return;
+    const target = users.get(data.targetId);
+    if (!target) return;
+    io.to(data.targetId).emit('forceSnapPos', { face: data.face, u, v });
   });
 
   // Master がシーンにオブジェクト生成 (現状 type='light' のみ)
