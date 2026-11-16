@@ -522,6 +522,48 @@
       for (const [r, c] of bestComp) newMask[r][c] = true;
       return { mask: newMask, size: bestSize };
     }
+    // 案 F-2: open 領域内部の「孤立した閉セル (= 内側の閉じ穴)」を埋める
+    //   外周から 4-連結で到達不能な closed セル = 周囲を open に囲まれた孤島
+    //   これらを open 化することで、polygon 生成時に CW (= 内側境界) polygon が
+    //   出ない = shape.holes が CCW のみになり、earcut の "入れ子穴" 誤処理を回避
+    function _fillInteriorHoles(mask, rows, cols) {
+      const exterior = Array.from({ length: rows }, () => new Array(cols).fill(false));
+      const stack = [];
+      // マスク外周の closed セルを "exterior" として seed
+      for (let r = 0; r < rows; r++) {
+        if (!mask[r][0] && !exterior[r][0])         { exterior[r][0] = true; stack.push([r, 0]); }
+        if (!mask[r][cols - 1] && !exterior[r][cols - 1]) { exterior[r][cols - 1] = true; stack.push([r, cols - 1]); }
+      }
+      for (let c = 0; c < cols; c++) {
+        if (!mask[0][c] && !exterior[0][c])         { exterior[0][c] = true; stack.push([0, c]); }
+        if (!mask[rows - 1][c] && !exterior[rows - 1][c]) { exterior[rows - 1][c] = true; stack.push([rows - 1, c]); }
+      }
+      // 4-連結 flood fill で外周到達可能な closed セルを全てマーク
+      while (stack.length) {
+        const cur = stack.pop();
+        const r = cur[0], c = cur[1];
+        const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        for (let d = 0; d < 4; d++) {
+          const nr = r + dirs[d][0], nc = c + dirs[d][1];
+          if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+          if (mask[nr][nc] || exterior[nr][nc]) continue;
+          exterior[nr][nc] = true;
+          stack.push([nr, nc]);
+        }
+      }
+      // exterior でない closed セル = 内部孤島 → open 化
+      let filled = 0;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          if (!mask[r][c] && !exterior[r][c]) {
+            mask[r][c] = true;
+            filled++;
+          }
+        }
+      }
+      return filled;
+    }
+
     // 2×2 セルブロックの「斜めのみ open」パターンを除去
     //   NW+SE open & NE+SW closed → NE を open に
     //   NE+SW open & NW+SE closed → NW を open に
@@ -575,8 +617,11 @@
           const { mask: connected, size } = _extractLargestConnected(rawMask, ROWS, COLS);
           const ratio = size / TOTAL;
           if (ratio >= MIN_RATIO && ratio <= MAX_RATIO) {
-            // 斜めパターンを除去 → 再度 largest connected を抽出 (孤立セル解消)
+            // 斜めパターンを除去
             _removeCellDiagonals(connected, ROWS, COLS);
+            // 案 F-2: open 領域内部の閉セル孤島を埋める (CW polygon 発生を根絶)
+            const filledCount = _fillInteriorHoles(connected, ROWS, COLS);
+            // 再度 largest connected を抽出 (孤立セル解消)
             const re = _extractLargestConnected(connected, ROWS, COLS);
             // ===== 診断ログ =====
             //   seed 16 進、cleaned ratio、Perlin 出力の範囲 (NaN/異常値検出)
@@ -601,6 +646,7 @@
             }
             log('[frame-diag] seed=' + seedHex + ' retry=' + retry + ' iter=' + iter +
                 ' ratio=' + ratio.toFixed(3) + ' → cleaned=' + (re.size / TOTAL).toFixed(3) +
+                ' interior-filled=' + filledCount +
                 ' perlin=[' + perlinMin.toFixed(3) + ',' + perlinMax.toFixed(3) + ']' +
                 (hasNaN ? ' ⚠️ NaN!' : '') +
                 ' MASK:' + maskStr, 'ok');
