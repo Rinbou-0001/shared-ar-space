@@ -179,23 +179,46 @@
           myDisplay.width  = dispW;
           myDisplay.height = dispH;
         }
-        // shape aspect == canvas aspect になるので distV == distH、min/max 不要
-        // 距離は frame の FRONT FACE (z = +FRAME_DEPTH/2) が viewport にフィットするよう計算。
-        //   dispH/(2×halfTan) は前面までの距離。camera は FRAME_DEPTH/2 ぶんさらに奥に置く
-        //   → 前面が viewport ちょうど、extrude 側面 (穴の内壁) は奥に向かって収束
-        //   ※ 旧実装は Z=0 (shape 中心) フィットだったため、front face が過大投影されて
-        //     外周 _frontMaterial が viewport 外に押し出されていた
-        const fovRad = _overlayCamera.fov * Math.PI / 180;
-        const halfTan = Math.tan(fovRad / 2);
-        const frontFit = dispH / (2 * halfTan);
-        //   FRAME_DEPTH は後段 L203 の const だが、applyCanvasLayout 自体の初回呼出し (L862)
-        //   はそれより後なので TDZ 問題なし。安全のため try で読む
+        // FRAME_DEPTH 取得 (TDZ 回避のため try)
         let _frameDepth = 0.03;
         try { _frameDepth = FRAME_DEPTH; } catch (_) {}
-        const dist = frontFit + _frameDepth / 2;
-        _overlayCamera.position.set(0, 0, dist);
-        _overlayCamera.lookAt(0, 0, 0);
-        _overlayCamera.updateProjectionMatrix();
+        const frontFaceZ = _frameDepth / 2;
+        const fovRad = _overlayCamera.fov * Math.PI / 180;
+        const halfTan = Math.tan(fovRad / 2);
+        //   効果9 ON かつ viewerEye が frame 前方 (vz > frontFaceZ) にある時 → off-axis 投影
+        //   それ以外 → symmetric フォールバック (案 C + FRAME_DEPTH/2 補正)
+        const _useFrameOffaxis = !!(window.__effect && window.__effect[9])
+                              && (typeof viewerEye !== 'undefined')
+                              && (viewerEye.z > frontFaceZ + 1e-4);
+        if (_useFrameOffaxis) {
+          // === Off-axis: front face を near plane、viewerEye を camera 位置とする非対称視錐台 ===
+          //   shape は overlay 原点に (±dispW/2, ±dispH/2, ±FRAME_DEPTH/2)
+          //   近平面 z = frontFaceZ、camera z = viewerEye.z → near = vz - frontFaceZ
+          const vx = viewerEye.x, vy = viewerEye.y, vz = viewerEye.z;
+          const near = vz - frontFaceZ;
+          const far  = near + _frameDepth + 10;   // frame 背面を十分に包含
+          // 近平面 (front face 位置) における frustum 境界 (camera-local 座標)
+          //   world (x, y, frontFaceZ) → camera-local (x - vx, y - vy, frontFaceZ - vz = -near)
+          const left   = -dispW / 2 - vx;
+          const right  = +dispW / 2 - vx;
+          const top    = +dispH / 2 - vy;
+          const bottom = -dispH / 2 - vy;
+          _overlayCamera.position.set(vx, vy, vz);
+          _overlayCamera.quaternion.identity();   // 常に -Z 方向を向く
+          _overlayCamera.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
+          _overlayCamera.projectionMatrixInverse.copy(_overlayCamera.projectionMatrix).invert();
+          // ※ updateProjectionMatrix() は fov/aspect で上書きするので呼ばない
+          _overlayCamera.updateMatrixWorld();
+        } else {
+          // === Symmetric フォールバック (現状の案 C + FRAME_DEPTH/2 補正) ===
+          //   shape aspect == canvas aspect になるので distV == distH、min/max 不要
+          //   距離は frame の FRONT FACE が viewport にフィットするよう FRAME_DEPTH/2 分後退
+          const frontFit = dispH / (2 * halfTan);
+          const dist = frontFit + _frameDepth / 2;
+          _overlayCamera.position.set(0, 0, dist);
+          _overlayCamera.lookAt(0, 0, 0);
+          _overlayCamera.updateProjectionMatrix();
+        }
         if (typeof _rebuildFrame === 'function') _rebuildFrame(aspect);
         // shape が変化したら snap パネル border を更新するため displaySize broadcast
         //   ※ socket は後段で let 宣言されているため、入室前の applyCanvasLayout 呼出しでは
@@ -7631,9 +7654,9 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -7700,6 +7723,15 @@
           }
           log('theme → ' + (on ? 'Shibuya' : 'default') + ' (effect6)', 'ok');
         }
+        if (n === 9) {
+          // 効果9: 窓枠 overlay を off-axis 投影に切替
+          //   ON  → viewerEye 基準の非対称視錐台 (front face = near plane)
+          //   OFF → symmetric フォールバック (現状の案 C + FRAME_DEPTH/2 補正)
+          try {
+            if (typeof applyCanvasLayout === 'function') applyCanvasLayout();
+          } catch (e) { log('applyCanvasLayout err (effect9): ' + e.message, 'err'); }
+          log('窓枠 off-axis ' + (on ? 'ON' : 'OFF') + ' (effect9)', 'ok');
+        }
         if (n === 8) {
           // 効果8: 窓枠前面テクスチャ ON/OFF (前面のみ、sRGB、ディスプレイサイズへ引き伸ばし)
           //   _frontTexture は入室時に _pickAndLoadFrontImage() で生成 (非同期)。
@@ -7734,6 +7766,10 @@
           if (vex && document.activeElement !== vex && !dirty('ve-x')) vex.value = viewerEye.x.toFixed(2);
           if (vey && document.activeElement !== vey && !dirty('ve-y')) vey.value = viewerEye.y.toFixed(2);
           if (vez && document.activeElement !== vez && !dirty('ve-z')) vez.value = viewerEye.z.toFixed(2);
+        }
+        // 効果9 (窓枠 off-axis) 有効時は viewerEye 更新ごとに overlay 投影を再計算
+        if (window.__effect && window.__effect[9]) {
+          try { if (typeof applyCanvasLayout === 'function') applyCanvasLayout(); } catch (_) {}
         }
       });
 
@@ -9798,8 +9834,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false };
-      [1, 2, 3, 4, 5, 6, 7, 8].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false };
+      [1, 2, 3, 4, 5, 6, 7, 8, 9].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
