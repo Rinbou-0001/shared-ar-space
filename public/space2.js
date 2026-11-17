@@ -188,13 +188,17 @@
         _overlayCamera.updateProjectionMatrix();
         if (typeof _rebuildFrame === 'function') _rebuildFrame(aspect);
         // shape が変化したら snap パネル border を更新するため displaySize broadcast
-        if (typeof socket !== 'undefined' && socket && socket.connected) {
-          if (Math.abs(_lastEmittedShape.w - dispW) > 1e-6 || Math.abs(_lastEmittedShape.h - dispH) > 1e-6) {
-            socket.emit('displaySize', { width: dispW, height: dispH });
-            _lastEmittedShape.w = dispW;
-            _lastEmittedShape.h = dispH;
+        //   ※ socket は後段で let 宣言されているため、入室前の applyCanvasLayout 呼出しでは
+        //     TDZ エラー回避のため try/catch で握りつぶす (socket が無い時点では broadcast 不要)
+        try {
+          if (socket && socket.connected) {
+            if (Math.abs(_lastEmittedShape.w - dispW) > 1e-6 || Math.abs(_lastEmittedShape.h - dispH) > 1e-6) {
+              socket.emit('displaySize', { width: dispW, height: dispH });
+              _lastEmittedShape.w = dispW;
+              _lastEmittedShape.h = dispH;
+            }
           }
-        }
+        } catch (_) { /* socket 未初期化 (TDZ) → broadcast は後続の applyCanvasLayout 呼出しで発火 */ }
       }
     }
 
