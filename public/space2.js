@@ -180,9 +180,19 @@
           myDisplay.height = dispH;
         }
         // shape aspect == canvas aspect になるので distV == distH、min/max 不要
+        // 距離は frame の FRONT FACE (z = +FRAME_DEPTH/2) が viewport にフィットするよう計算。
+        //   dispH/(2×halfTan) は前面までの距離。camera は FRAME_DEPTH/2 ぶんさらに奥に置く
+        //   → 前面が viewport ちょうど、extrude 側面 (穴の内壁) は奥に向かって収束
+        //   ※ 旧実装は Z=0 (shape 中心) フィットだったため、front face が過大投影されて
+        //     外周 _frontMaterial が viewport 外に押し出されていた
         const fovRad = _overlayCamera.fov * Math.PI / 180;
         const halfTan = Math.tan(fovRad / 2);
-        const dist = dispH / (2 * halfTan);   // distV == distH、どちらでも良い
+        const frontFit = dispH / (2 * halfTan);
+        //   FRAME_DEPTH は後段 L203 の const だが、applyCanvasLayout 自体の初回呼出し (L862)
+        //   はそれより後なので TDZ 問題なし。安全のため try で読む
+        let _frameDepth = 0.03;
+        try { _frameDepth = FRAME_DEPTH; } catch (_) {}
+        const dist = frontFit + _frameDepth / 2;
         _overlayCamera.position.set(0, 0, dist);
         _overlayCamera.lookAt(0, 0, 0);
         _overlayCamera.updateProjectionMatrix();
