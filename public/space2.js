@@ -153,14 +153,14 @@
         // ディスプレイサイズを viewport にフィットさせる距離を計算
         //   距離 d: 縦フィット d_v = dispH / (2 × tan(fov/2))
         //            横フィット d_h = dispW / (2 × tan(fov/2) × aspect)
-        //   max(d_v, d_h) で全体が確実に収まる
+        //   案 B-2 cover: min(d_v, d_h) で canvas 全域を埋める (枠端は切れる可能性)
         const dispW = (typeof myDisplay !== 'undefined' && myDisplay.width)  || 0.30;
         const dispH = (typeof myDisplay !== 'undefined' && myDisplay.height) || 0.20;
         const fovRad = _overlayCamera.fov * Math.PI / 180;
         const halfTan = Math.tan(fovRad / 2);
         const distV = dispH / (2 * halfTan);
         const distH = dispW / (2 * halfTan * aspect);
-        const dist = Math.max(distV, distH);
+        const dist = Math.min(distV, distH);
         _overlayCamera.position.set(0, 0, dist);
         _overlayCamera.lookAt(0, 0, 0);
         _overlayCamera.updateProjectionMatrix();
@@ -7765,18 +7765,18 @@
         if (hinp && document.activeElement !== hinp) hinp.value = h.toFixed(3);
         // 他クライアントの avatar display 反映 + snap パネル border 反映
         if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
-        // 視点反映: effective size → self avatar frustum / 窓枠 再構築
+        // 視点反映: overlay camera 距離 + 窓枠 shape を新サイズへ追従させる
+        //   applyCanvasLayout() が renderer size / camera aspect / overlay camera 位置 / _rebuildFrame を一括更新
+        try {
+          if (typeof applyCanvasLayout === 'function') applyCanvasLayout();
+        } catch (e) { log('applyCanvasLayout err: ' + e.message, 'err'); }
+        // self avatar の frustum base 再計算
         try {
           if (typeof computeAndApplyEffectiveSize === 'function') {
             computeAndApplyEffectiveSize('forceDisplaySize');
           }
         } catch (e) { log('computeAndApplyEffectiveSize err: ' + e.message, 'err'); }
-        try {
-          if (typeof _rebuildFrame === 'function') {
-            _rebuildFrame(_lastFrameAspect || (window.innerWidth / window.innerHeight));
-          }
-        } catch (e) { log('_rebuildFrame err: ' + e.message, 'err'); }
-        log('forceDisplaySize recv → ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存 + 再構築)', 'ok');
+        log('forceDisplaySize recv → ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存 + applyCanvasLayout + effective 再計算)', 'ok');
       });
     }
 
@@ -8881,9 +8881,16 @@
         _displaySizeManuallyEdited = true;
         // 永続化 (forceDisplaySize と同一ストレージキー)
         try { localStorage.setItem('space2.myDisplaySize', JSON.stringify({ w, h })); } catch (_) {}
-        // ※ space3: myDisplay の更新のみ。avatar rebuild / emit は行わない
-        //   (base/box サイズ変更は入室時と fullscreen 時のみ)
-        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存、myDisplay 更新、avatar は据置)', 'ok');
+        // overlay カメラ距離 + 窓枠 shape を新サイズへ追従 (forceDisplaySize と同処理)
+        try {
+          if (typeof applyCanvasLayout === 'function') applyCanvasLayout();
+        } catch (e) { log('applyCanvasLayout err: ' + e.message, 'err'); }
+        try {
+          if (typeof computeAndApplyEffectiveSize === 'function') {
+            computeAndApplyEffectiveSize('pushDisplaySize');
+          }
+        } catch (e) { log('computeAndApplyEffectiveSize err: ' + e.message, 'err'); }
+        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存 + applyCanvasLayout + effective 再計算)', 'ok');
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
