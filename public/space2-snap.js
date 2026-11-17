@@ -275,13 +275,15 @@
   function _isSidebarInputFocused() {
     const ae = document.activeElement;
     if (!ae || !ae.matches) return false;
-    return ae.matches('#sidebar input');
+    return ae.matches('#sidebar input, #sidebar button');
   }
   // ロック用: focus 時に捕捉した aspect ratio を保持 (clientId → w/h)
   const _szAspectLock = {};
+  // 編集中 row (clientId) — focus 中 or 直前まで触っていた間は renderSidebar の再構築をスキップ
+  const _szEditing = new Set();
 
   function renderSidebar() {
-    if (_isSidebarInputFocused()) return;   // 入力中は書き換え回避
+    if (_isSidebarInputFocused() || _szEditing.size > 0) return;   // 入力中 / 編集中 row がある時は書き換え回避
     const sel = document.getElementById('client-list');
     const all = document.getElementById('all-snap-list');
     if (sel) {
@@ -318,16 +320,26 @@
   }
 
   // ===== サイズ編集: アスペクト比ロック + 適用 =====
+  //   DOM 再構築問題:
+  //     pose broadcast が ~60Hz で届く度に renderSidebar() が走ると、
+  //     ユーザー入力中 or クリック直後 (focus 遷移中) に DOM を差し替えてしまい、
+  //     ・入力値がサーバー値で上書きされる
+  //     ・apply ボタンが click 発火前に消滅 → イベント不発
+  //   対策:
+  //     ・入力に focus が入ったら _szEditing に row id を追加 → renderSidebar skip
+  //     ・apply は click ではなく mousedown + preventDefault で捕捉 (focus 遷移前に実行)
+  //     ・apply or 外部 click で _szEditing から削除 → render 再開
   function _setupSizeEditDelegation() {
     const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
-    // focus 時にその時点のアスペクトを捕捉 (以降 input イベントでロック)
+    // focus 時: アスペクト比を捕捉 + 編集中マーク
     sidebar.addEventListener('focusin', (ev) => {
       const el = ev.target;
       if (!el.matches || !el.matches('.sz-w, .sz-h')) return;
       const row = el.closest('.client-row');
       if (!row) return;
       const id = row.getAttribute('data-client-id');
+      _szEditing.add(id);
       const wEl = row.querySelector('.sz-w');
       const hEl = row.querySelector('.sz-h');
       const w = parseFloat(wEl && wEl.value);
@@ -352,10 +364,11 @@
       if (el === wEl)       { hEl.value = (v / ratio).toFixed(3); }
       else if (el === hEl)  { wEl.value = (v * ratio).toFixed(3); }
     });
-    // 適用ボタン: forceDisplaySize emit
-    sidebar.addEventListener('click', (ev) => {
+    // 適用ボタン: mousedown で捕捉 (focus 遷移前、DOM 書換え前に値を確定・送信)
+    sidebar.addEventListener('mousedown', (ev) => {
       const btn = ev.target && ev.target.closest ? ev.target.closest('.sz-apply') : null;
       if (!btn) return;
+      ev.preventDefault();   // input から button への focus 遷移を抑止 → input.value が保持される
       const row = btn.closest('.client-row');
       if (!row) return;
       const id = row.getAttribute('data-client-id');
@@ -364,7 +377,7 @@
       const w = parseFloat(wEl && wEl.value);
       const h = parseFloat(hEl && hEl.value);
       if (!isFinite(w) || !isFinite(h) || w <= 0 || h <= 0 || w > 10 || h > 10) {
-        log('サイズ不正 (0 < w,h ≦ 10 m)'); return;
+        log('サイズ不正 (0 < w,h ≦ 10 m) w=' + wEl.value + ' h=' + hEl.value); return;
       }
       if (socket && socket.connected) {
         socket.emit('forceDisplaySize', { targetId: id, width: w, height: h });
@@ -372,9 +385,21 @@
       } else {
         log('socket 未接続 - emit 不可');
       }
-      // focus を解除して次回 render で UI を最新化
+      // 編集完了 → render 再開
+      _szEditing.delete(id);
+      delete _szAspectLock[id];
       if (wEl) wEl.blur();
       if (hEl) hEl.blur();
+      render();   // 即座に最新化
+    });
+    // サイドバー外部クリックで編集状態をクリア (操作キャンセル扱い)
+    document.addEventListener('mousedown', (ev) => {
+      if (sidebar.contains(ev.target)) return;
+      if (_szEditing.size > 0) {
+        _szEditing.clear();
+        Object.keys(_szAspectLock).forEach((k) => delete _szAspectLock[k]);
+        render();
+      }
     });
   }
 
