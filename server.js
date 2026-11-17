@@ -675,11 +675,19 @@ io.on('connection', (socket) => {
   //   data: { effect: 1|2|3, on: boolean }
   socket.on('effectState', (data) => {
     const sender = users.get(socket.id);
-    if (!sender || (sender.role !== 'master' && sender.role !== 'snap-panel')) return;
+    if (!sender) {
+      console.log('[effectState] rejected: sender not found', socket.id);
+      return;
+    }
+    if (sender.role !== 'master' && sender.role !== 'snap-panel') {
+      console.log('[effectState] rejected: role =', sender.role, 'socket =', socket.id);
+      return;
+    }
     if (!data || typeof data !== 'object') return;
     const n = data.effect;
     if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7) return;
     effectState[n] = !!data.on;
+    console.log('[effectState] accepted: 効果' + n + ' →', effectState[n], '(from role=' + sender.role + ')');
     io.emit('effectState', { effect: n, on: effectState[n] });
   });
 
@@ -689,6 +697,7 @@ io.on('connection', (socket) => {
     if (!u) return;
     if (data && data.role === 'snap-panel') {
       u.role = 'snap-panel';
+      console.log('[identify] socket', socket.id, '→ role=snap-panel');
     }
   });
 

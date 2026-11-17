@@ -604,6 +604,9 @@
   }
 
   // ===== 検証トグル =====
+  //   ・renderEffectToggles で innerHTML を書き換えるとボタン DOM が差し変わるため、
+  //     listener は子ボタンではなく親コンテナに 1 度だけ登録する (event delegation)。
+  let _effectListenerAttached = false;
   function renderEffectToggles() {
     const list = document.getElementById('effect-list');
     if (!list) return;
@@ -614,15 +617,27 @@
         <span class="eval">${on ? 'ON' : 'OFF'}</span>
       </button>`;
     }).join('');
-    for (const btn of list.querySelectorAll('.effect-btn')) {
-      btn.addEventListener('click', () => {
-        const n = Number(btn.dataset.effect);
+    if (!_effectListenerAttached) {
+      list.addEventListener('click', (ev) => {
+        // 子ボタンまで遡って data-effect を拾う (span クリック対応)
+        const btn = ev.target && ev.target.closest ? ev.target.closest('.effect-btn') : null;
+        if (!btn) return;
+        const n = Number(btn.getAttribute('data-effect'));
         if (!n) return;
         const nextOn = !effectStates[n];
+        log('effectState click → 効果' + n + ': ' + (nextOn ? 'ON' : 'OFF'));
         if (socket && socket.connected) {
+          // 送信直前に identify を再送 (サーバーが role=snap-panel を認識していない場合の保険)
+          socket.emit('identify', { role: 'snap-panel' });
           socket.emit('effectState', { effect: n, on: nextOn });
+          // 楽観的更新 (サーバー broadcast 受信で確定上書き)
+          effectStates[n] = nextOn;
+          renderEffectToggles();
+        } else {
+          log('socket 未接続 - emit 不可');
         }
       });
+      _effectListenerAttached = true;
     }
   }
 
