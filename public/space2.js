@@ -699,7 +699,7 @@
       const ROWS = FRAME_GRID_ROWS;
       const SCALE = 4.0;
       const TOTAL = COLS * ROWS;
-      const MIN_RATIO = 0.30;
+      const MIN_RATIO = 0.40;
       const MAX_RATIO = 0.60;
       const MAX_RETRY = 5;
       for (let retry = 0; retry < MAX_RETRY; retry++) {
