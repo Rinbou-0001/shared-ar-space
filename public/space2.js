@@ -199,21 +199,21 @@
     //   group 1 = sides + bevel。_rebuildFrame で geom.groups を 3 分割し
     //   [back(白), sides, front(画像or白)] を Mesh materials 配列として渡す
     const _capsMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    // 前面専用 (効果8 で img_01 テクスチャを ON/OFF)
+    // 前面専用 (効果8 で interface_img テクスチャを ON/OFF)
     const _frontMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null });
-    // 効果8: 窓枠前面に img_01.png を貼り付け (sRGB、ディスプレイサイズへ引き伸ばし)
-    const _frontTexture = new THREE.TextureLoader().load('/assets/img_01.png');
-    _frontTexture.encoding = THREE.sRGBEncoding;
-    _frontTexture.wrapS = THREE.ClampToEdgeWrapping;
-    _frontTexture.wrapT = THREE.ClampToEdgeWrapping;
-    _frontTexture.minFilter = THREE.LinearFilter;
-    _frontTexture.magFilter = THREE.LinearFilter;
-    _frontTexture.generateMipmaps = false;
+    // 効果8: 窓枠前面に画像貼付 (sRGB、ディスプレイサイズへ引き伸ばし)
+    //   ・入室時に myDisplay のアスペクトから横/縦を判定し、対応プールからランダム抽選
+    //   ・毎入室で新抽選 (永続化なし)
+    //   ・各クライアント独立 (サーバー同期なし)
+    const WIDTH_IMGS  = ['img_01.png', 'img_06.png', 'img_08.png', 'img_09.png', 'img_10.png', 'img_11.png', 'img_12.png'];
+    const HEIGHT_IMGS = ['img_07.png'];
+    let _frontTexture = null;   // 入室時に _pickAndLoadFrontImage() で生成
     // UV 正規化: shape が [-dispW/2, dispW/2] × [-dispH/2, dispH/2] 範囲なので
     //   repeat = (1/dispW, 1/dispH), offset = (0.5, 0.5) で [0, 1] 範囲に写像
     //   ※ _rebuildFrame が shape 構築に使うのと同じ myDisplay を参照 (effectiveDisplaySize は
     //     後段 L6874 で let 宣言されており、ここから早期呼出し時に TDZ になるため不可)
     function _updateFrontTextureUV() {
+      if (!_frontTexture) return;
       const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
       const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
       if (w > 0 && h > 0) {
@@ -222,6 +222,43 @@
         _frontTexture.needsUpdate = true;
       }
     }
+    // 入室時に向きを判定してランダム 1 枚をロード
+    function _pickAndLoadFrontImage() {
+      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
+      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
+      const landscape = (w >= h);
+      const folder = landscape ? 'width' : 'height';
+      const pool   = landscape ? WIDTH_IMGS : HEIGHT_IMGS;
+      if (!pool || pool.length === 0) {
+        if (typeof log === 'function') log('[frame-img] プール空 (' + folder + ')', 'warn');
+        return;
+      }
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
+      const url = '/assets/' + folder + '/' + chosen;
+      new THREE.TextureLoader().load(url, (tex) => {
+        tex.encoding = THREE.sRGBEncoding;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        if (_frontTexture) _frontTexture.dispose();
+        _frontTexture = tex;
+        _updateFrontTextureUV();
+        // 効果8 が既に ON なら即座に map へ反映
+        if (window.__effect && window.__effect[8]) {
+          _frontMaterial.map = _frontTexture;
+          _frontMaterial.needsUpdate = true;
+        }
+        if (typeof log === 'function') {
+          log('[frame-img] 読込完了: ' + url + ' (' + (landscape ? '横' : '縦') + ' ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm)', 'ok');
+        }
+      }, undefined, (err) => {
+        if (typeof log === 'function') log('[frame-img] 読込失敗: ' + url, 'err');
+      });
+    }
+    // 他モジュール (socket init 後) から呼び出せるよう公開
+    window.__pickAndLoadFrontImage = _pickAndLoadFrontImage;
     // ===== 物理メートル値での窓枠定数 (PerspectiveCamera 使用) =====
     const FRAME_THICK   = 0.008;   // 8mm 外周枠太さ
     const FRAME_DEPTH   = 0.03;    // 3cm 奥行き (指定)
@@ -7138,6 +7175,8 @@
         log('init: id=' + myId + ' others=' + Object.keys(data.users || {}).length, 'ok');
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
+        // 効果8 用: 入室時にアスペクトから横/縦を判定し、該当プールからランダム 1 枚をロード
+        try { _pickAndLoadFrontImage(); } catch (e) { log('_pickAndLoadFrontImage err: ' + e.message, 'err'); }
         if (ROLE !== 'camera') {
           // observer/master: canvas 物理サイズを確定して self avatar 再構築 + emit
           computeAndApplyEffectiveSize('init');
@@ -7618,10 +7657,16 @@
           log('theme → ' + (on ? 'Shibuya' : 'default') + ' (effect6)', 'ok');
         }
         if (n === 8) {
-          // 効果8: 窓枠前面に img_01.png を貼付 (sRGB、ディスプレイサイズへ引き伸ばし、前面のみ)
+          // 効果8: 窓枠前面テクスチャ ON/OFF (前面のみ、sRGB、ディスプレイサイズへ引き伸ばし)
+          //   _frontTexture は入室時に _pickAndLoadFrontImage() で生成 (非同期)。
+          //   まだ読込完了していなければ null のため、ロードコールバックで再度 map 反映される。
           if (on) {
-            _frontMaterial.map = _frontTexture;
-            _updateFrontTextureUV();
+            if (_frontTexture) {
+              _frontMaterial.map = _frontTexture;
+              _updateFrontTextureUV();
+            } else {
+              log('窓枠前面テクスチャ未ロード (effect8 ON、ロード完了後に反映)', 'warn');
+            }
           } else {
             _frontMaterial.map = null;
           }
