@@ -211,9 +211,11 @@
     _frontTexture.generateMipmaps = false;
     // UV 正規化: shape が [-dispW/2, dispW/2] × [-dispH/2, dispH/2] 範囲なので
     //   repeat = (1/dispW, 1/dispH), offset = (0.5, 0.5) で [0, 1] 範囲に写像
+    //   ※ _rebuildFrame が shape 構築に使うのと同じ myDisplay を参照 (effectiveDisplaySize は
+    //     後段 L6874 で let 宣言されており、ここから早期呼出し時に TDZ になるため不可)
     function _updateFrontTextureUV() {
-      const w = (typeof effectiveDisplaySize !== 'undefined' && effectiveDisplaySize) ? effectiveDisplaySize.width  : 0.3;
-      const h = (typeof effectiveDisplaySize !== 'undefined' && effectiveDisplaySize) ? effectiveDisplaySize.height : 0.2;
+      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
+      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
       if (w > 0 && h > 0) {
         _frontTexture.repeat.set(1 / w, 1 / h);
         _frontTexture.offset.set(0.5, 0.5);
