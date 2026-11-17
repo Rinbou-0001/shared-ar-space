@@ -196,8 +196,30 @@
     });
     // 前面 (caps) 用 (unlit、常に指定色固定)。
     //   ExtrudeGeometry の material group 0 = caps (前後の平面)
-    //   group 1 = sides + bevel。_rebuildFrame で配列 [caps, sides] として Mesh に渡す
+    //   group 1 = sides + bevel。_rebuildFrame で geom.groups を 3 分割し
+    //   [back(白), sides, front(画像or白)] を Mesh materials 配列として渡す
     const _capsMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    // 前面専用 (効果8 で img_01 テクスチャを ON/OFF)
+    const _frontMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null });
+    // 効果8: 窓枠前面に img_01.png を貼り付け (sRGB、ディスプレイサイズへ引き伸ばし)
+    const _frontTexture = new THREE.TextureLoader().load('/assets/img_01.png');
+    _frontTexture.encoding = THREE.sRGBEncoding;
+    _frontTexture.wrapS = THREE.ClampToEdgeWrapping;
+    _frontTexture.wrapT = THREE.ClampToEdgeWrapping;
+    _frontTexture.minFilter = THREE.LinearFilter;
+    _frontTexture.magFilter = THREE.LinearFilter;
+    _frontTexture.generateMipmaps = false;
+    // UV 正規化: shape が [-dispW/2, dispW/2] × [-dispH/2, dispH/2] 範囲なので
+    //   repeat = (1/dispW, 1/dispH), offset = (0.5, 0.5) で [0, 1] 範囲に写像
+    function _updateFrontTextureUV() {
+      const w = (typeof effectiveDisplaySize !== 'undefined' && effectiveDisplaySize) ? effectiveDisplaySize.width  : 0.3;
+      const h = (typeof effectiveDisplaySize !== 'undefined' && effectiveDisplaySize) ? effectiveDisplaySize.height : 0.2;
+      if (w > 0 && h > 0) {
+        _frontTexture.repeat.set(1 / w, 1 / h);
+        _frontTexture.offset.set(0.5, 0.5);
+        _frontTexture.needsUpdate = true;
+      }
+    }
     // ===== 物理メートル値での窓枠定数 (PerspectiveCamera 使用) =====
     const FRAME_THICK   = 0.008;   // 8mm 外周枠太さ
     const FRAME_DEPTH   = 0.03;    // 3cm 奥行き (指定)
@@ -726,10 +748,22 @@
         bevelEnabled: false,   // perspective 投影で側面が自然に見える、bevel 不要
       });
       geom.translate(0, 0, -FRAME_DEPTH / 2);   // Z 中心を 0 に合わせる
-      // 案 M-1: material 配列 [caps, sides] — 前面は _capsMaterial (unlit 固定色)、
-      //   側面 (jamb) は _frameMaterial (shaded)
-      _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial]);
+      // 案 M-1 拡張: ExtrudeGeometry は groups=[{caps=back+front, matIdx:0}, {sides, matIdx:1}] を生成。
+      //   bevel 無効時 buildLidFaces は back → front の順で三角形を積むため、
+      //   caps.count の前半 = back、後半 = front。背面 (_capsMaterial 白) と前面 (_frontMaterial) を分離。
+      if (geom.groups && geom.groups.length >= 2) {
+        const capsCount = geom.groups[0].count;
+        const sideStart = geom.groups[1].start;
+        const sideCount = geom.groups[1].count;
+        geom.clearGroups();
+        geom.addGroup(0,              capsCount / 2, 0);   // back (白)
+        geom.addGroup(capsCount / 2,  capsCount / 2, 2);   // front (効果8 で画像)
+        geom.addGroup(sideStart,      sideCount,     1);   // sides (shaded)
+      }
+      _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial, _frontMaterial]);
       _frameGroup.add(_frameMesh);
+      // 前面画像の UV repeat/offset を現在の display サイズに合わせて更新
+      _updateFrontTextureUV();
     }
     // マスク制御 API (master UI から呼び出し)
     window.__frameGridDims = function() {
@@ -7561,6 +7595,17 @@
             window.__applyTheme(on ? 'shibuya' : 'default');
           }
           log('theme → ' + (on ? 'Shibuya' : 'default') + ' (effect6)', 'ok');
+        }
+        if (n === 8) {
+          // 効果8: 窓枠前面に img_01.png を貼付 (sRGB、ディスプレイサイズへ引き伸ばし、前面のみ)
+          if (on) {
+            _frontMaterial.map = _frontTexture;
+            _updateFrontTextureUV();
+          } else {
+            _frontMaterial.map = null;
+          }
+          _frontMaterial.needsUpdate = true;
+          log('窓枠前面テクスチャ ' + (on ? 'ON' : 'OFF') + ' (effect8)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });
