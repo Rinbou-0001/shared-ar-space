@@ -137,6 +137,29 @@
     //   同期 ON/OFF はカメラ視野内で「self の視錐台 base 面が canvas をちょうど埋める」
     //   ように、self avatar 側の base 距離 (depth) を動的計算することで実現する。
     //   → 視野やアスペクトは変えず、base=canvas viewport の見え方だけを変える。
+    // 案 C: 窓枠 shape のアスペクトを canvas aspect に合わせて伸縮 (短辺保持)
+    //   myDisplay の短辺 (min(w, h)) を保持し、もう一方を canvas aspect に追従させる。
+    //   両 aspect が一致するため overlay camera の distV と distH も等しくなり、
+    //   余白・食み出しなしで完全フィット。shape 更新後は myDisplay も同期して
+    //   他機能 (UV 正規化 / snap パネル表示 / avatar frustum) と整合させる。
+    function _computeFrameShapeSize(canvasAspect) {
+      const baseW = (typeof myDisplay !== 'undefined' && myDisplay.width  > 0) ? myDisplay.width  : 0.30;
+      const baseH = (typeof myDisplay !== 'undefined' && myDisplay.height > 0) ? myDisplay.height : 0.20;
+      const shortSide = Math.min(baseW, baseH);
+      let dispW, dispH;
+      if (canvasAspect >= 1) {
+        // canvas 横長 → 短辺を縦に、横を canvasAspect 倍に
+        dispH = shortSide;
+        dispW = shortSide * canvasAspect;
+      } else {
+        // canvas 縦長 → 短辺を横に、縦を 1/canvasAspect 倍に
+        dispW = shortSide;
+        dispH = shortSide / canvasAspect;
+      }
+      return { dispW, dispH };
+    }
+    // 最後に emit した shape を記憶 (変化時のみ displaySize broadcast)
+    let _lastEmittedShape = { w: 0, h: 0 };
     function applyCanvasLayout() {
       const winW = window.innerWidth;
       const winH = window.innerHeight;
@@ -150,21 +173,28 @@
       if (_overlayCamera) {
         const aspect = winW / winH;
         _overlayCamera.aspect = aspect;
-        // ディスプレイサイズを viewport にフィットさせる距離を計算
-        //   距離 d: 縦フィット d_v = dispH / (2 × tan(fov/2))
-        //            横フィット d_h = dispW / (2 × tan(fov/2) × aspect)
-        //   案 B-2 cover: min(d_v, d_h) で canvas 全域を埋める (枠端は切れる可能性)
-        const dispW = (typeof myDisplay !== 'undefined' && myDisplay.width)  || 0.30;
-        const dispH = (typeof myDisplay !== 'undefined' && myDisplay.height) || 0.20;
+        // 案 C: shape を canvas aspect に合わせて補正 (短辺保持) → myDisplay も同期
+        const { dispW, dispH } = _computeFrameShapeSize(aspect);
+        if (typeof myDisplay !== 'undefined') {
+          myDisplay.width  = dispW;
+          myDisplay.height = dispH;
+        }
+        // shape aspect == canvas aspect になるので distV == distH、min/max 不要
         const fovRad = _overlayCamera.fov * Math.PI / 180;
         const halfTan = Math.tan(fovRad / 2);
-        const distV = dispH / (2 * halfTan);
-        const distH = dispW / (2 * halfTan * aspect);
-        const dist = Math.min(distV, distH);
+        const dist = dispH / (2 * halfTan);   // distV == distH、どちらでも良い
         _overlayCamera.position.set(0, 0, dist);
         _overlayCamera.lookAt(0, 0, 0);
         _overlayCamera.updateProjectionMatrix();
         if (typeof _rebuildFrame === 'function') _rebuildFrame(aspect);
+        // shape が変化したら snap パネル border を更新するため displaySize broadcast
+        if (typeof socket !== 'undefined' && socket && socket.connected) {
+          if (Math.abs(_lastEmittedShape.w - dispW) > 1e-6 || Math.abs(_lastEmittedShape.h - dispH) > 1e-6) {
+            socket.emit('displaySize', { width: dispW, height: dispH });
+            _lastEmittedShape.w = dispW;
+            _lastEmittedShape.h = dispH;
+          }
+        }
       }
     }
 
