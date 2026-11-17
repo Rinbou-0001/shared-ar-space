@@ -35,7 +35,19 @@
   // 共通視点 (viewerEye) — 全クライアントで共有される 3D 視点座標
   //   各面に (u, v) として投影し、ドラッグ中の矩形中心をスナップ可能な点として表示
   let viewerEye = { x: 0, y: 1.5, z: 0 };
-  const clients = new Map();   // id → { entryTag, display:{width,height}, customTags:[], snapFace, pos:{x,y,z} }
+  const clients = new Map();
+
+  // 検証トグル (master パネルと同一の `effectState` イベントで全クライアント同期)
+  const EFFECT_DEFS = [
+    { n: 1, label: '効果1' },
+    { n: 2, label: '効果2 (スマホ UI)' },
+    { n: 3, label: '効果3 (影)' },
+    { n: 4, label: '効果4 (魚)' },
+    { n: 5, label: '効果5 (テーマ)' },
+    { n: 6, label: '効果6' },
+    { n: 7, label: '効果7 (窓枠)' },
+  ];
+  const effectStates = {};   // id → { entryTag, display:{width,height}, customTags:[], snapFace, pos:{x,y,z} }
   let activeFaceLabel = 'A';
   let hoverClientId = null;
 
@@ -508,6 +520,8 @@
 
     socket.on('connect', () => {
       setStatus('接続済 (' + socket.id.slice(0, 6) + ')', '#4ade80');
+      // snap パネルとして識別 (effectState 送信権限を取得)
+      socket.emit('identify', { role: 'snap-panel' });
     });
     socket.on('disconnect', () => {
       setStatus('切断', '#f87171');
@@ -582,6 +596,34 @@
       if (typeof data.z === 'number') viewerEye.z = data.z;
       render();
     });
+    socket.on('effectState', (data) => {
+      if (!data || typeof data.effect !== 'number') return;
+      effectStates[data.effect] = !!data.on;
+      renderEffectToggles();
+    });
+  }
+
+  // ===== 検証トグル =====
+  function renderEffectToggles() {
+    const list = document.getElementById('effect-list');
+    if (!list) return;
+    list.innerHTML = EFFECT_DEFS.map((def) => {
+      const on = !!effectStates[def.n];
+      return `<button type="button" class="effect-btn ${on ? 'on' : 'off'}" data-effect="${def.n}">
+        <span class="elab">${def.label}</span>
+        <span class="eval">${on ? 'ON' : 'OFF'}</span>
+      </button>`;
+    }).join('');
+    for (const btn of list.querySelectorAll('.effect-btn')) {
+      btn.addEventListener('click', () => {
+        const n = Number(btn.dataset.effect);
+        if (!n) return;
+        const nextOn = !effectStates[n];
+        if (socket && socket.connected) {
+          socket.emit('effectState', { effect: n, on: nextOn });
+        }
+      });
+    }
   }
 
   // ===== 初期化 =====
@@ -589,6 +631,7 @@
     renderFaceTabs();
     setupSvgInteraction();
     render();
+    renderEffectToggles();
     initSocket();
   }
 

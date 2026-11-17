@@ -96,6 +96,26 @@
   #axis-label-u, #axis-label-v {
     position: absolute; color: var(--muted); font-size: 10px; font-family: monospace;
   }
+  .effect-btn {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; padding: 6px 10px; margin-bottom: 4px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #0f172a; color: var(--fg); font-size: 12px;
+    cursor: pointer; transition: background 0.1s, border-color 0.1s;
+    font-family: inherit;
+  }
+  .effect-btn:hover { border-color: var(--accent); }
+  .effect-btn .elab { font-weight: 500; }
+  .effect-btn .eval {
+    font-size: 10px; padding: 2px 8px; border-radius: 10px;
+    font-weight: 700; letter-spacing: 0.3px;
+  }
+  .effect-btn.on  { background: #0e4b50; border-color: #0891b2; }
+  .effect-btn.on  .eval { background: #22d3ee; color: #0f172a; }
+  .effect-btn.off .eval { background: #334155; color: #94a3b8; }
+  .effect-btn.disabled {
+    opacity: 0.5; cursor: not-allowed;
+  }
   #log {
     position: fixed; bottom: 4px; left: 4px; right: 4px;
     font-size: 10px; color: var(--muted); font-family: monospace;
@@ -125,6 +145,8 @@
     <div id="client-list"></div>
     <h2 style="margin-top:12px;">全 snap タグ</h2>
     <div id="all-snap-list"></div>
+    <h2 style="margin-top:12px;">検証トグル</h2>
+    <div id="effect-list"></div>
   </div>
 </div>
 

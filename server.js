@@ -675,12 +675,21 @@ io.on('connection', (socket) => {
   //   data: { effect: 1|2|3, on: boolean }
   socket.on('effectState', (data) => {
     const sender = users.get(socket.id);
-    if (!sender || sender.role !== 'master') return;
+    if (!sender || (sender.role !== 'master' && sender.role !== 'snap-panel')) return;
     if (!data || typeof data !== 'object') return;
     const n = data.effect;
     if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7) return;
     effectState[n] = !!data.on;
     io.emit('effectState', { effect: n, on: effectState[n] });
+  });
+
+  // snap パネルからの identify — role を 'snap-panel' に設定して effectState 送信権限を付与
+  socket.on('identify', (data) => {
+    const u = users.get(socket.id);
+    if (!u) return;
+    if (data && data.role === 'snap-panel') {
+      u.role = 'snap-panel';
+    }
   });
 
   // Master からの周回速度設定
