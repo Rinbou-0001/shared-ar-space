@@ -46,6 +46,7 @@
     { n: 5, label: '効果5 (テーマ)' },
     { n: 6, label: '効果6' },
     { n: 7, label: '効果7 (窓枠)' },
+    { n: 8, label: '効果8' },
   ];
   const effectStates = {};   // id → { entryTag, display:{width,height}, customTags:[], snapFace, pos:{x,y,z} }
   let activeFaceLabel = 'A';
