@@ -96,6 +96,28 @@
   #axis-label-u, #axis-label-v {
     position: absolute; color: var(--muted); font-size: 10px; font-family: monospace;
   }
+  .size-edit {
+    display: flex; align-items: center; gap: 4px; margin-top: 4px;
+    font-size: 11px; font-family: monospace;
+  }
+  .size-edit input[type="number"] {
+    width: 54px; padding: 2px 4px;
+    background: #0f172a; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px;
+    font-family: monospace; font-size: 11px;
+    -moz-appearance: textfield;
+  }
+  .size-edit input::-webkit-outer-spin-button,
+  .size-edit input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .size-edit input:focus { border-color: var(--accent); outline: none; }
+  .size-edit .sz-sep { color: var(--muted); font-size: 10px; }
+  .size-edit .sz-apply {
+    margin-left: auto; padding: 2px 8px;
+    background: var(--accent); color: #0f172a;
+    border: none; border-radius: 3px;
+    font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  .size-edit .sz-apply:hover { background: #67e8f9; }
   .effect-btn {
     display: flex; align-items: center; justify-content: space-between;
     width: 100%; padding: 6px 10px; margin-bottom: 4px;

@@ -271,7 +271,17 @@
     return el;
   }
 
+  // サイズ入力中は DOM 再構築で focus/途中入力を失わないように skip
+  function _isSidebarInputFocused() {
+    const ae = document.activeElement;
+    if (!ae || !ae.matches) return false;
+    return ae.matches('#sidebar input');
+  }
+  // ロック用: focus 時に捕捉した aspect ratio を保持 (clientId → w/h)
+  const _szAspectLock = {};
+
   function renderSidebar() {
+    if (_isSidebarInputFocused()) return;   // 入力中は書き換え回避
     const sel = document.getElementById('client-list');
     const all = document.getElementById('all-snap-list');
     if (sel) {
@@ -285,7 +295,13 @@
           const uv = worldToUV(face, c.pos);
           return `<div class="client-row${id === hoverClientId ? ' sel' : ''}" data-client-id="${id}">
             <div><span class="ctag">${c.entryTag || id.slice(0, 6)}</span></div>
-            <div class="ccoords">${w.toFixed(2)}×${h.toFixed(2)}m  u=${uv.u.toFixed(2)} v=${uv.v.toFixed(2)}</div>
+            <div class="ccoords">${w.toFixed(3)}×${h.toFixed(3)}m  u=${uv.u.toFixed(2)} v=${uv.v.toFixed(2)}</div>
+            <div class="size-edit">
+              <input type="number" class="sz-w" step="0.01" min="0.01" max="10" value="${w.toFixed(3)}" />
+              <span class="sz-sep">×</span>
+              <input type="number" class="sz-h" step="0.01" min="0.01" max="10" value="${h.toFixed(3)}" />
+              <button type="button" class="sz-apply">適用</button>
+            </div>
           </div>`;
         }).join('');
     }
@@ -299,6 +315,67 @@
       }
       all.innerHTML = rows.length === 0 ? '<div style="color:#94a3b8;font-size:11px;">(なし)</div>' : rows.join('');
     }
+  }
+
+  // ===== サイズ編集: アスペクト比ロック + 適用 =====
+  function _setupSizeEditDelegation() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    // focus 時にその時点のアスペクトを捕捉 (以降 input イベントでロック)
+    sidebar.addEventListener('focusin', (ev) => {
+      const el = ev.target;
+      if (!el.matches || !el.matches('.sz-w, .sz-h')) return;
+      const row = el.closest('.client-row');
+      if (!row) return;
+      const id = row.getAttribute('data-client-id');
+      const wEl = row.querySelector('.sz-w');
+      const hEl = row.querySelector('.sz-h');
+      const w = parseFloat(wEl && wEl.value);
+      const h = parseFloat(hEl && hEl.value);
+      if (isFinite(w) && w > 0 && isFinite(h) && h > 0) {
+        _szAspectLock[id] = w / h;
+      }
+    });
+    // 入力中: ロック比率で相方を自動更新
+    sidebar.addEventListener('input', (ev) => {
+      const el = ev.target;
+      if (!el.matches || !el.matches('.sz-w, .sz-h')) return;
+      const row = el.closest('.client-row');
+      if (!row) return;
+      const id = row.getAttribute('data-client-id');
+      const ratio = _szAspectLock[id];
+      if (!ratio) return;
+      const wEl = row.querySelector('.sz-w');
+      const hEl = row.querySelector('.sz-h');
+      const v = parseFloat(el.value);
+      if (!isFinite(v) || v <= 0) return;
+      if (el === wEl)       { hEl.value = (v / ratio).toFixed(3); }
+      else if (el === hEl)  { wEl.value = (v * ratio).toFixed(3); }
+    });
+    // 適用ボタン: forceDisplaySize emit
+    sidebar.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.sz-apply') : null;
+      if (!btn) return;
+      const row = btn.closest('.client-row');
+      if (!row) return;
+      const id = row.getAttribute('data-client-id');
+      const wEl = row.querySelector('.sz-w');
+      const hEl = row.querySelector('.sz-h');
+      const w = parseFloat(wEl && wEl.value);
+      const h = parseFloat(hEl && hEl.value);
+      if (!isFinite(w) || !isFinite(h) || w <= 0 || h <= 0 || w > 10 || h > 10) {
+        log('サイズ不正 (0 < w,h ≦ 10 m)'); return;
+      }
+      if (socket && socket.connected) {
+        socket.emit('forceDisplaySize', { targetId: id, width: w, height: h });
+        log('forceDisplaySize emit: ' + (id.slice(0, 6)) + ' → ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm');
+      } else {
+        log('socket 未接続 - emit 不可');
+      }
+      // focus を解除して次回 render で UI を最新化
+      if (wEl) wEl.blur();
+      if (hEl) hEl.blur();
+    });
   }
 
   // ===== 面タブ =====
@@ -646,6 +723,7 @@
   function init() {
     renderFaceTabs();
     setupSvgInteraction();
+    _setupSizeEditDelegation();
     render();
     renderEffectToggles();
     initSocket();

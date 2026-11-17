@@ -799,6 +799,20 @@ io.on('connection', (socket) => {
     io.to(data.targetId).emit('forceSnapPos', { face: data.face, u, v });
   });
 
+  // スナップパネルから特定クライアントへのディスプレイサイズ強制
+  //   data: { targetId, width, height } (単位 m、0 < v ≦ 10)
+  //   → 対象クライアントにのみ 'forceDisplaySize' を送信
+  //   対象側は myDisplay 更新 + localStorage 永続化 + 既存 displaySize ブロードキャスト経路で全同期
+  socket.on('forceDisplaySize', (data) => {
+    if (!data || typeof data.targetId !== 'string') return;
+    const width = Number(data.width), height = Number(data.height);
+    if (!isFinite(width)  || width  <= 0 || width  > 10) return;
+    if (!isFinite(height) || height <= 0 || height > 10) return;
+    const target = users.get(data.targetId);
+    if (!target) return;
+    io.to(data.targetId).emit('forceDisplaySize', { width, height });
+  });
+
   // Master がシーンにオブジェクト生成 (現状 type='light' のみ)
   //   data: { type: 'light', x, y, z, tags? }
   //   結果: sceneObjectCreated を全クライアントに配信

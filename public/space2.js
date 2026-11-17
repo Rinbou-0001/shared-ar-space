@@ -7039,6 +7039,25 @@
     // ディスプレイサイズを再検出 → myDisplay 更新 → server 通知 → UI 入力欄同期
     //   force=true: 手動編集フラグを無視して強制上書き
     function refreshMyDisplaySize(force) {
+      // localStorage 優先: 永続化されたサイズがあればそれを採用 (手動 override 扱い)
+      try {
+        const raw = localStorage.getItem('space2.myDisplaySize');
+        if (raw) {
+          const o = JSON.parse(raw);
+          const sw = Number(o && o.w), sh = Number(o && o.h);
+          if (isFinite(sw) && sw > 0 && sw <= 10 && isFinite(sh) && sh > 0 && sh <= 10) {
+            myDisplay.width  = sw;
+            myDisplay.height = sh;
+            _displaySizeManuallyEdited = true;
+            const winp = document.getElementById('obs-display-w');
+            const hinp = document.getElementById('obs-display-h');
+            if (winp && document.activeElement !== winp) winp.value = sw.toFixed(3);
+            if (hinp && document.activeElement !== hinp) hinp.value = sh.toFixed(3);
+            log('display: localStorage 復元 → ' + sw.toFixed(3) + '×' + sh.toFixed(3) + 'm', 'ok');
+            return;
+          }
+        }
+      } catch (_) {}
       try {
         const est = detectPhysicalDisplaySize();
         log('display: ' + est.deviceName +
@@ -7677,6 +7696,42 @@
         camera.lookAt(lookAt);
         _snapSelfCache = face;
         if (typeof _obsResync === 'function') _obsResync();
+      });
+
+      // スナップパネルからのディスプレイサイズ強制
+      //   data: { width, height } (m)
+      //   myDisplay 更新 + localStorage 永続化 + observer パネル入力欄同期 +
+      //   既存 displaySize ブロードキャスト経路で他クライアントの avatar / snap パネル border に伝播 +
+      //   自身の effective size 再計算 + 窓枠再構築で視点反映
+      socket.on('forceDisplaySize', (data) => {
+        if (!data) return;
+        const w = Number(data.width), h = Number(data.height);
+        if (!isFinite(w) || w <= 0 || w > 10) return;
+        if (!isFinite(h) || h <= 0 || h > 10) return;
+        myDisplay.width  = w;
+        myDisplay.height = h;
+        _displaySizeManuallyEdited = true;
+        // 永続化
+        try { localStorage.setItem('space2.myDisplaySize', JSON.stringify({ w, h })); } catch (_) {}
+        // 入力欄同期 (フォーカス中はスキップ)
+        const winp = document.getElementById('obs-display-w');
+        const hinp = document.getElementById('obs-display-h');
+        if (winp && document.activeElement !== winp) winp.value = w.toFixed(3);
+        if (hinp && document.activeElement !== hinp) hinp.value = h.toFixed(3);
+        // 他クライアントの avatar display 反映 + snap パネル border 反映
+        if (socket && socket.connected) socket.emit('displaySize', { width: w, height: h });
+        // 視点反映: effective size → self avatar frustum / 窓枠 再構築
+        try {
+          if (typeof computeAndApplyEffectiveSize === 'function') {
+            computeAndApplyEffectiveSize('forceDisplaySize');
+          }
+        } catch (e) { log('computeAndApplyEffectiveSize err: ' + e.message, 'err'); }
+        try {
+          if (typeof _rebuildFrame === 'function') {
+            _rebuildFrame(_lastFrameAspect || (window.innerWidth / window.innerHeight));
+          }
+        } catch (e) { log('_rebuildFrame err: ' + e.message, 'err'); }
+        log('forceDisplaySize recv → ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存 + 再構築)', 'ok');
       });
     }
 
@@ -8779,9 +8834,11 @@
         const h = parseFloat((_by('obs-display-h') || {}).value) || 0.2;
         myDisplay.width = w; myDisplay.height = h;
         _displaySizeManuallyEdited = true;
+        // 永続化 (forceDisplaySize と同一ストレージキー)
+        try { localStorage.setItem('space2.myDisplaySize', JSON.stringify({ w, h })); } catch (_) {}
         // ※ space3: myDisplay の更新のみ。avatar rebuild / emit は行わない
         //   (base/box サイズ変更は入室時と fullscreen 時のみ)
-        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (myDisplay 更新、avatar は据置)', 'ok');
+        log('display 手動: ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm (localStorage 保存、myDisplay 更新、avatar は据置)', 'ok');
       }
       _bind('obs-display-w', 'change', pushDisplaySize);
       _bind('obs-display-h', 'change', pushDisplaySize);
