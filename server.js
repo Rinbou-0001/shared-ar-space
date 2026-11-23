@@ -691,6 +691,20 @@ io.on('connection', (socket) => {
     io.emit('effectState', { effect: n, on: effectState[n] });
   });
 
+  // 効果10 環境エネルギー系: Energy/Tension/Flow 値を他クライアントへ中継 (1Hz 想定)
+  //   data: { e, t, f } (各 0-1)
+  //   → 他クライアント (自身を除く) へ 'envParams' broadcast
+  //   送信者 socket.id を付与して受信側でクライアント別管理
+  socket.on('envParams', (data) => {
+    if (!data || typeof data !== 'object') return;
+    const e = Number(data.e), t = Number(data.t), f = Number(data.f);
+    if (!isFinite(e) || !isFinite(t) || !isFinite(f)) return;
+    const eC = Math.max(0, Math.min(1, e));
+    const tC = Math.max(0, Math.min(1, t));
+    const fC = Math.max(0, Math.min(1, f));
+    socket.broadcast.emit('envParams', { id: socket.id, e: eC, t: tC, f: fC });
+  });
+
   // snap パネルからの identify — role を 'snap-panel' に設定して effectState 送信権限を付与
   socket.on('identify', (data) => {
     const u = users.get(socket.id);

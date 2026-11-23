@@ -322,6 +322,8 @@
       _updateSiteCSS3DTransform();
       // iframe 生成直後に clip-path を初期適用 (mask 既存の場合に備え)
       if (typeof _updateSiteIframeClipPath === 'function') _updateSiteIframeClipPath();
+      // 効果10 Phase 1: iframe の load hook を登録 (navigate 跨ぎで再 attach)
+      if (typeof window.__envHookSiteIframe === 'function') window.__envHookSiteIframe();
       if (typeof log === 'function') log('[site] CSS3DRenderer initialized', 'ok');
     }
     function _updateSiteCSS3DTransform() {
@@ -7324,6 +7326,9 @@
       const cfg = window.APP_CONFIG || {};
       socket = io(cfg.socketUrl || undefined, { transports: ['websocket', 'polling'] });
 
+      // 効果10 Phase 1: envParams listener を socket 利用可能になったタイミングで登録
+      if (typeof window.__envHookSocket === 'function') window.__envHookSocket();
+
       socket.on('connect', () => {
         document.getElementById('conn-pill').classList.add('ok');
         document.getElementById('conn-text').textContent = '接続 OK';
@@ -10232,11 +10237,26 @@
     };
     function _envSystemSetActive(on) {
       _env.active = !!on;
-      if (!_env.active) {
+      if (_env.active) {
+        // iframe にリスナー attach (engaged 判定は iframe ハンドラ側で行うので、6 OFF 時でも attach はしておく)
+        setTimeout(() => {
+          if (typeof _envAttachToIframe === 'function') {
+            const ok = _envAttachToIframe();
+            if (!ok) {
+              // 100ms 後に再試行 (iframe ロード待ち)
+              setTimeout(() => _envAttachToIframe(), 300);
+            }
+          }
+        }, 50);
+      } else {
         _env.frameCount = 0;
         _env.params.energy = 0;
         _env.params.tension = 0;
         _env.params.flow = 0;
+        // Smooth 値もリセット
+        _envSmooth.V = _envSmooth.A = _envSmooth.C = _envSmooth.S = _envSmooth.F = 0;
+        _envBrowser.velHistory.length = 0;
+        if (typeof _envDetachFromIframe === 'function') _envDetachFromIframe();
       }
     }
     function _envRegister(tier, fn) {
@@ -10245,6 +10265,262 @@
     window.__envRegister = _envRegister;
     window.__envParams = _env.params;
     window.__envIsEngaged = _env.isEngaged;
+
+    // ============================================================
+    // 効果10 Phase 1: iframe ブラウザイベント捕捉 + 特徴抽出 + Energy/Tension/Flow 算出
+    //   ・各所に _envLog でエラー/状態ログ出力 (level: ok/warn/err)
+    //   ・iframe の load イベントで listener を再 attach (navigate 跨ぎ対応)
+    //   ・瞬間イベント (click/keydown/mutation) は 30Hz tick でカウンタ消費
+    //   ・連続状態 (mouse/scroll) は最新値を保持し 30Hz で差分計算
+    //   ・Energy/Tension/Flow を 10Hz で合成 → _env.params に書込 (overlay と Phase 3+ で利用)
+    //   ・1Hz でサーバーへ emit (他クライアントとの値共有、各自の粒子表現に利用予定)
+    // ============================================================
+    const _envBrowser = {
+      clickCount: 0, keydownCount: 0, mutationCount: 0,
+      mouse:  { x: 0, y: 0, lastX: 0, lastY: 0, prevSpeed: 0 },
+      scroll: { wheelAccum: 0 },
+      velHistory: [],   // [{t, v}] 2 秒分 (Flow 算出用)
+      attached: false, attachedWin: null, mutObs: null,
+      errCounts: { attach: 0, extract: 0, params: 0, emit: 0 },
+    };
+    const _envSmooth = { V: 0, A: 0, C: 0, S: 0, F: 0 };
+    const _envAlpha  = { V: 0.3, A: 0.3, C: 0.2, S: 0.3, F: 0.15 };
+    function _envLog(msg, level) {
+      // [env] prefix で #log に流す (常時 OK、effect10 OFF 時も出す — 初期化失敗等の確認用)
+      if (typeof log === 'function') log('[env] ' + msg, level || 'ok');
+      else console.log('[env]', msg);
+    }
+    function _envEma(prev, cur, alpha) { return prev + alpha * (cur - prev); }
+
+    // iframe ハンドラ (低オーバーヘッド、engaged 時のみカウント)
+    function _envOnMouseMove(e) {
+      if (!_env.isEngaged()) return;
+      try { _envBrowser.mouse.x = e.clientX; _envBrowser.mouse.y = e.clientY; }
+      catch (err) { _envLog('mousemove err: ' + err.message, 'err'); }
+    }
+    function _envOnClick()   { if (_env.isEngaged()) _envBrowser.clickCount++; }
+    function _envOnWheel(e)  {
+      if (!_env.isEngaged()) return;
+      try { _envBrowser.scroll.wheelAccum += Math.abs(e.deltaY || 0) + Math.abs(e.deltaX || 0); }
+      catch (err) { _envLog('wheel err: ' + err.message, 'err'); }
+    }
+    function _envOnKeyDown() { if (_env.isEngaged()) _envBrowser.keydownCount++; }
+
+    function _envAttachToIframe() {
+      const iframe = _siteIframe;
+      if (!iframe) { _envLog('attach skip: iframe is null', 'warn'); return false; }
+      let win = null, doc = null;
+      try { win = iframe.contentWindow; doc = iframe.contentDocument; }
+      catch (err) {
+        _envBrowser.errCounts.attach++;
+        _envLog('attach skip: cannot access contentWindow (cross-origin?): ' + err.message, 'err');
+        return false;
+      }
+      if (!win || !doc) {
+        _envLog('attach skip: contentWindow/contentDocument not ready yet', 'warn');
+        return false;
+      }
+      if (_envBrowser.attached && _envBrowser.attachedWin === win) {
+        _envLog('attach skip: already attached to this contentWindow'); return true;
+      }
+      _envDetachFromIframe();   // 旧 listener 掃除
+      try {
+        win.addEventListener('mousemove', _envOnMouseMove, { passive: true });
+        win.addEventListener('click',     _envOnClick,     { passive: true });
+        win.addEventListener('wheel',     _envOnWheel,     { passive: true });
+        win.addEventListener('keydown',   _envOnKeyDown,   { passive: true });
+        _envBrowser.attached = true;
+        _envBrowser.attachedWin = win;
+        _envLog('iframe listeners attached (mousemove/click/wheel/keydown)');
+      } catch (err) {
+        _envBrowser.errCounts.attach++;
+        _envLog('attach err on addEventListener: ' + err.message, 'err');
+        return false;
+      }
+      // MutationObserver (DOM 変化率用)
+      try {
+        if (!_envBrowser.mutObs) {
+          _envBrowser.mutObs = new MutationObserver((muts) => {
+            if (_env.isEngaged()) _envBrowser.mutationCount += muts.length;
+          });
+        } else {
+          _envBrowser.mutObs.disconnect();
+        }
+        _envBrowser.mutObs.observe(doc.body, {
+          subtree: true, attributes: true, childList: true, characterData: true,
+        });
+        _envLog('MutationObserver attached to iframe.body');
+      } catch (err) {
+        _envBrowser.errCounts.attach++;
+        _envLog('MutationObserver err: ' + err.message, 'err');
+      }
+      return true;
+    }
+    function _envDetachFromIframe() {
+      const win = _envBrowser.attachedWin;
+      if (win) {
+        try {
+          win.removeEventListener('mousemove', _envOnMouseMove);
+          win.removeEventListener('click',     _envOnClick);
+          win.removeEventListener('wheel',     _envOnWheel);
+          win.removeEventListener('keydown',   _envOnKeyDown);
+        } catch (err) { _envLog('detach removeEventListener err: ' + err.message, 'warn'); }
+      }
+      if (_envBrowser.mutObs) {
+        try { _envBrowser.mutObs.disconnect(); }
+        catch (err) { _envLog('detach MutationObserver err: ' + err.message, 'warn'); }
+      }
+      _envBrowser.attached = false;
+      _envBrowser.attachedWin = null;
+    }
+    window.__envAttachToIframe = _envAttachToIframe;
+    window.__envDetachFromIframe = _envDetachFromIframe;
+
+    // 特徴抽出 (30Hz、mid30 階層)
+    function _envExtractFeatures(dt, params) {
+      try {
+        const now = performance.now();
+        // mouse speed/accel
+        const m = _envBrowser.mouse;
+        const dx = m.x - m.lastX, dy = m.y - m.lastY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const rawV = dist / Math.max(dt, 0.001);          // px/s
+        const normV = Math.min(1, rawV / 3000);           // 3000 px/s → 1.0
+        const rawA = Math.abs(normV - m.prevSpeed) / Math.max(dt, 0.001);
+        const normA = Math.min(1, rawA / 10);
+        m.lastX = m.x; m.lastY = m.y; m.prevSpeed = normV;
+        // 瞬間イベント頻度
+        const normC = Math.min(1, _envBrowser.clickCount   / 5);    // 5 clicks/30Hz → 1.0
+        const normK = Math.min(1, _envBrowser.keydownCount / 10);
+        // scroll wheel 累積
+        const normS = Math.min(1, _envBrowser.scroll.wheelAccum / 500);
+        // DOM 変化量
+        const normR = Math.min(1, _envBrowser.mutationCount / 20);
+        // カウンタリセット
+        _envBrowser.clickCount = 0;
+        _envBrowser.keydownCount = 0;
+        _envBrowser.scroll.wheelAccum = 0;
+        _envBrowser.mutationCount = 0;
+        // 異常値チェック
+        if (!isFinite(normV) || !isFinite(normA) || !isFinite(normC) || !isFinite(normS)) {
+          _envBrowser.errCounts.extract++;
+          _envLog('extract NaN detected v=' + rawV + ' a=' + rawA, 'err');
+          return;
+        }
+        // EMA
+        _envSmooth.V = _envEma(_envSmooth.V, normV, _envAlpha.V);
+        _envSmooth.A = _envEma(_envSmooth.A, normA, _envAlpha.A);
+        _envSmooth.C = _envEma(_envSmooth.C, Math.min(1, normC + normK * 0.5), _envAlpha.C);
+        _envSmooth.S = _envEma(_envSmooth.S, Math.min(1, normS + normR * 0.3), _envAlpha.S);
+        // velocity ring buffer (2 秒分)
+        _envBrowser.velHistory.push({ t: now, v: normV });
+        while (_envBrowser.velHistory.length && now - _envBrowser.velHistory[0].t > 2000) {
+          _envBrowser.velHistory.shift();
+        }
+        // ring buffer のサイズ上限 (暴走防止)
+        if (_envBrowser.velHistory.length > 200) _envBrowser.velHistory.length = 200;
+      } catch (err) {
+        _envBrowser.errCounts.extract++;
+        _envLog('extract err: ' + err.message, 'err');
+      }
+    }
+
+    // パラメータ合成 (10Hz、slow10 階層)
+    function _envComputeParams(dt, params) {
+      try {
+        const s = _envSmooth;
+        // Energy
+        const e = 0.3 * s.V + 0.25 * s.A + 0.25 * s.C + 0.2 * s.S;
+        // Tension (加速度 + 頻度変動)
+        const t = 0.6 * s.A + 0.4 * Math.abs(s.C - s.S);
+        // Flow (velocity 標準偏差 → 低いほど flow 高)
+        let flowRaw = 0;
+        const vh = _envBrowser.velHistory;
+        if (vh.length >= 3) {
+          let sum = 0; for (const h of vh) sum += h.v;
+          const mean = sum / vh.length;
+          if (mean > 0.05) {   // 操作がある時のみ flow を計算 (静止時 flow は 0)
+            let sumSq = 0; for (const h of vh) sumSq += (h.v - mean) * (h.v - mean);
+            const std = Math.sqrt(sumSq / vh.length);
+            flowRaw = Math.max(0, 1 - std / 0.3);
+          }
+        }
+        _envSmooth.F = _envEma(_envSmooth.F, flowRaw, _envAlpha.F);
+        const eF = Math.min(1, Math.max(0, e));
+        const tF = Math.min(1, Math.max(0, t));
+        const fF = Math.min(1, Math.max(0, _envSmooth.F));
+        if (!isFinite(eF) || !isFinite(tF) || !isFinite(fF)) {
+          _envBrowser.errCounts.params++;
+          _envLog('params NaN: e=' + e + ' t=' + t + ' f=' + _envSmooth.F, 'err');
+          return;
+        }
+        params.energy  = eF;
+        params.tension = tF;
+        params.flow    = fF;
+      } catch (err) {
+        _envBrowser.errCounts.params++;
+        _envLog('params err: ' + err.message, 'err');
+      }
+    }
+
+    // サーバーへ 1Hz emit (他クライアントとの値共有、Phase 3 で粒子表現に利用予定)
+    let _envLastEmitT = 0;
+    function _envEmitParams(dt, params) {
+      try {
+        const now = performance.now();
+        if (now - _envLastEmitT < 1000) return;
+        _envLastEmitT = now;
+        if (!socket || !socket.connected) {
+          _envLog('emit skip: socket disconnected', 'warn');
+          return;
+        }
+        socket.emit('envParams', { e: params.energy, t: params.tension, f: params.flow });
+      } catch (err) {
+        _envBrowser.errCounts.emit++;
+        _envLog('emit err: ' + err.message, 'err');
+      }
+    }
+
+    // 他クライアント値の受信 (Phase 3 で粒子に反映、現状は保存のみ)
+    window.__envRemoteParams = new Map();   // id → { e, t, f, lastT }
+    function _envOnRemoteParams(data) {
+      if (!data || typeof data.id !== 'string') return;
+      const e = Number(data.e), t = Number(data.t), f = Number(data.f);
+      if (!isFinite(e) || !isFinite(t) || !isFinite(f)) {
+        _envLog('remote params invalid id=' + data.id, 'warn');
+        return;
+      }
+      window.__envRemoteParams.set(data.id, { e, t, f, lastT: performance.now() });
+    }
+    // socket リスナー登録 (setupSocket 後に実行、socket 未定義ならスキップ)
+    function _envHookSocket() {
+      try {
+        if (typeof socket === 'undefined' || !socket) { _envLog('hook skip: socket not ready', 'warn'); return; }
+        socket.on('envParams', _envOnRemoteParams);
+        _envLog('socket envParams listener registered');
+      } catch (err) { _envLog('hook socket err: ' + err.message, 'err'); }
+    }
+    // iframe の load イベントで再 attach (navigate 跨ぎ対応)
+    function _envHookSiteIframe() {
+      if (!_siteIframe) { _envLog('hook site iframe skip: _siteIframe null', 'warn'); return; }
+      try {
+        _siteIframe.addEventListener('load', () => {
+          _envLog('iframe load event fired → attach check');
+          if (_env.isEngaged()) {
+            setTimeout(() => _envAttachToIframe(), 100);   // contentDocument 整備待ち
+          }
+        });
+        _envLog('iframe load hook registered');
+      } catch (err) { _envLog('hook site iframe err: ' + err.message, 'err'); }
+    }
+    window.__envHookSocket     = _envHookSocket;
+    window.__envHookSiteIframe = _envHookSiteIframe;
+
+    // スケジューラへ登録
+    _envRegister('mid30',  _envExtractFeatures);
+    _envRegister('slow10', _envComputeParams);
+    _envRegister('slow10', _envEmitParams);
+    _envLog('Phase 1 scheduler updaters registered (mid30:features, slow10:params+emit)');
 
     // 階層実行: fast60 は毎フレーム、mid30 は 2 フレームに 1 回、slow10 は 6 フレームに 1 回、crawl5 は 12 フレームに 1 回
     function _envTick(dt) {
