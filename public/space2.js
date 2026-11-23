@@ -277,7 +277,10 @@
     //   ・効果8 ON → iframe 表示 (pointer-events 有効、操作可能)
     //   ・効果8 OFF → iframe 非表示
     //   ・将来、SITE_POOL にファイル追加するだけで抽選対象が拡張可能
-    const SITE_POOL = ['/sites/youtube-ui-study/index.html'];
+    //   ※ 末尾スラッシュ必須: Firebase Hosting の cleanUrls: true が index.html を
+    //     特殊 redirect し、相対パスの base URL が `/.../index/` と誤認されて CSS/JS
+    //     参照が 404 になる (案 R-1)。`/sites/foo/` 形式なら cleanUrls は発動しない。
+    const SITE_POOL = ['/sites/youtube-ui-study/'];
     let _siteCSS3DRenderer = null;
     let _siteCSS3DScene    = null;
     let _siteIframe        = null;
