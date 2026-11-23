@@ -312,6 +312,8 @@
       _siteCSS3DObject = new THREE.CSS3DObject(_siteIframe);
       _siteCSS3DScene.add(_siteCSS3DObject);
       _updateSiteCSS3DTransform();
+      // iframe 生成直後に clip-path を初期適用 (mask 既存の場合に備え)
+      if (typeof _updateSiteIframeClipPath === 'function') _updateSiteIframeClipPath();
       if (typeof log === 'function') log('[site] CSS3DRenderer initialized', 'ok');
     }
     function _updateSiteCSS3DTransform() {
@@ -353,9 +355,6 @@
     }
     function _updateSiteIframeClipPath() {
       if (!_siteIframe) return;
-      _ensureSiteClipSVG();
-      const pathEl = document.getElementById('site-clip-path');
-      if (!pathEl) return;
       const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
       const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
       if (w <= 0 || h <= 0) return;
@@ -367,39 +366,46 @@
       let d = 'M 0 0 L ' + SITE_IFRAME_W + ' 0 L ' + SITE_IFRAME_W + ' ' + SITE_IFRAME_H +
               ' L 0 ' + SITE_IFRAME_H + ' Z';
       // 各 open cell を矩形として追加 (−): evenodd により重なる領域が消える
-      const cellDims = (function() {
-        const outerW = w / 2, outerH = h / 2;
-        const availW = w - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
-        const availH = h - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
-        if (availW <= 0 || availH <= 0) return null;
-        return {
-          outerW: outerW, outerH: outerH,
-          cellW: availW / FRAME_GRID_COLS,
-          cellH: availH / FRAME_GRID_ROWS,
-        };
-      })();
-      if (!cellDims) {
-        pathEl.setAttribute('d', d);
-        _siteIframe.style.clipPath = 'url(#site-clip)';
-        return;
-      }
-      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
-        for (let c = 0; c < FRAME_GRID_COLS; c++) {
-          if (!_openMask[r] || !_openMask[r][c]) continue;
-          const x0 = -cellDims.outerW + FRAME_THICK + c * (cellDims.cellW + INNER_WALL_THICK);
-          const x1 = x0 + cellDims.cellW;
-          const y1 = cellDims.outerH - FRAME_THICK - r * (cellDims.cellH + INNER_WALL_THICK);
-          const y0 = y1 - cellDims.cellH;
-          const px0 = sx(x0), px1 = sx(x1);
-          const py0 = sy(y1), py1 = sy(y0);   // y1 (shape top) → py0 (iframe top)
-          d += ' M ' + px0.toFixed(2) + ' ' + py0.toFixed(2) +
-               ' L ' + px1.toFixed(2) + ' ' + py0.toFixed(2) +
-               ' L ' + px1.toFixed(2) + ' ' + py1.toFixed(2) +
-               ' L ' + px0.toFixed(2) + ' ' + py1.toFixed(2) + ' Z';
+      const outerW = w / 2, outerH = h / 2;
+      const availW = w - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
+      const availH = h - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
+      let openCount = 0;
+      if (availW > 0 && availH > 0) {
+        const cellW = availW / FRAME_GRID_COLS;
+        const cellH = availH / FRAME_GRID_ROWS;
+        for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+          for (let c = 0; c < FRAME_GRID_COLS; c++) {
+            if (!_openMask[r] || !_openMask[r][c]) continue;
+            openCount++;
+            const x0 = -outerW + FRAME_THICK + c * (cellW + INNER_WALL_THICK);
+            const x1 = x0 + cellW;
+            const y1 = outerH - FRAME_THICK - r * (cellH + INNER_WALL_THICK);
+            const y0 = y1 - cellH;
+            const px0 = sx(x0), px1 = sx(x1);
+            const py0 = sy(y1), py1 = sy(y0);
+            d += ' M ' + px0.toFixed(2) + ' ' + py0.toFixed(2) +
+                 ' L ' + px1.toFixed(2) + ' ' + py0.toFixed(2) +
+                 ' L ' + px1.toFixed(2) + ' ' + py1.toFixed(2) +
+                 ' L ' + px0.toFixed(2) + ' ' + py1.toFixed(2) + ' Z';
+          }
         }
       }
-      pathEl.setAttribute('d', d);
-      _siteIframe.style.clipPath = 'url(#site-clip)';
+      // インライン clip-path を適用 (外部 SVG 参照より確実に反映される)
+      //   clip-path: path(evenodd, "...") — Chrome 109+, Safari 15+, Firefox 97+ 対応
+      //   fallback: 旧ブラウザ用に SVG clipPath にも反映 (url(#site-clip))
+      const clipExpr = 'path(evenodd, "' + d + '")';
+      try {
+        _siteIframe.style.clipPath = clipExpr;
+        _siteIframe.style.webkitClipPath = clipExpr;
+      } catch (_) {}
+      // SVG 側 fallback (念のため)
+      _ensureSiteClipSVG();
+      const pathEl = document.getElementById('site-clip-path');
+      if (pathEl) pathEl.setAttribute('d', d);
+      if (typeof log === 'function') {
+        log('[site-clip] updated: open=' + openCount + '/' + (FRAME_GRID_COLS * FRAME_GRID_ROWS) +
+            ' pathLen=' + d.length, 'ok');
+      }
     }
     function _pickAndLoadSite() {
       _initSiteCSS3D();
