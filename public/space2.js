@@ -10674,7 +10674,11 @@
           '  vec2 c = gl_PointCoord - vec2(0.5);',
           '  float d = length(c);',
           '  if (d > 0.5) discard;',
-          '  float alpha = smoothstep(0.5, 0.15, d) * (1.0 - vAgeN);',
+          // GLSL 仕様準拠: smoothstep(edge0, edge1, x) は edge0 < edge1 が前提
+          //   edge0 >= edge1 では動作未定義で、Chrome/ANGLE で alpha=0 に落ちることがあり、
+          //   AdditiveBlending で画面が真っ暗 (粒子が見えない) になる症状を引起こしていた。
+          //   edge0 < edge1 の形で smoothstep → 1.0 - result の形で明示的に inverse 補間
+          '  float alpha = (1.0 - smoothstep(0.15, 0.5, d)) * (1.0 - vAgeN);',
           '  vec3 col = mix(uColorA, uColorB, vAgeN);',
           '  col += uEnergy * 0.4;',
           '  gl_FragColor = vec4(col, alpha);',
