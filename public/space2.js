@@ -10636,6 +10636,8 @@
         geo.setAttribute('aFreq',    new THREE.BufferAttribute(_p3.freqArr,  1));
         geo.setAttribute('aBirth',   new THREE.BufferAttribute(_p3.birthArr, 1));
         geo.setAttribute('aLife',    new THREE.BufferAttribute(_p3.lifeArr,  1));
+        // 本番 vertex shader: GLSL 仕様準拠 + 安全な PointSize 範囲 (ALIASED_POINT_SIZE_RANGE 安全圏)
+        //   uSizeBase=28 + 補正係数で最大 ~40 → 大半のドライバの max (32-64) に収まる
         const vs = [
           'attribute vec3 aVel;',
           'attribute vec3 aAmp;',
@@ -10650,7 +10652,7 @@
           'void main() {',
           '  float age = uTime - aBirth;',
           '  if (age < 0.0 || age > aLife) {',
-          '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);', // 画面外
+          '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
           '    gl_PointSize = 0.0;',
           '    vAgeN = 1.0;',
           '    return;',
@@ -10660,10 +10662,15 @@
           '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
           '  gl_Position = projectionMatrix * mv;',
           '  float life = 1.0 - vAgeN;',
-          // 距離減衰を緩和 (従来 300/dist → 固定 + 弱い減衰) 、Energy 項も強化
-          '  gl_PointSize = uSizeBase * (0.5 + 0.5 * life) * (1.0 + uEnergy);',
+          // 粒子寿命で少し縮小、Energy で少し拡大、合計で 28*0.6 〜 28*1.0*1.3 ≒ 17〜37
+          '  gl_PointSize = uSizeBase * (0.6 + 0.4 * life) * (1.0 + 0.3 * uEnergy);',
           '}',
         ].join('\n');
+        // 本番 fragment shader:
+        //   ・gl_PointCoord 距離でソフトエッジ (smoothstep は仕様準拠 edge0<edge1)
+        //   ・寿命で alpha 自然減衰
+        //   ・Energy で発光量を上乗せ (NormalBlending なので小さめにして色味は維持)
+        //   ・NormalBlending 前提: α=1.0 中心でも色が出て、周縁で透過していく
         const fs = [
           'precision mediump float;',
           'uniform vec3 uColorA;',
@@ -10674,30 +10681,32 @@
           '  vec2 c = gl_PointCoord - vec2(0.5);',
           '  float d = length(c);',
           '  if (d > 0.5) discard;',
-          // GLSL 仕様準拠: smoothstep(edge0, edge1, x) は edge0 < edge1 が前提
-          //   edge0 >= edge1 では動作未定義で、Chrome/ANGLE で alpha=0 に落ちることがあり、
-          //   AdditiveBlending で画面が真っ暗 (粒子が見えない) になる症状を引起こしていた。
-          //   edge0 < edge1 の形で smoothstep → 1.0 - result の形で明示的に inverse 補間
-          '  float alpha = (1.0 - smoothstep(0.15, 0.5, d)) * (1.0 - vAgeN);',
+          // 中心 d=0 → factor 1、周縁 d=0.5 → factor 0
+          '  float edge = 1.0 - smoothstep(0.15, 0.5, d);',
+          // 寿命 fade: 若い粒子ほど濃く、終末で消える
+          '  float life = 1.0 - vAgeN;',
+          '  float alpha = edge * (0.7 + 0.3 * life);',
+          // 色は cyan → pink の age 補間、Energy で少し明度ブースト
           '  vec3 col = mix(uColorA, uColorB, vAgeN);',
-          '  col += uEnergy * 0.4;',
+          '  col = clamp(col + uEnergy * 0.2, 0.0, 1.0);',
           '  gl_FragColor = vec4(col, alpha);',
           '}',
         ].join('\n');
+        // Material 構成: NormalBlending (診断で確認済) + transparent α 合成
         const mat = new THREE.ShaderMaterial({
           uniforms: {
             uTime:      { value: 0 },
             uEnergy:    { value: 0 },
             uColorA:    { value: new THREE.Color(0x22d3ee) },   // Shibuya cyan
             uColorB:    { value: new THREE.Color(0xf472b6) },   // Shibuya pink
-            uSizeBase:  { value: 80.0 },                        // 大きめ (20 → 80)
+            uSizeBase:  { value: 28.0 },                        // 安全 range (最大 ~37px)
           },
           vertexShader: vs,
           fragmentShader: fs,
           transparent: true,
           depthWrite: false,
-          depthTest:  false,                                    // 建物による occlusion 回避
-          blending: THREE.AdditiveBlending,
+          depthTest:  false,
+          blending: THREE.NormalBlending,
         });
         const points = new THREE.Points(geo, mat);
         points.frustumCulled = false;
@@ -10849,16 +10858,19 @@
         const globalE = Math.min(1, params.energy + _p3.remoteEnergyAvg * 0.5);
         // 生成確率 P = 1 - exp(-k·E·dt)
         const spawnP = 1 - Math.exp(-PARTICLE_SPAWN_K * globalE * dt);
-        // 1 tick で複数生成を許可 (期待値ベース)
-        const spawnBudget = Math.max(1, Math.floor(spawnP * 8 + 0.5));
+        // Energy 極小時は生成スキップ (旧実装は毎 tick 1 個強制生成していた)
         let spawned = 0;
-        for (let k = 0; k < spawnBudget; k++) {
-          if (Math.random() > spawnP && k > 0) break;
-          const slot = _p3FindDeadSlot(now);
-          if (slot < 0) break;
-          _p3Spawn(slot, now);
-          spawned++;
-          if (_p3.aliveCount < PARTICLE_MAX) _p3.aliveCount++;
+        if (globalE >= 0.01 && spawnP > 0.0) {
+          // 1 tick で複数生成を許可 (期待値ベース、spawnBudget = spawnP*8 を round)
+          const spawnBudget = Math.max(1, Math.floor(spawnP * 8 + 0.5));
+          for (let k = 0; k < spawnBudget; k++) {
+            if (Math.random() > spawnP && k > 0) break;
+            const slot = _p3FindDeadSlot(now);
+            if (slot < 0) break;
+            _p3Spawn(slot, now);
+            spawned++;
+            if (_p3.aliveCount < PARTICLE_MAX) _p3.aliveCount++;
+          }
         }
         if (spawned > 0) {
           // 変更した attributes の needsUpdate
