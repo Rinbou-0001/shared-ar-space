@@ -10564,12 +10564,37 @@
       }
       window.__envRemoteParams.set(data.id, { e, t, f, lastT: performance.now() });
     }
+    // siteAction 受信ハンドラ (/space2/youtube 等の専用クライアントから)
+    //   他クライアントが iframe の動画カードやロゴ等をクリックしたイベントを受信
+    //   ・log に可視化
+    //   ・effect 10 engaged 時は Energy に瞬間ブースト (+0.3) → 粒子生成が一気に増える
+    function _envOnSiteAction(data) {
+      if (!data || typeof data !== 'object') return;
+      try {
+        const desc = (data.site || '?') + '/' + (data.action || '?') +
+                     (data.videoId !== undefined ? ' #' + data.videoId : '') +
+                     (data.category ? ' cat=' + data.category : '') +
+                     (data.target ? ' nav=' + data.target : '') +
+                     (data.query ? ' q=' + data.query : '') +
+                     (data.title ? ' "' + data.title.slice(0, 30) + '"' : '') +
+                     ' from=' + (data.clientId ? data.clientId.slice(0, 6) : '?');
+        if (typeof log === 'function') log('[site-act] ' + desc, 'ok');
+        // engaged 時: Energy burst で粒子が一気に増える
+        if (_env.isEngaged()) {
+          _env.params.energy = Math.min(1, _env.params.energy + 0.3);
+          _envSmooth.V = Math.min(1, _envSmooth.V + 0.3);   // 次 tick 以降も余韻を残す
+        }
+      } catch (err) {
+        if (typeof log === 'function') log('[site-act] handler err: ' + err.message, 'err');
+      }
+    }
     // socket リスナー登録 (setupSocket 後に実行、socket 未定義ならスキップ)
     function _envHookSocket() {
       try {
         if (typeof socket === 'undefined' || !socket) { _envLog('hook skip: socket not ready', 'warn'); return; }
         socket.on('envParams', _envOnRemoteParams);
-        _envLog('socket envParams listener registered');
+        socket.on('siteAction', _envOnSiteAction);
+        _envLog('socket envParams + siteAction listener registered');
       } catch (err) { _envLog('hook socket err: ' + err.message, 'err'); }
     }
     // iframe の load イベントで再 attach (navigate 跨ぎ対応)

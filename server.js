@@ -705,6 +705,32 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('envParams', { id: socket.id, e: eC, t: tC, f: fC });
   });
 
+  // /space2/youtube 等の専用クライアントが発信する site インタラクション
+  //   data: { action: 'video-select'|'logo-tap'|'category'|'nav'|'recommendation-select'|'search'|'scroll', site, videoId?, category?, target?, query?, t? }
+  //   → 他クライアント (送信者を除く) へ 'siteAction' broadcast
+  //   マスター / オブザーバーが受信し、可視化・Energy ブースト等に使用
+  const ALLOWED_SITE_ACTIONS = new Set([
+    'video-select', 'logo-tap', 'category', 'nav', 'recommendation-select', 'search', 'scroll', 'generic'
+  ]);
+  socket.on('siteAction', (data) => {
+    if (!data || typeof data !== 'object') return;
+    if (typeof data.action !== 'string' || !ALLOWED_SITE_ACTIONS.has(data.action)) return;
+    const site = (typeof data.site === 'string' && data.site.length <= 32) ? data.site : 'unknown';
+    const relayed = {
+      clientId: socket.id,
+      site: site,
+      action: data.action,
+      t: Number(data.t) || Date.now(),
+    };
+    // 任意フィールド (型チェック + 長さ制限)
+    if (typeof data.videoId === 'number' && isFinite(data.videoId)) relayed.videoId = data.videoId;
+    if (typeof data.category === 'string' && data.category.length <= 64) relayed.category = data.category;
+    if (typeof data.target === 'string' && data.target.length <= 64) relayed.target = data.target;
+    if (typeof data.query === 'string' && data.query.length <= 80) relayed.query = data.query;
+    if (typeof data.title === 'string' && data.title.length <= 120) relayed.title = data.title;
+    socket.broadcast.emit('siteAction', relayed);
+  });
+
   // snap パネルからの identify — role を 'snap-panel' に設定して effectState 送信権限を付与
   socket.on('identify', (data) => {
     const u = users.get(socket.id);
