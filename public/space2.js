@@ -2741,6 +2741,11 @@
         root.add(sphere);
       });
       log('[shibuya content] cubes=' + cubeN + ' panels=' + panelN + ' frames=' + frameTotal + ' pipes=' + pipeN + ' spheres=4', 'ok');
+      // Phase 2 (L1 環境) 向け通知: Shibuya content が完全に配置完了したタイミング
+      //   baseline を Shibuya 適用後の状態で再 snapshot できるようコールバックを呼ぶ
+      try {
+        if (typeof window.__onShibuyaContentReady === 'function') window.__onShibuyaContentReady();
+      } catch (e) {}
     }
     function _loadShibuyaIfNeeded() {
       if (_shibuyaLoaded) return;
@@ -11015,7 +11020,7 @@
         _l1Log('restore err: ' + err.message, 'err');
       }
     }
-    // slow10 (10Hz): E/T/F から target を算出
+    // slow10 (10Hz): E/T/F から target を算出 (lerp 幅を大胆に拡大)
     function _l1ComputeTarget(dt, params) {
       try {
         if (!_l1.snapshotTaken) _l1SnapshotBaseline();
@@ -11027,16 +11032,38 @@
           return;
         }
         _l1.lastE = e; _l1.lastT = t; _l1.lastF = f;
-        _l1.targetBg.copy(_l1.baseBg).lerp(SHIBUYA_ACCENT_CYAN, Math.min(0.5, e * 0.3));
-        _l1.targetFogDen = _l1.baseFogDen + e * 0.015;
-        _l1.targetAmbI   = _l1.baseAmbI * (1.0 + 0.3 * e);
-        _l1.targetDirI   = _l1.baseDirI * (1.0 + 0.2 * e);
-        _l1.targetDirColor.copy(_l1.baseDirColor).lerp(SHIBUYA_ACCENT_PINK, Math.min(0.4, t * 0.25));
+        // 大胆な lerp 幅 (視認閾値を余裕で超える):
+        //   背景:  E=0.4 → 32% cyan、E=1.0 → 80% cyan
+        //   fog:   E=0.4 → 0.024、E=1.0 → 0.060 (視程 50m 程度)
+        //   amb:   E=0.4 → +32%、E=1.0 → +80%
+        //   dir:   E=0.4 → +24%、E=1.0 → +60%
+        //   dirColor: T=0.4 → 24% pink、T=1.0 → 60% pink
+        _l1.targetBg.copy(_l1.baseBg).lerp(SHIBUYA_ACCENT_CYAN, Math.min(0.9, e * 0.8));
+        _l1.targetFogDen = _l1.baseFogDen + e * 0.06;
+        _l1.targetAmbI   = _l1.baseAmbI * (1.0 + 0.8 * e);
+        _l1.targetDirI   = _l1.baseDirI * (1.0 + 0.6 * e);
+        _l1.targetDirColor.copy(_l1.baseDirColor).lerp(SHIBUYA_ACCENT_PINK, Math.min(0.7, t * 0.6));
       } catch (err) {
         _l1.errCounts.compute++;
         _l1Log('compute err: ' + err.message, 'err');
       }
     }
+    // Shibuya content 読込完了時の再 snapshot コールバック
+    //   content ロード中に捕捉した "素の baseline" を破棄し、Shibuya 適用後の実際の値を再取得
+    window.__onShibuyaContentReady = function() {
+      if (!_l1) return;
+      try {
+        if (_l1.snapshotTaken) {
+          // 現在の engaged 状態を保持したまま再 snapshot
+          const wasEngaged = _l1.wasEngaged || _env.isEngaged();
+          _l1RestoreBaseline();   // いったん復元 (手が入っていれば scene が元に戻る)
+          if (wasEngaged) {
+            _l1SnapshotBaseline();   // Shibuya 適用後の状態を新 baseline として取得
+            _l1Log('re-snapshot after shibuya content ready (baseline updated)');
+          }
+        }
+      } catch (e) { _l1Log('shibuya ready hook err: ' + e.message, 'err'); }
+    };
     // fast60 (60Hz): current → target に lerp
     function _l1LerpCurrent(dt, params) {
       if (!_l1.snapshotTaken) return;
@@ -11137,6 +11164,26 @@
                                   ' s10:' + u.slow10.length + ' c5:' + u.crawl5.length +
                                   ' engaged:' + (_env.isEngaged() ? 'Y' : 'N');
           }
+          // L1 ENV: current / target の 2 行表示
+          try {
+            const l1cur = document.getElementById('env-l1-cur');
+            const l1tgt = document.getElementById('env-l1-tgt');
+            if (l1cur && l1tgt && typeof _l1 !== 'undefined' && _l1.snapshotTaken) {
+              l1cur.textContent = 'cur: #' + _l1.currentBg.getHexString() +
+                                  ' fog=' + _l1.currentFogDen.toFixed(3) +
+                                  ' amb=' + _l1.currentAmbI.toFixed(2) +
+                                  ' dir=' + _l1.currentDirI.toFixed(2) +
+                                  '@#' + _l1.currentDirColor.getHexString();
+              l1tgt.textContent = 'tgt: #' + _l1.targetBg.getHexString() +
+                                  ' fog=' + _l1.targetFogDen.toFixed(3) +
+                                  ' amb=' + _l1.targetAmbI.toFixed(2) +
+                                  ' dir=' + _l1.targetDirI.toFixed(2) +
+                                  '@#' + _l1.targetDirColor.getHexString();
+            } else if (l1cur && l1tgt) {
+              l1cur.textContent = 'cur: (not engaged)';
+              l1tgt.textContent = 'tgt: -';
+            }
+          } catch (e) {}
         }
       }
     }
