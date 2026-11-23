@@ -326,6 +326,81 @@
       _siteCSS3DObject.quaternion.identity();
       _siteCSS3DObject.updateMatrixWorld();
     }
+    // 案 M-1: 閉 cell 領域のみに iframe を表示するため SVG clipPath を適用
+    //   evenodd 塗り規則で「iframe 全域 (+)」 − 「各 open cell (−)」として生成
+    //   閉 cell + 外周枠 (FRAME_THICK) が可視、open cell は透過 → world と穴構造が視認可能
+    //   _rebuildFrame のたびに _updateSiteIframeClipPath() が呼ばれマスク変化に追従
+    function _ensureSiteClipSVG() {
+      if (document.getElementById('site-clip-svg')) return;
+      const ns = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(ns, 'svg');
+      svg.id = 'site-clip-svg';
+      svg.setAttribute('width', '0');
+      svg.setAttribute('height', '0');
+      svg.style.position = 'absolute';
+      svg.style.pointerEvents = 'none';
+      const defs = document.createElementNS(ns, 'defs');
+      const cp = document.createElementNS(ns, 'clipPath');
+      cp.id = 'site-clip';
+      cp.setAttribute('clipPathUnits', 'userSpaceOnUse');
+      const pathEl = document.createElementNS(ns, 'path');
+      pathEl.id = 'site-clip-path';
+      pathEl.setAttribute('fill-rule', 'evenodd');
+      cp.appendChild(pathEl);
+      defs.appendChild(cp);
+      svg.appendChild(defs);
+      document.body.appendChild(svg);
+    }
+    function _updateSiteIframeClipPath() {
+      if (!_siteIframe) return;
+      _ensureSiteClipSVG();
+      const pathEl = document.getElementById('site-clip-path');
+      if (!pathEl) return;
+      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
+      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
+      if (w <= 0 || h <= 0) return;
+      // shape 座標 ([-w/2, +w/2] × [-h/2, +h/2]) → iframe px ([0, W_px] × [0, H_px])
+      //   iframe の Y 軸は下向き、shape の Y 軸は上向き (反転必要)
+      const sx = (x) => (x + w / 2) / w * SITE_IFRAME_W;
+      const sy = (y) => (h / 2 - y) / h * SITE_IFRAME_H;
+      // 外周矩形 (+): iframe 全域を可視候補
+      let d = 'M 0 0 L ' + SITE_IFRAME_W + ' 0 L ' + SITE_IFRAME_W + ' ' + SITE_IFRAME_H +
+              ' L 0 ' + SITE_IFRAME_H + ' Z';
+      // 各 open cell を矩形として追加 (−): evenodd により重なる領域が消える
+      const cellDims = (function() {
+        const outerW = w / 2, outerH = h / 2;
+        const availW = w - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
+        const availH = h - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
+        if (availW <= 0 || availH <= 0) return null;
+        return {
+          outerW: outerW, outerH: outerH,
+          cellW: availW / FRAME_GRID_COLS,
+          cellH: availH / FRAME_GRID_ROWS,
+        };
+      })();
+      if (!cellDims) {
+        pathEl.setAttribute('d', d);
+        _siteIframe.style.clipPath = 'url(#site-clip)';
+        return;
+      }
+      for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+        for (let c = 0; c < FRAME_GRID_COLS; c++) {
+          if (!_openMask[r] || !_openMask[r][c]) continue;
+          const x0 = -cellDims.outerW + FRAME_THICK + c * (cellDims.cellW + INNER_WALL_THICK);
+          const x1 = x0 + cellDims.cellW;
+          const y1 = cellDims.outerH - FRAME_THICK - r * (cellDims.cellH + INNER_WALL_THICK);
+          const y0 = y1 - cellDims.cellH;
+          const px0 = sx(x0), px1 = sx(x1);
+          const py0 = sy(y1), py1 = sy(y0);   // y1 (shape top) → py0 (iframe top)
+          d += ' M ' + px0.toFixed(2) + ' ' + py0.toFixed(2) +
+               ' L ' + px1.toFixed(2) + ' ' + py0.toFixed(2) +
+               ' L ' + px1.toFixed(2) + ' ' + py1.toFixed(2) +
+               ' L ' + px0.toFixed(2) + ' ' + py1.toFixed(2) + ' Z';
+        }
+      }
+      pathEl.setAttribute('d', d);
+      _siteIframe.style.clipPath = 'url(#site-clip)';
+    }
     function _pickAndLoadSite() {
       _initSiteCSS3D();
       if (!_siteIframe) return;
@@ -882,6 +957,8 @@
       _frameGroup.add(_frameMesh);
       // 効果8 (iframe) の CSS3D オブジェクトも新サイズに合わせて追従
       if (typeof _updateSiteCSS3DTransform === 'function') _updateSiteCSS3DTransform();
+      // 案 M-1: iframe clip-path を閉 cell 配置に合わせて再生成 (mask 変化ごとに追従)
+      if (typeof _updateSiteIframeClipPath === 'function') _updateSiteIframeClipPath();
     }
     // マスク制御 API (master UI から呼び出し)
     window.__frameGridDims = function() {
@@ -7758,6 +7835,7 @@
           if (container) container.style.display = on ? '' : 'none';
           if (_siteIframe) _siteIframe.style.pointerEvents = on ? 'auto' : 'none';
           _updateSiteCSS3DTransform();
+          if (typeof _updateSiteIframeClipPath === 'function') _updateSiteIframeClipPath();
           log('窓枠サイト (iframe) ' + (on ? 'ON' : 'OFF') + ' (effect8)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
