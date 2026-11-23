@@ -1377,7 +1377,9 @@
           transparent: true,
           depthWrite: false,
           depthTest:  true,
-          blending:   THREE.AdditiveBlending,
+          // AdditiveBlending は床が白の時 "white + cyan = white" で視覚的に無効化される問題あり
+          // → NormalBlending (α blending) で下地に関係なく色を上塗り
+          blending:   THREE.NormalBlending,
           side:       THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(planeGeo, rwMat);
