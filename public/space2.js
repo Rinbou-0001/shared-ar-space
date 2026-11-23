@@ -10660,7 +10660,8 @@
           '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
           '  gl_Position = projectionMatrix * mv;',
           '  float life = 1.0 - vAgeN;',
-          '  gl_PointSize = uSizeBase * (0.3 + 0.7 * life) * (1.0 + 0.5 * uEnergy) * (300.0 / max(-mv.z, 0.1));',
+          // 距離減衰を緩和 (従来 300/dist → 固定 + 弱い減衰) 、Energy 項も強化
+          '  gl_PointSize = uSizeBase * (0.5 + 0.5 * life) * (1.0 + uEnergy);',
           '}',
         ].join('\n');
         const fs = [
@@ -10685,19 +10686,20 @@
             uEnergy:    { value: 0 },
             uColorA:    { value: new THREE.Color(0x22d3ee) },   // Shibuya cyan
             uColorB:    { value: new THREE.Color(0xf472b6) },   // Shibuya pink
-            uSizeBase:  { value: 20.0 },
+            uSizeBase:  { value: 80.0 },                        // 大きめ (20 → 80)
           },
           vertexShader: vs,
           fragmentShader: fs,
           transparent: true,
           depthWrite: false,
+          depthTest:  false,                                    // 建物による occlusion 回避
           blending: THREE.AdditiveBlending,
         });
         const points = new THREE.Points(geo, mat);
         points.frustumCulled = false;
         points.name = 'p3-particles';
-        points.renderOrder = 10;   // 他オブジェクトの後に描画
-        points.visible = false;    // engaged 時のみ表示
+        points.renderOrder = 100;   // 全オブジェクトの後に描画 (最前面)
+        points.visible = false;     // engaged 時のみ表示
         _p3.geo = geo;
         _p3.mat = mat;
         _p3.points = points;
@@ -10756,14 +10758,23 @@
       return -1;
     }
     // 粒子 1 個生成
+    //   位置はカメラ前方 2-4m を中心に球内 → 視界に必ず入る
+    //   (world 原点 spawn だと master カメラが別位置の時に見えない問題を回避)
     function _p3Spawn(slot, now) {
       try {
-        // 位置: 原点中心球内 Y 0-3m
+        // カメラ位置 + forward 方向 3m 前を spawn 中心に
+        const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const anchorX = cx + fwd.x * 3.0;
+        const anchorY = cy + fwd.y * 3.0;
+        const anchorZ = cz + fwd.z * 3.0;
+        // anchor 中心球内 (半径 PARTICLE_SPAWN_RADIUS)
         const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
         const r = Math.random() * PARTICLE_SPAWN_RADIUS;
-        const px = Math.cos(theta) * r;
-        const pz = Math.sin(theta) * r;
-        const py = PARTICLE_SPAWN_Y_MIN + Math.random() * (PARTICLE_SPAWN_Y_MAX - PARTICLE_SPAWN_Y_MIN);
+        const px = anchorX + Math.sin(phi) * Math.cos(theta) * r;
+        const pz = anchorZ + Math.sin(phi) * Math.sin(theta) * r;
+        const py = anchorY + Math.cos(phi) * r * 0.5;   // Y は半径の半分に抑える (床突き抜け軽減)
         // 速度: 上向き主、水平は Flow 寄与
         const flow = _env.params.flow || 0;
         const energy = _env.params.energy || 0;
@@ -10788,13 +10799,48 @@
         _p3.aliveMask[slot] = 1;
       } catch (err) { _p3Log('spawn err slot=' + slot + ': ' + err.message, 'err'); }
     }
+    // 1Hz 診断ログ
+    let _p3LastDiagT = 0;
+    function _p3Diagnostic(now) {
+      try {
+        if (now - _p3LastDiagT < 1.0) return;
+        _p3LastDiagT = now;
+        const inScene = _p3.points && !!_p3.points.parent;
+        // 代表粒子の実位置をサンプル (最初の alive)
+        let sampleIdx = -1;
+        for (let i = 0; i < PARTICLE_MAX; i++) {
+          if (now - _p3.birthArr[i] <= _p3.lifeArr[i]) { sampleIdx = i; break; }
+        }
+        let sampleStr = 'none';
+        if (sampleIdx >= 0) {
+          const b = sampleIdx * 3;
+          const age = now - _p3.birthArr[sampleIdx];
+          sampleStr = 'slot=' + sampleIdx +
+                      ' pos=(' + _p3.posArr[b].toFixed(1) + ',' + _p3.posArr[b+1].toFixed(1) + ',' + _p3.posArr[b+2].toFixed(1) + ')' +
+                      ' age=' + age.toFixed(1) + '/' + _p3.lifeArr[sampleIdx].toFixed(1);
+        }
+        _p3Log('diag alive=' + _p3.aliveCount + '/' + PARTICLE_MAX +
+               ' inScene=' + (inScene ? 'Y' : 'N') +
+               ' visible=' + (_p3.points && _p3.points.visible ? 'Y' : 'N') +
+               ' cam=(' + camera.position.x.toFixed(1) + ',' + camera.position.y.toFixed(1) + ',' + camera.position.z.toFixed(1) + ')' +
+               ' sample=' + sampleStr +
+               ' E=' + _env.params.energy.toFixed(2) +
+               ' remoteEavg=' + _p3.remoteEnergyAvg.toFixed(2));
+      } catch (err) { _p3Log('diag err: ' + err.message, 'err'); }
+    }
     // mid30 (30Hz): 生成判定 + 既存の dead 回収
     function _p3SpawnTick(dt, params) {
       if (!_env.isEngaged()) return;
       if (!_p3.points) return;
+      // scene 再構築等で orphan 化していないかをチェック・自動復旧
+      if (!_p3.points.parent) {
+        try { scene.add(_p3.points); _p3Log('re-added to scene (was orphaned, likely scene rebuild)', 'warn'); }
+        catch (err) { _p3Log('re-add err: ' + err.message, 'err'); return; }
+      }
       try {
         const now = _p3.startClockT + clock.elapsedTime;
         _p3UpdateRemoteEnergy();
+        _p3Diagnostic(now);
         // global energy = local + remote 平均 × 0.5
         const globalE = Math.min(1, params.energy + _p3.remoteEnergyAvg * 0.5);
         // 生成確率 P = 1 - exp(-k·E·dt)
