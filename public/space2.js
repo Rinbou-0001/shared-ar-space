@@ -1307,12 +1307,15 @@
     const monoGrid = grid;             // 参照互換 (dummy)
     const monoMajorGrid = majorGrid;   // 参照互換 (dummy)
 
-    // ===== Shibuya ラジアルウェーブ: 床面 100m x 100m を 1m 間隔のドット (10201 点) で敷き詰め、
-    //   原点から放射状に広がる同心円状の光パターンを常時描画。配色は 2.5 秒毎にランダム変化。
-    //   ・themeRestrict='shibuya' で Shibuya テーマ時のみ可視 (既存の __applyTheme が自動制御)
-    //   ・Points + custom ShaderMaterial: cos ベースの ring pattern を vertex で算出
-    //   ・AdditiveBlending で床の上に光が重なる。遠方 (50m 超) では smoothstep で減衰
-    const RADIAL_SIZE = 100, RADIAL_SPACING = 1.0;
+    // ===== Shibuya ラジアルウェーブ (案 X: 床面マテリアル方式) =====
+    //   既存床面と同じ Y レベルの薄い平面 (100m × 100m) を 1 枚追加し、ShaderMaterial の
+    //   fragment で "どの 1m セルに属するか" を算出 → セル中心 → 原点距離 → 波パターン。
+    //   ・セル単位で離散的に発光 (各セル内は一様色、fragment ごとに連続変化しない)
+    //   ・edgeMask で各セルの縁を少し暗くして "ドット感" を出す
+    //   ・themeRestrict='shibuya' で既存 __applyTheme が自動 visible 制御
+    //   ・建築物とは独立したレンダリング (床面と同じ Y なので depth 関係で建物に遮られない)
+    //   ・2.5 秒ごとに uColor をプリセット 10 色からランダム変更
+    const RADIAL_SIZE = 100;
     const RADIAL_WAVE_SPEED = 3.0, RADIAL_WAVE_FREQ = 0.6, RADIAL_COLOR_INTERVAL = 2.5;
     const RADIAL_COLOR_PRESETS = [
       0x22d3ee, 0xf472b6, 0xa78bfa, 0xfacc15, 0x4ade80,
@@ -1322,47 +1325,44 @@
     function _initRadialWave() {
       if (_radialWave) return;
       try {
-        const half = RADIAL_SIZE / 2;
-        const nPerSide = Math.floor(RADIAL_SIZE / RADIAL_SPACING) + 1;
-        const total = nPerSide * nPerSide;
-        const posArr = new Float32Array(total * 3);
-        let idx = 0;
-        for (let i = 0; i < nPerSide; i++) {
-          const x = -half + i * RADIAL_SPACING;
-          for (let j = 0; j < nPerSide; j++) {
-            const z = -half + j * RADIAL_SPACING;
-            posArr[idx++] = x;
-            posArr[idx++] = 0.022;   // 床 + grid 上に浮かべる (z-fighting 回避)
-            posArr[idx++] = z;
-          }
-        }
-        const rwGeo = new THREE.BufferGeometry();
-        rwGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+        // PlaneGeometry (XY plane) → 床に合わせて X 軸で -90° 回転
+        const planeGeo = new THREE.PlaneGeometry(RADIAL_SIZE, RADIAL_SIZE, 1, 1);
+        // Vertex: world の xz 座標を varying で fragment に渡す (回転後の座標を取得)
         const rwVs = [
+          'precision highp float;',
+          'varying vec2 vWorldXZ;',
+          'void main() {',
+          '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+          '  vWorldXZ = wp.xz;',
+          '  gl_Position = projectionMatrix * viewMatrix * wp;',
+          '}',
+        ].join('\n');
+        // Fragment: セル単位の色制御
+        //   1. 自ピクセルの world xz から 1m セル中心を算出
+        //   2. セル中心 → 原点距離 で波パターン
+        //   3. セル内の縁を暗くして "ドット的" に表示 (edgeMask)
+        //   4. 遠方 (80m 超) は徐々に減衰
+        const rwFs = [
           'precision highp float;',
           'uniform float uTime;',
           'uniform float uWaveSpeed;',
           'uniform float uWaveFreq;',
-          'varying float vIntensity;',
+          'uniform vec3  uColor;',
+          'varying vec2 vWorldXZ;',
           'void main() {',
-          '  float dist = length(position.xz);',
+          '  vec2 cellCenter = floor(vWorldXZ) + vec2(0.5);',
+          '  float dist = length(cellCenter);',
           '  float phase = (dist - uTime * uWaveSpeed) * uWaveFreq;',
-          '  float wave = pow(max(0.0, cos(phase)), 8.0);',
-          '  vIntensity = wave * smoothstep(60.0, 5.0, dist);',
-          '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-          '  gl_Position = projectionMatrix * mv;',
-          '  gl_PointSize = 3.0 + vIntensity * 10.0;',
-          '}',
-        ].join('\n');
-        const rwFs = [
-          'precision highp float;',
-          'uniform vec3 uColor;',
-          'varying float vIntensity;',
-          'void main() {',
-          '  vec2 c = gl_PointCoord - vec2(0.5);',
-          '  if (length(c) > 0.5) discard;',
-          '  if (vIntensity < 0.02) discard;',
-          '  gl_FragColor = vec4(uColor, vIntensity);',
+          '  float wave  = pow(max(0.0, cos(phase)), 2.0);',
+          '  float falloff = smoothstep(80.0, 3.0, dist);',
+          '  float intensity = wave * falloff;',
+          // 縁フェード: セル内の端から中心に向かう距離
+          '  vec2 inCell = fract(vWorldXZ);',
+          '  vec2 d = min(inCell, 1.0 - inCell);',
+          '  float edgeMask = smoothstep(0.05, 0.18, min(d.x, d.y));',
+          '  float alpha = intensity * edgeMask;',
+          '  if (alpha < 0.01) discard;',
+          '  gl_FragColor = vec4(uColor, alpha);',
           '}',
         ].join('\n');
         const rwMat = new THREE.ShaderMaterial({
@@ -1372,28 +1372,33 @@
             uWaveFreq:  { value: RADIAL_WAVE_FREQ },
             uColor:     { value: new THREE.Color(0x22d3ee) },
           },
-          vertexShader: rwVs,
+          vertexShader:   rwVs,
           fragmentShader: rwFs,
           transparent: true,
           depthWrite: false,
           depthTest:  true,
           blending:   THREE.AdditiveBlending,
+          side:       THREE.DoubleSide,
         });
-        const points = new THREE.Points(rwGeo, rwMat);
-        points.name = 'shibuya-radial-wave';
-        points.userData.themeRestrict = 'shibuya';   // __applyTheme が自動 visible 制御
-        points.visible = false;   // 初期非表示 (shibuya 適用で表示される)
-        points.frustumCulled = false;
-        points.renderOrder = 5;
-        scene.add(points);
-        _radialWave = { points: points, mat: rwMat };
-        if (typeof log === 'function') log('[radial-wave] initialized (' + total + ' dots, 1m spacing)', 'ok');
+        const mesh = new THREE.Mesh(planeGeo, rwMat);
+        mesh.rotation.x = -Math.PI / 2;        // 床と同じ平面
+        mesh.position.set(0, 0.019, 0);        // grid (0.015 / 0.018) の直上に配置
+        mesh.name = 'shibuya-radial-wave';
+        mesh.userData.themeRestrict = 'shibuya';  // __applyTheme が自動 visible 制御
+        mesh.visible = false;                    // 初期非表示 (shibuya 適用で true になる)
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 6;                    // grid の後、建物の前
+        scene.add(mesh);
+        _radialWave = { mesh: mesh, mat: rwMat };
+        if (typeof log === 'function') {
+          log('[radial-wave] initialized (floor shader, ' + RADIAL_SIZE + 'm × ' + RADIAL_SIZE + 'm, 1m cell)', 'ok');
+        }
       } catch (err) {
         if (typeof log === 'function') log('[radial-wave] init err: ' + err.message, 'err');
       }
     }
     function _radialWaveTick(dtSec) {
-      if (!_radialWave || !_radialWave.points.visible) return;
+      if (!_radialWave || !_radialWave.mesh.visible) return;
       try {
         _radialWave.mat.uniforms.uTime.value += dtSec;
         _radialLastColorT += dtSec;
@@ -1404,9 +1409,7 @@
         }
       } catch (err) { /* skip tick err */ }
     }
-    // 初期化を即時実行 (scene は既に存在、themeRestrict で可視制御)
     _initRadialWave();
-    // tick 登録用に公開 (updaters に push する側で参照)
     window.__radialWaveTick = _radialWaveTick;
     // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
