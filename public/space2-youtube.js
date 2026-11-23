@@ -23,7 +23,7 @@
     velHist: [],   // [{t, v}]
     params: { energy: 0, tension: 0, flow: 0 },
     mutObs: null,
-    attached: false, attachedWin: null,
+    attached: false, attachedWin: null, attachedDoc: null,   // doc も記憶 (navigation 検知)
   };
 
   function log(msg) {
@@ -52,7 +52,17 @@
         setTimeout(attachToIframe, 200);
         return;
       }
-      if (_env.attached && _env.attachedWin === win) return;
+      // doc が null か about:blank 相当の空 body ならスキップ (youtube-ui-study 読込完了を待つ)
+      if (!doc.body || doc.body.children.length === 0) {
+        log('doc.body empty (likely about:blank), retry 200ms');
+        setTimeout(attachToIframe, 200);
+        return;
+      }
+      // doc ベースの短絡 (contentWindow は navigation で再利用されるが doc は差替わる)
+      if (_env.attached && _env.attachedDoc === doc) {
+        log('already attached to this doc, skip');
+        return;
+      }
       detachFromIframe();
       // Energy 用イベント (touch 優先、mouse / click も fallback)
       win.addEventListener('touchstart', _onTouch, { passive: true });
@@ -63,6 +73,7 @@
       win.addEventListener('wheel',      _onWheel,     { passive: true });
       _env.attached = true;
       _env.attachedWin = win;
+      _env.attachedDoc = doc;
       log('iframe listeners attached (touch/mouse/click/scroll)');
       // MutationObserver (body or documentElement fallback)
       const target = doc.body || doc.documentElement;
@@ -97,6 +108,7 @@
     if (_env.mutObs) { try { _env.mutObs.disconnect(); } catch(_) {} }
     _env.attached = false;
     _env.attachedWin = null;
+    _env.attachedDoc = null;
   }
 
   function _onTouch(e) {

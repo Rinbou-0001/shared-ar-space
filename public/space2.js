@@ -1306,6 +1306,108 @@
     scene.add(majorGrid);
     const monoGrid = grid;             // 参照互換 (dummy)
     const monoMajorGrid = majorGrid;   // 参照互換 (dummy)
+
+    // ===== Shibuya ラジアルウェーブ: 床面 100m x 100m を 1m 間隔のドット (10201 点) で敷き詰め、
+    //   原点から放射状に広がる同心円状の光パターンを常時描画。配色は 2.5 秒毎にランダム変化。
+    //   ・themeRestrict='shibuya' で Shibuya テーマ時のみ可視 (既存の __applyTheme が自動制御)
+    //   ・Points + custom ShaderMaterial: cos ベースの ring pattern を vertex で算出
+    //   ・AdditiveBlending で床の上に光が重なる。遠方 (50m 超) では smoothstep で減衰
+    const RADIAL_SIZE = 100, RADIAL_SPACING = 1.0;
+    const RADIAL_WAVE_SPEED = 3.0, RADIAL_WAVE_FREQ = 0.6, RADIAL_COLOR_INTERVAL = 2.5;
+    const RADIAL_COLOR_PRESETS = [
+      0x22d3ee, 0xf472b6, 0xa78bfa, 0xfacc15, 0x4ade80,
+      0xf97316, 0x60a5fa, 0xef4444, 0xec4899, 0x14b8a6,
+    ];
+    let _radialWave = null, _radialLastColorT = 0;
+    function _initRadialWave() {
+      if (_radialWave) return;
+      try {
+        const half = RADIAL_SIZE / 2;
+        const nPerSide = Math.floor(RADIAL_SIZE / RADIAL_SPACING) + 1;
+        const total = nPerSide * nPerSide;
+        const posArr = new Float32Array(total * 3);
+        let idx = 0;
+        for (let i = 0; i < nPerSide; i++) {
+          const x = -half + i * RADIAL_SPACING;
+          for (let j = 0; j < nPerSide; j++) {
+            const z = -half + j * RADIAL_SPACING;
+            posArr[idx++] = x;
+            posArr[idx++] = 0.022;   // 床 + grid 上に浮かべる (z-fighting 回避)
+            posArr[idx++] = z;
+          }
+        }
+        const rwGeo = new THREE.BufferGeometry();
+        rwGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+        const rwVs = [
+          'precision highp float;',
+          'uniform float uTime;',
+          'uniform float uWaveSpeed;',
+          'uniform float uWaveFreq;',
+          'varying float vIntensity;',
+          'void main() {',
+          '  float dist = length(position.xz);',
+          '  float phase = (dist - uTime * uWaveSpeed) * uWaveFreq;',
+          '  float wave = pow(max(0.0, cos(phase)), 8.0);',
+          '  vIntensity = wave * smoothstep(60.0, 5.0, dist);',
+          '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+          '  gl_Position = projectionMatrix * mv;',
+          '  gl_PointSize = 3.0 + vIntensity * 10.0;',
+          '}',
+        ].join('\n');
+        const rwFs = [
+          'precision highp float;',
+          'uniform vec3 uColor;',
+          'varying float vIntensity;',
+          'void main() {',
+          '  vec2 c = gl_PointCoord - vec2(0.5);',
+          '  if (length(c) > 0.5) discard;',
+          '  if (vIntensity < 0.02) discard;',
+          '  gl_FragColor = vec4(uColor, vIntensity);',
+          '}',
+        ].join('\n');
+        const rwMat = new THREE.ShaderMaterial({
+          uniforms: {
+            uTime:      { value: 0 },
+            uWaveSpeed: { value: RADIAL_WAVE_SPEED },
+            uWaveFreq:  { value: RADIAL_WAVE_FREQ },
+            uColor:     { value: new THREE.Color(0x22d3ee) },
+          },
+          vertexShader: rwVs,
+          fragmentShader: rwFs,
+          transparent: true,
+          depthWrite: false,
+          depthTest:  true,
+          blending:   THREE.AdditiveBlending,
+        });
+        const points = new THREE.Points(rwGeo, rwMat);
+        points.name = 'shibuya-radial-wave';
+        points.userData.themeRestrict = 'shibuya';   // __applyTheme が自動 visible 制御
+        points.visible = false;   // 初期非表示 (shibuya 適用で表示される)
+        points.frustumCulled = false;
+        points.renderOrder = 5;
+        scene.add(points);
+        _radialWave = { points: points, mat: rwMat };
+        if (typeof log === 'function') log('[radial-wave] initialized (' + total + ' dots, 1m spacing)', 'ok');
+      } catch (err) {
+        if (typeof log === 'function') log('[radial-wave] init err: ' + err.message, 'err');
+      }
+    }
+    function _radialWaveTick(dtSec) {
+      if (!_radialWave || !_radialWave.points.visible) return;
+      try {
+        _radialWave.mat.uniforms.uTime.value += dtSec;
+        _radialLastColorT += dtSec;
+        if (_radialLastColorT >= RADIAL_COLOR_INTERVAL) {
+          _radialLastColorT = 0;
+          const c = RADIAL_COLOR_PRESETS[Math.floor(Math.random() * RADIAL_COLOR_PRESETS.length)];
+          _radialWave.mat.uniforms.uColor.value.setHex(c);
+        }
+      } catch (err) { /* skip tick err */ }
+    }
+    // 初期化を即時実行 (scene は既に存在、themeRestrict で可視制御)
+    _initRadialWave();
+    // tick 登録用に公開 (updaters に push する側で参照)
+    window.__radialWaveTick = _radialWaveTick;
     // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
@@ -8095,6 +8197,9 @@
     //   ・物理 tick より先に実行することで、Spring-Damper が最新 targetPos を即座に参照できる
     //     → スマホ回転 → 1 フレーム以内に spring 加速度が反映 → cube が phone 方向に追従
     updaters.push(_heldTick);
+    // Shibuya ラジアルウェーブ: 毎フレーム uTime 進行 + 2.5 秒毎のランダム色更新
+    //   themeRestrict により Shibuya 時のみ visible、tick は visible 時のみ処理 (アイドル時コスト≒0)
+    if (typeof window.__radialWaveTick === 'function') updaters.push(window.__radialWaveTick);
     // 物理シミュレーション: 全ロールで cube1..4 に重力/spring/衝突を適用
     updaters.push(_physicsTick);
     // スプレー発射 tick (press 継続中 + 4 秒経過で発射)
