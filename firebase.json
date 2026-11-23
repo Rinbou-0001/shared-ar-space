@@ -38,10 +38,17 @@
         ]
       }
     ],
+    "redirects": [
+      { "source": "/sites/:sitename/index.html", "destination": "/sites/:sitename/", "type": 301 },
+      { "source": "/sites/:sitename/index",      "destination": "/sites/:sitename/", "type": 301 }
+    ],
     "rewrites": [
       { "source": "/test/space/master", "destination": "/test/space.html" },
-      { "source": "/space2/master", "destination": "/space2.html" },
-      { "source": "/space3/master", "destination": "/space3.html" }
+      { "source": "/space2/master",     "destination": "/space2.html" },
+      { "source": "/space3/master",     "destination": "/space3.html" },
+      { "source": "/space2",            "destination": "/space2.html" },
+      { "source": "/space2-snap",       "destination": "/space2-snap.html" },
+      { "source": "/space3",            "destination": "/space3.html" }
     ]
   }
 }
