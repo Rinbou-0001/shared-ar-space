@@ -365,45 +365,61 @@
       // 外周矩形 (+): iframe 全域を可視候補
       let d = 'M 0 0 L ' + SITE_IFRAME_W + ' 0 L ' + SITE_IFRAME_W + ' ' + SITE_IFRAME_H +
               ' L 0 ' + SITE_IFRAME_H + ' Z';
-      // 各 open cell を矩形として追加 (−): evenodd により重なる領域が消える
       const outerW = w / 2, outerH = h / 2;
       const availW = w - 2 * FRAME_THICK - (FRAME_GRID_COLS - 1) * INNER_WALL_THICK;
       const availH = h - 2 * FRAME_THICK - (FRAME_GRID_ROWS - 1) * INNER_WALL_THICK;
-      let openCount = 0;
+      let holeCount = 0;
       if (availW > 0 && availH > 0) {
         const cellW = availW / FRAME_GRID_COLS;
         const cellH = availH / FRAME_GRID_ROWS;
-        for (let r = 0; r < FRAME_GRID_ROWS; r++) {
-          for (let c = 0; c < FRAME_GRID_COLS; c++) {
-            if (!_openMask[r] || !_openMask[r][c]) continue;
-            openCount++;
-            const x0 = -outerW + FRAME_THICK + c * (cellW + INNER_WALL_THICK);
-            const x1 = x0 + cellW;
-            const y1 = outerH - FRAME_THICK - r * (cellH + INNER_WALL_THICK);
-            const y0 = y1 - cellH;
-            const px0 = sx(x0), px1 = sx(x1);
-            const py0 = sy(y1), py1 = sy(y0);
-            d += ' M ' + px0.toFixed(2) + ' ' + py0.toFixed(2) +
-                 ' L ' + px1.toFixed(2) + ' ' + py0.toFixed(2) +
-                 ' L ' + px1.toFixed(2) + ' ' + py1.toFixed(2) +
-                 ' L ' + px0.toFixed(2) + ' ' + py1.toFixed(2) + ' Z';
+        // WebGL 窓枠と同じ merged polygon を使用して clip-path を生成
+        //   ・_frameMergeAdjacent = true (default): 隣接 open cell を連結 → 1 つの多角形 hole
+        //     → iframe 側も同じ多角形で穴を開けることで、WebGL と clip-path の境界が完全一致 →
+        //        隣接 open cell 間の "細い格子壁" が iframe に現れない
+        //   ・false: 旧 ロジックで cell 毎の矩形を subtract
+        if (_frameMergeAdjacent && typeof _computeFrameHolesMerged === 'function') {
+          const aspect = (window.innerWidth) / (window.innerHeight || 1);
+          const mergedPaths = _computeFrameHolesMerged(aspect, cellW, cellH, outerW, outerH);
+          for (const p of mergedPaths) {
+            const pts = (typeof p.getPoints === 'function') ? p.getPoints() : null;
+            if (!pts || pts.length < 3) continue;
+            holeCount++;
+            d += ' M ' + sx(pts[0].x).toFixed(2) + ' ' + sy(pts[0].y).toFixed(2);
+            for (let i = 1; i < pts.length; i++) {
+              d += ' L ' + sx(pts[i].x).toFixed(2) + ' ' + sy(pts[i].y).toFixed(2);
+            }
+            d += ' Z';
+          }
+        } else {
+          // Fallback: 個別 cell 矩形で subtract (格子壁が残るが単純で安全)
+          for (let r = 0; r < FRAME_GRID_ROWS; r++) {
+            for (let c = 0; c < FRAME_GRID_COLS; c++) {
+              if (!_openMask[r] || !_openMask[r][c]) continue;
+              holeCount++;
+              const x0 = -outerW + FRAME_THICK + c * (cellW + INNER_WALL_THICK);
+              const x1 = x0 + cellW;
+              const y1 = outerH - FRAME_THICK - r * (cellH + INNER_WALL_THICK);
+              const y0 = y1 - cellH;
+              const px0 = sx(x0), px1 = sx(x1);
+              const py0 = sy(y1), py1 = sy(y0);
+              d += ' M ' + px0.toFixed(2) + ' ' + py0.toFixed(2) +
+                   ' L ' + px1.toFixed(2) + ' ' + py0.toFixed(2) +
+                   ' L ' + px1.toFixed(2) + ' ' + py1.toFixed(2) +
+                   ' L ' + px0.toFixed(2) + ' ' + py1.toFixed(2) + ' Z';
+            }
           }
         }
       }
-      // インライン clip-path を適用 (外部 SVG 参照より確実に反映される)
-      //   clip-path: path(evenodd, "...") — Chrome 109+, Safari 15+, Firefox 97+ 対応
-      //   fallback: 旧ブラウザ用に SVG clipPath にも反映 (url(#site-clip))
       const clipExpr = 'path(evenodd, "' + d + '")';
       try {
         _siteIframe.style.clipPath = clipExpr;
         _siteIframe.style.webkitClipPath = clipExpr;
       } catch (_) {}
-      // SVG 側 fallback (念のため)
       _ensureSiteClipSVG();
       const pathEl = document.getElementById('site-clip-path');
       if (pathEl) pathEl.setAttribute('d', d);
       if (typeof log === 'function') {
-        log('[site-clip] updated: open=' + openCount + '/' + (FRAME_GRID_COLS * FRAME_GRID_ROWS) +
+        log('[site-clip] updated: holes=' + holeCount + ' merged=' + !!_frameMergeAdjacent +
             ' pathLen=' + d.length, 'ok');
       }
     }
