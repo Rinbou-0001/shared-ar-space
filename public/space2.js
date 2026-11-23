@@ -7890,6 +7890,11 @@
             window.__applyTheme(on ? 'shibuya' : 'default');
           }
           log('theme → ' + (on ? 'Shibuya' : 'default') + ' (effect6)', 'ok');
+          // 効果10 Phase 3: 粒子は effect6 AND effect10 の AND で engaged
+          //   effect6 側の変化にも追従させる (effect10 ON 中に effect6 を切替えた場合)
+          if (typeof window.__p3SetEngaged === 'function') {
+            window.__p3SetEngaged(on && !!window.__effect[10]);
+          }
         }
         if (n === 9) {
           // 効果9: 窓枠 overlay を off-axis 投影に切替
@@ -7919,6 +7924,10 @@
           if (envDbg) envDbg.style.display = (on && ROLE === 'master') ? 'block' : 'none';
           // スケジューラ ON/OFF
           if (typeof _envSystemSetActive === 'function') _envSystemSetActive(on);
+          // Phase 3 粒子 ON/OFF (effect 6 AND effect 10 の AND 条件で engaged)
+          if (typeof window.__p3SetEngaged === 'function') {
+            window.__p3SetEngaged(on && !!window.__effect[6]);
+          }
           log('環境エネルギー系 ' + (on ? 'ON' : 'OFF') +
               ' (effect10, theme6=' + (window.__effect[6] ? 'ON' : 'OFF') + ')', 'ok');
         }
@@ -10376,6 +10385,9 @@
         return false;
       }
       // MutationObserver (DOM 変化率用)
+      //   doc.body は <body> がパースされてから生成されるため、iframe 読込中は null になり得る
+      //   → body null なら documentElement (= <html>, 常に存在) にフォールバック
+      //   → どちらも無ければ 200ms 後に再試行
       try {
         if (!_envBrowser.mutObs) {
           _envBrowser.mutObs = new MutationObserver((muts) => {
@@ -10384,10 +10396,19 @@
         } else {
           _envBrowser.mutObs.disconnect();
         }
-        _envBrowser.mutObs.observe(doc.body, {
-          subtree: true, attributes: true, childList: true, characterData: true,
-        });
-        _envLog('MutationObserver attached to iframe.body');
+        const target = doc.body || doc.documentElement || null;
+        if (!target) {
+          _envLog('MutationObserver skip: no body or documentElement yet, retry in 200ms', 'warn');
+          setTimeout(() => {
+            if (_env.active) _envAttachToIframe();
+          }, 200);
+        } else {
+          _envBrowser.mutObs.observe(target, {
+            subtree: true, attributes: true, childList: true, characterData: true,
+          });
+          const tgtName = (target === doc.body) ? 'body' : 'documentElement';
+          _envLog('MutationObserver attached to iframe.' + tgtName);
+        }
       } catch (err) {
         _envBrowser.errCounts.attach++;
         _envLog('MutationObserver err: ' + err.message, 'err');
@@ -10559,6 +10580,289 @@
     _envRegister('slow10', _envComputeParams);
     _envRegister('slow10', _envEmitParams);
     _envLog('Phase 1 scheduler updaters registered (mid30:features, slow10:params+emit)');
+
+    // ============================================================
+    // 効果10 Phase 3: GPU 粒子システム (Shibuya テーマで発光粒子)
+    //   ・最大 1500 粒子、THREE.Points + ShaderMaterial で GPU 更新
+    //   ・P(t) = P0 + V·t + A·sin(ω·t + φ) を vertex shader で算出
+    //   ・local Energy で生成確率、global Energy (remote 平均) で上限倍率
+    //   ・local Flow で速度バイアス (Phase 1 の mouse 速度方向から派生)
+    //   ・寿命減衰で消滅、dead スロットは再利用
+    //   ・effect6 + effect10 engaged 時のみ scene に追加、OFF で削除
+    //   ・各ステップにエラーログ (prefix [p3])
+    // ============================================================
+    const PARTICLE_MAX     = 1500;
+    const PARTICLE_LIFETIME_MIN = 3.0;    // sec
+    const PARTICLE_LIFETIME_MAX = 6.0;
+    const PARTICLE_SPAWN_K  = 2.5;        // spawn 感度: P = 1 - exp(-k·E·dt)
+    const PARTICLE_SPAWN_RADIUS = 2.5;    // 初期位置: 原点中心の球内
+    const PARTICLE_SPAWN_Y_MIN = 0.0;
+    const PARTICLE_SPAWN_Y_MAX = 3.0;
+    let _p3 = {
+      geo: null, mat: null, points: null,
+      startClockT: 0,          // Three.js clock に揃えた時刻基準
+      birthArr: null, lifeArr: null, posArr: null, velArr: null, ampArr: null, phaseArr: null, freqArr: null,
+      aliveMask: null,         // Uint8Array (0 = dead, 1 = alive)
+      aliveCount: 0,
+      initErr: null,
+      remoteEnergyAvg: 0,      // 他クライアント Energy 平均 (sync 用)
+    };
+    function _p3Log(msg, level) {
+      if (typeof log === 'function') log('[p3] ' + msg, level || 'ok');
+      else console.log('[p3]', msg);
+    }
+    function _p3Init() {
+      if (_p3.points) return true;
+      try {
+        const geo = new THREE.BufferGeometry();
+        const N = PARTICLE_MAX;
+        _p3.posArr   = new Float32Array(N * 3);
+        _p3.velArr   = new Float32Array(N * 3);
+        _p3.ampArr   = new Float32Array(N * 3);
+        _p3.phaseArr = new Float32Array(N);
+        _p3.freqArr  = new Float32Array(N);
+        _p3.birthArr = new Float32Array(N);
+        _p3.lifeArr  = new Float32Array(N);
+        _p3.aliveMask = new Uint8Array(N);
+        // 全粒子を初期 dead (birth = -lifetime) に設定し、画面外へ
+        for (let i = 0; i < N; i++) {
+          _p3.lifeArr[i]  = 1.0;
+          _p3.birthArr[i] = -100.0;
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(_p3.posArr,   3));
+        geo.setAttribute('aVel',     new THREE.BufferAttribute(_p3.velArr,   3));
+        geo.setAttribute('aAmp',     new THREE.BufferAttribute(_p3.ampArr,   3));
+        geo.setAttribute('aPhase',   new THREE.BufferAttribute(_p3.phaseArr, 1));
+        geo.setAttribute('aFreq',    new THREE.BufferAttribute(_p3.freqArr,  1));
+        geo.setAttribute('aBirth',   new THREE.BufferAttribute(_p3.birthArr, 1));
+        geo.setAttribute('aLife',    new THREE.BufferAttribute(_p3.lifeArr,  1));
+        const vs = [
+          'attribute vec3 aVel;',
+          'attribute vec3 aAmp;',
+          'attribute float aPhase;',
+          'attribute float aFreq;',
+          'attribute float aBirth;',
+          'attribute float aLife;',
+          'uniform float uTime;',
+          'uniform float uEnergy;',
+          'uniform float uSizeBase;',
+          'varying float vAgeN;',
+          'void main() {',
+          '  float age = uTime - aBirth;',
+          '  if (age < 0.0 || age > aLife) {',
+          '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);', // 画面外
+          '    gl_PointSize = 0.0;',
+          '    vAgeN = 1.0;',
+          '    return;',
+          '  }',
+          '  vAgeN = age / aLife;',
+          '  vec3 p = position + aVel * age + aAmp * sin(aFreq * age + aPhase);',
+          '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
+          '  gl_Position = projectionMatrix * mv;',
+          '  float life = 1.0 - vAgeN;',
+          '  gl_PointSize = uSizeBase * (0.3 + 0.7 * life) * (1.0 + 0.5 * uEnergy) * (300.0 / max(-mv.z, 0.1));',
+          '}',
+        ].join('\n');
+        const fs = [
+          'precision mediump float;',
+          'uniform vec3 uColorA;',
+          'uniform vec3 uColorB;',
+          'uniform float uEnergy;',
+          'varying float vAgeN;',
+          'void main() {',
+          '  vec2 c = gl_PointCoord - vec2(0.5);',
+          '  float d = length(c);',
+          '  if (d > 0.5) discard;',
+          '  float alpha = smoothstep(0.5, 0.15, d) * (1.0 - vAgeN);',
+          '  vec3 col = mix(uColorA, uColorB, vAgeN);',
+          '  col += uEnergy * 0.4;',
+          '  gl_FragColor = vec4(col, alpha);',
+          '}',
+        ].join('\n');
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            uTime:      { value: 0 },
+            uEnergy:    { value: 0 },
+            uColorA:    { value: new THREE.Color(0x22d3ee) },   // Shibuya cyan
+            uColorB:    { value: new THREE.Color(0xf472b6) },   // Shibuya pink
+            uSizeBase:  { value: 20.0 },
+          },
+          vertexShader: vs,
+          fragmentShader: fs,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        points.name = 'p3-particles';
+        points.renderOrder = 10;   // 他オブジェクトの後に描画
+        points.visible = false;    // engaged 時のみ表示
+        _p3.geo = geo;
+        _p3.mat = mat;
+        _p3.points = points;
+        _p3Log('particle system initialized (max=' + N + ')');
+        return true;
+      } catch (err) {
+        _p3.initErr = err.message;
+        _p3Log('init err: ' + err.message, 'err');
+        return false;
+      }
+    }
+    function _p3EnsureInScene() {
+      if (!_p3.points) return;
+      if (!_p3.points.parent) {
+        try { scene.add(_p3.points); _p3Log('added to scene'); }
+        catch (err) { _p3Log('scene.add err: ' + err.message, 'err'); }
+      }
+    }
+    function _p3RemoveFromScene() {
+      if (_p3.points && _p3.points.parent) {
+        try { scene.remove(_p3.points); _p3Log('removed from scene'); }
+        catch (err) { _p3Log('scene.remove err: ' + err.message, 'err'); }
+      }
+    }
+    function _p3Clear() {
+      if (!_p3.points) return;
+      try {
+        const N = PARTICLE_MAX;
+        for (let i = 0; i < N; i++) { _p3.birthArr[i] = -100; _p3.aliveMask[i] = 0; }
+        _p3.aliveCount = 0;
+        _p3.geo.attributes.aBirth.needsUpdate = true;
+        _p3Log('cleared all particles');
+      } catch (err) { _p3Log('clear err: ' + err.message, 'err'); }
+    }
+    // remote Energy 平均の更新 (他クライアント最新 5 秒の平均)
+    function _p3UpdateRemoteEnergy() {
+      try {
+        const rp = window.__envRemoteParams;
+        if (!rp || rp.size === 0) { _p3.remoteEnergyAvg = 0; return; }
+        const now = performance.now();
+        let sum = 0, count = 0;
+        for (const [id, v] of rp.entries()) {
+          if (now - v.lastT > 5000) { rp.delete(id); continue; }
+          sum += v.e; count++;
+        }
+        _p3.remoteEnergyAvg = count > 0 ? sum / count : 0;
+      } catch (err) { _p3Log('remote energy err: ' + err.message, 'err'); }
+    }
+    // dead スロット探索
+    function _p3FindDeadSlot(now) {
+      const N = PARTICLE_MAX;
+      for (let i = 0; i < N; i++) {
+        const age = now - _p3.birthArr[i];
+        if (age > _p3.lifeArr[i]) return i;
+      }
+      return -1;
+    }
+    // 粒子 1 個生成
+    function _p3Spawn(slot, now) {
+      try {
+        // 位置: 原点中心球内 Y 0-3m
+        const theta = Math.random() * Math.PI * 2;
+        const r = Math.random() * PARTICLE_SPAWN_RADIUS;
+        const px = Math.cos(theta) * r;
+        const pz = Math.sin(theta) * r;
+        const py = PARTICLE_SPAWN_Y_MIN + Math.random() * (PARTICLE_SPAWN_Y_MAX - PARTICLE_SPAWN_Y_MIN);
+        // 速度: 上向き主、水平は Flow 寄与
+        const flow = _env.params.flow || 0;
+        const energy = _env.params.energy || 0;
+        const vx = (Math.random() - 0.5) * (0.3 + flow * 0.8);
+        const vy = 0.15 + Math.random() * 0.4 + energy * 0.5;
+        const vz = (Math.random() - 0.5) * (0.3 + flow * 0.8);
+        // 振動振幅・位相
+        const ax = 0.05 + Math.random() * 0.15;
+        const ay = 0.03 + Math.random() * 0.08;
+        const az = 0.05 + Math.random() * 0.15;
+        const phase = Math.random() * Math.PI * 2;
+        const freq = 1.0 + Math.random() * 3.0;
+        const life = PARTICLE_LIFETIME_MIN + Math.random() * (PARTICLE_LIFETIME_MAX - PARTICLE_LIFETIME_MIN);
+        const b = slot * 3;
+        _p3.posArr[b + 0] = px; _p3.posArr[b + 1] = py; _p3.posArr[b + 2] = pz;
+        _p3.velArr[b + 0] = vx; _p3.velArr[b + 1] = vy; _p3.velArr[b + 2] = vz;
+        _p3.ampArr[b + 0] = ax; _p3.ampArr[b + 1] = ay; _p3.ampArr[b + 2] = az;
+        _p3.phaseArr[slot] = phase;
+        _p3.freqArr[slot]  = freq;
+        _p3.birthArr[slot] = now;
+        _p3.lifeArr[slot]  = life;
+        _p3.aliveMask[slot] = 1;
+      } catch (err) { _p3Log('spawn err slot=' + slot + ': ' + err.message, 'err'); }
+    }
+    // mid30 (30Hz): 生成判定 + 既存の dead 回収
+    function _p3SpawnTick(dt, params) {
+      if (!_env.isEngaged()) return;
+      if (!_p3.points) return;
+      try {
+        const now = _p3.startClockT + clock.elapsedTime;
+        _p3UpdateRemoteEnergy();
+        // global energy = local + remote 平均 × 0.5
+        const globalE = Math.min(1, params.energy + _p3.remoteEnergyAvg * 0.5);
+        // 生成確率 P = 1 - exp(-k·E·dt)
+        const spawnP = 1 - Math.exp(-PARTICLE_SPAWN_K * globalE * dt);
+        // 1 tick で複数生成を許可 (期待値ベース)
+        const spawnBudget = Math.max(1, Math.floor(spawnP * 8 + 0.5));
+        let spawned = 0;
+        for (let k = 0; k < spawnBudget; k++) {
+          if (Math.random() > spawnP && k > 0) break;
+          const slot = _p3FindDeadSlot(now);
+          if (slot < 0) break;
+          _p3Spawn(slot, now);
+          spawned++;
+          if (_p3.aliveCount < PARTICLE_MAX) _p3.aliveCount++;
+        }
+        if (spawned > 0) {
+          // 変更した attributes の needsUpdate
+          _p3.geo.attributes.position.needsUpdate = true;
+          _p3.geo.attributes.aVel.needsUpdate = true;
+          _p3.geo.attributes.aAmp.needsUpdate = true;
+          _p3.geo.attributes.aPhase.needsUpdate = true;
+          _p3.geo.attributes.aFreq.needsUpdate = true;
+          _p3.geo.attributes.aBirth.needsUpdate = true;
+          _p3.geo.attributes.aLife.needsUpdate = true;
+        }
+        // 死亡粒子の aliveCount 再集計 (毎 tick: 粒子数見える化、重い場合は 1Hz に落とす)
+        let aliveNow = 0;
+        for (let i = 0; i < PARTICLE_MAX; i++) {
+          if (now - _p3.birthArr[i] <= _p3.lifeArr[i]) aliveNow++;
+          else if (_p3.aliveMask[i]) _p3.aliveMask[i] = 0;
+        }
+        _p3.aliveCount = aliveNow;
+      } catch (err) { _p3Log('spawn tick err: ' + err.message, 'err'); }
+    }
+    // fast60: uniform 更新 (毎フレーム時刻・Energy 反映、低コスト)
+    function _p3UniformTick(dt, params) {
+      if (!_p3.mat) return;
+      try {
+        _p3.mat.uniforms.uTime.value   = _p3.startClockT + clock.elapsedTime;
+        _p3.mat.uniforms.uEnergy.value = params.energy;
+      } catch (err) { _p3Log('uniform tick err: ' + err.message, 'err'); }
+    }
+    // engaged ON/OFF 時の scene 追加/削除
+    function _p3SetEngaged(on) {
+      try {
+        if (!_p3.points) {
+          if (!_p3Init()) return;
+        }
+        if (on) {
+          _p3EnsureInScene();
+          _p3.points.visible = true;
+          _p3.startClockT = performance.now() / 1000;   // 時刻基準リセット (全粒子 dead 状態からスタート)
+          _p3Clear();
+          _p3Log('engaged ON');
+        } else {
+          _p3.points.visible = false;
+          _p3Clear();
+          // scene からは外さない (再 ON 時の再追加コスト削減)。visible=false で十分
+          _p3Log('engaged OFF');
+        }
+      } catch (err) { _p3Log('setEngaged err: ' + err.message, 'err'); }
+    }
+    window.__p3SetEngaged = _p3SetEngaged;
+    window.__p3State = _p3;
+
+    _envRegister('fast60', _p3UniformTick);
+    _envRegister('mid30',  _p3SpawnTick);
+    _p3Log('Phase 3 scheduler updaters registered (fast60:uniform, mid30:spawn)');
 
     // 階層実行: fast60 は毎フレーム、mid30 は 2 フレームに 1 回、slow10 は 6 フレームに 1 回、crawl5 は 12 フレームに 1 回
     function _envTick(dt) {
