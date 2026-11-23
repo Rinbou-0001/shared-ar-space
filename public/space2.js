@@ -324,8 +324,46 @@
       if (typeof _updateSiteIframeClipPath === 'function') _updateSiteIframeClipPath();
       // 効果10 Phase 1: iframe の load hook を登録 (navigate 跨ぎで再 attach)
       if (typeof window.__envHookSiteIframe === 'function') window.__envHookSiteIframe();
+      // キー forwarder (効果10 と独立、常時): Enter/Escape 等のフルスクリーン操作キーを親 window に転送
+      _siteIframe.addEventListener('load', () => {
+        _attachSiteIframeKeyForwarder();
+      });
+      // 初期 attach (既にロード済の場合に備え)
+      setTimeout(() => _attachSiteIframeKeyForwarder(), 100);
       if (typeof log === 'function') log('[site] CSS3DRenderer initialized', 'ok');
     }
+    // iframe contentWindow に keydown forwarder を attach
+    //   対象キー: Enter / NumpadEnter / Escape (フルスクリーン解除・ショートカット用)
+    //   iframe 内で keydown が完結するのを防ぎ、親 window の既存 handler に届ける
+    //   効果10 とは独立に動作 (常時 attach)
+    function _attachSiteIframeKeyForwarder() {
+      if (!_siteIframe) { log('[site] key forwarder skip: iframe null', 'warn'); return; }
+      let win = null;
+      try { win = _siteIframe.contentWindow; }
+      catch (err) { log('[site] key forwarder cross-origin err: ' + err.message, 'err'); return; }
+      if (!win) { log('[site] key forwarder skip: contentWindow null', 'warn'); return; }
+      // 多重 attach 防止 (navigate のたびに新 contentWindow なので毎回 attach 必要)
+      if (win.__space2KeyForwarderAttached) return;
+      try {
+        win.addEventListener('keydown', (e) => {
+          if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.code !== 'Escape') return;
+          // 親 window の keydown handler (フルスクリーン解除等) に転送
+          try {
+            const ev = new KeyboardEvent('keydown', {
+              code: e.code, key: e.key,
+              altKey: e.altKey, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+              bubbles: true, cancelable: true,
+            });
+            window.dispatchEvent(ev);
+          } catch (err) { log('[site] key forward dispatch err: ' + err.message, 'err'); }
+        }, { capture: true });
+        win.__space2KeyForwarderAttached = true;
+        log('[site] key forwarder attached (Enter/NumpadEnter/Escape → parent)', 'ok');
+      } catch (err) {
+        log('[site] key forwarder attach err: ' + err.message, 'err');
+      }
+    }
+    window.__attachSiteIframeKeyForwarder = _attachSiteIframeKeyForwarder;
     function _updateSiteCSS3DTransform() {
       if (!_siteCSS3DObject) return;
       const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
