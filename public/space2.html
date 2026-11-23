@@ -353,6 +353,24 @@
 <div id="stage"></div>
 <!-- 効果8: CSS3DRenderer iframe 配置コンテナ (WebGL の上に 3D 平面として iframe を描画) -->
 <div id="css3d-container" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;display:none;"></div>
+
+<!-- 効果10 (環境E) 計測/デバッグオーバーレイ (master role + 効果10 ON 時のみ表示) -->
+<div id="env-debug-overlay" style="position:fixed;top:8px;right:8px;z-index:50;display:none;
+  background:rgba(15,23,42,0.85);color:#e2e8f0;font:11px/1.4 monospace;padding:8px 10px;
+  border:1px solid #334155;border-radius:4px;min-width:180px;pointer-events:none;">
+  <div style="color:#94a3b8;font-size:10px;letter-spacing:0.5px;margin-bottom:4px;">ENV DEBUG</div>
+  <div id="env-perf">fps: - frame: -ms</div>
+  <div id="env-gl">tri: - calls: -</div>
+  <div style="margin-top:6px;border-top:1px solid #334155;padding-top:4px;">
+    <div id="env-energy-row">E: <span id="env-energy-val">0.00</span>
+      <div style="height:3px;background:#1e293b;margin-top:2px;"><div id="env-energy-bar" style="height:100%;width:0%;background:#22d3ee;"></div></div></div>
+    <div id="env-tension-row" style="margin-top:3px;">T: <span id="env-tension-val">0.00</span>
+      <div style="height:3px;background:#1e293b;margin-top:2px;"><div id="env-tension-bar" style="height:100%;width:0%;background:#f472b6;"></div></div></div>
+    <div id="env-flow-row" style="margin-top:3px;">F: <span id="env-flow-val">0.00</span>
+      <div style="height:3px;background:#1e293b;margin-top:2px;"><div id="env-flow-bar" style="height:100%;width:0%;background:#a78bfa;"></div></div></div>
+  </div>
+  <div id="env-sched" style="margin-top:4px;color:#64748b;font-size:10px;">sched: -</div>
+</div>
 <!-- 効果2: スマホ UI モード背景 (1cm×1cm グリッド、camera role のみ表示) -->
 <div id="grid-overlay"></div>
 
@@ -685,6 +703,7 @@
           <button id="m-effect-7" class="m-effect-btn" data-effect="7" data-on="1" style="background:#22c55e; color:#052e16; padding:6px 10px;">効果7 (窓枠): ON</button>
           <button id="m-effect-8" class="m-effect-btn" data-effect="8" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果8: OFF</button>
           <button id="m-effect-9" class="m-effect-btn" data-effect="9" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果9 (窓枠off-axis): OFF</button>
+          <button id="m-effect-10" class="m-effect-btn" data-effect="10" data-on="0" style="background:#475569; color:white; padding:6px 10px;">効果10 (環境E): OFF</button>
         </div>
       </div>
     </details>

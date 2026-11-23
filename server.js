@@ -206,7 +206,7 @@ io.on('connection', (socket) => {
   // 接続直後に現在の移動感度 (space2 のみ利用)
   socket.emit('moveConfig', moveConfig);
   // 接続直後に space3 検証トグルの現在値を配信 (新規 camera クライアントの初期モード決定用)
-  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
     socket.emit('effectState', { effect: n, on: !!effectState[n] });
   }
   // 窓枠グリッド seed を配信 (接続時にクライアント別の新規 seed を生成)
@@ -685,7 +685,7 @@ io.on('connection', (socket) => {
     }
     if (!data || typeof data !== 'object') return;
     const n = data.effect;
-    if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9) return;
+    if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9 && n !== 10) return;
     effectState[n] = !!data.on;
     console.log('[effectState] accepted: 効果' + n + ' →', effectState[n], '(from role=' + sender.role + ')');
     io.emit('effectState', { effect: n, on: effectState[n] });

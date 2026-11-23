@@ -7779,9 +7779,9 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9 && n !== 10) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -7856,6 +7856,28 @@
             if (typeof applyCanvasLayout === 'function') applyCanvasLayout();
           } catch (e) { log('applyCanvasLayout err (effect9): ' + e.message, 'err'); }
           log('窓枠 off-axis ' + (on ? 'ON' : 'OFF') + ' (effect9)', 'ok');
+          // 効果9 ⇔ 効果10 排他 (ユーザー指示): 9 ON で 10 強制 OFF
+          if (on && window.__effect[10]) {
+            if (socket && socket.connected) socket.emit('effectState', { effect: 10, on: false });
+            log('effect9 ON に連動して effect10 → OFF', 'ok');
+          }
+        }
+        if (n === 10) {
+          // 効果10: 環境エネルギー系 (Phase 0 基盤)
+          //   ・効果6 (Shibuya テーマ) との AND 条件で稼働 (6 OFF 時は 10 ON でも休止)
+          //   ・効果9 と排他: 10 ON で 9 強制 OFF
+          //   ・master role のみ debug overlay 表示
+          if (on && window.__effect[9]) {
+            if (socket && socket.connected) socket.emit('effectState', { effect: 9, on: false });
+            log('effect10 ON に連動して effect9 → OFF', 'ok');
+          }
+          // debug overlay 表示切替 (master のみ)
+          const envDbg = document.getElementById('env-debug-overlay');
+          if (envDbg) envDbg.style.display = (on && ROLE === 'master') ? 'block' : 'none';
+          // スケジューラ ON/OFF
+          if (typeof _envSystemSetActive === 'function') _envSystemSetActive(on);
+          log('環境エネルギー系 ' + (on ? 'ON' : 'OFF') +
+              ' (effect10, theme6=' + (window.__effect[6] ? 'ON' : 'OFF') + ')', 'ok');
         }
         if (n === 8) {
           // 効果8 (改): 窓枠前面に自前サイト (iframe) を表示 (CSS3DRenderer 使用)
@@ -9953,8 +9975,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false };
-      [1, 2, 3, 4, 5, 6, 7, 8, 9].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false };
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {
@@ -10192,6 +10214,99 @@
 
     // ========== メインループ ==========
     const clock = new THREE.Clock();
+    // ============================================================
+    // 効果10 (環境エネルギー系) Phase 0: 基盤
+    //   ・階層型 update スケジューラ (fast60 / mid30 / slow10 / crawl5)
+    //   ・計測基盤 (FPS, frame time, triangles, draw calls)
+    //   ・Energy / Tension / Flow のプレースホルダ (Phase 1 で中身実装)
+    //   ・debug overlay DOM 更新 (master かつ effect10 ON 時のみ可視化)
+    // ============================================================
+    const _env = {
+      active: false,
+      frameCount: 0,
+      perf: { lastSampleT: 0, fps: 0, frameMs: 0, tri: 0, calls: 0, frames: 0 },
+      params: { energy: 0, tension: 0, flow: 0 },   // Phase 1 で中身実装、Phase 0 は 0 固定
+      updaters: { fast60: [], mid30: [], slow10: [], crawl5: [] },
+      // 効果 6 + 10 が両方 ON の時のみ "起動" 判定
+      isEngaged: () => !!(_env.active && window.__effect && window.__effect[6] && window.__effect[10]),
+    };
+    function _envSystemSetActive(on) {
+      _env.active = !!on;
+      if (!_env.active) {
+        _env.frameCount = 0;
+        _env.params.energy = 0;
+        _env.params.tension = 0;
+        _env.params.flow = 0;
+      }
+    }
+    function _envRegister(tier, fn) {
+      if (_env.updaters[tier]) _env.updaters[tier].push(fn);
+    }
+    window.__envRegister = _envRegister;
+    window.__envParams = _env.params;
+    window.__envIsEngaged = _env.isEngaged;
+
+    // 階層実行: fast60 は毎フレーム、mid30 は 2 フレームに 1 回、slow10 は 6 フレームに 1 回、crawl5 は 12 フレームに 1 回
+    function _envTick(dt) {
+      if (!_env.isEngaged()) return;
+      _env.frameCount++;
+      const fc = _env.frameCount;
+      // fast60
+      for (const fn of _env.updaters.fast60) { try { fn(dt, _env.params); } catch (e) {} }
+      if (fc % 2 === 0) {
+        for (const fn of _env.updaters.mid30) { try { fn(dt * 2, _env.params); } catch (e) {} }
+      }
+      if (fc % 6 === 0) {
+        for (const fn of _env.updaters.slow10) { try { fn(dt * 6, _env.params); } catch (e) {} }
+      }
+      if (fc % 12 === 0) {
+        for (const fn of _env.updaters.crawl5) { try { fn(dt * 12, _env.params); } catch (e) {} }
+      }
+    }
+
+    // 計測 + debug overlay DOM 更新 (1Hz、master + effect10 ON 時のみ DOM 書込)
+    function _envUpdateDebugOverlay() {
+      _env.perf.frames++;
+      const now = performance.now();
+      const since = now - _env.perf.lastSampleT;
+      if (since >= 1000) {
+        _env.perf.fps = Math.round(_env.perf.frames * 1000 / since);
+        _env.perf.frameMs = +(since / _env.perf.frames).toFixed(2);
+        _env.perf.frames = 0;
+        _env.perf.lastSampleT = now;
+        if (renderer && renderer.info && renderer.info.render) {
+          _env.perf.tri = renderer.info.render.triangles;
+          _env.perf.calls = renderer.info.render.calls;
+        }
+        // DOM 書込は master + effect10 ON 時のみ
+        if (ROLE === 'master' && window.__effect && window.__effect[10]) {
+          const perfEl = document.getElementById('env-perf');
+          const glEl   = document.getElementById('env-gl');
+          const eVal   = document.getElementById('env-energy-val');
+          const tVal   = document.getElementById('env-tension-val');
+          const fVal   = document.getElementById('env-flow-val');
+          const eBar   = document.getElementById('env-energy-bar');
+          const tBar   = document.getElementById('env-tension-bar');
+          const fBar   = document.getElementById('env-flow-bar');
+          const schedEl = document.getElementById('env-sched');
+          if (perfEl) perfEl.textContent = 'fps: ' + _env.perf.fps + '  frame: ' + _env.perf.frameMs + 'ms';
+          if (glEl)   glEl.textContent   = 'tri: ' + _env.perf.tri + '  calls: ' + _env.perf.calls;
+          if (eVal) eVal.textContent = _env.params.energy.toFixed(2);
+          if (tVal) tVal.textContent = _env.params.tension.toFixed(2);
+          if (fVal) fVal.textContent = _env.params.flow.toFixed(2);
+          if (eBar) eBar.style.width = Math.min(100, _env.params.energy * 100).toFixed(0) + '%';
+          if (tBar) tBar.style.width = Math.min(100, _env.params.tension * 100).toFixed(0) + '%';
+          if (fBar) fBar.style.width = Math.min(100, _env.params.flow * 100).toFixed(0) + '%';
+          if (schedEl) {
+            const u = _env.updaters;
+            schedEl.textContent = 'sched f60:' + u.fast60.length + ' m30:' + u.mid30.length +
+                                  ' s10:' + u.slow10.length + ' c5:' + u.crawl5.length +
+                                  ' engaged:' + (_env.isEngaged() ? 'Y' : 'N');
+          }
+        }
+      }
+    }
+
     function tick() {
       requestAnimationFrame(tick);
       const dt = Math.min(clock.getDelta(), 0.1);
@@ -10199,6 +10314,8 @@
       if (_cameraTickFn) _cameraTickFn();
       for (const fn of updaters) fn(dt);
       sendPoseThrottled();
+      _envTick(dt);
+      _envUpdateDebugOverlay();
       // 自 avatar は非表示にしたため、毎フレーム追従処理は削除
       // ステータス表示 (10Hz に間引き — 毎フレーム DOM write は style recalc を誘発)
       if (window.__statusLastT == null) window.__statusLastT = 0;
