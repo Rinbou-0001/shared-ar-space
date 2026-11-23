@@ -877,8 +877,8 @@
       }
       _frameMesh = new THREE.Mesh(geom, [_capsMaterial, _frameMaterial, _frontMaterial]);
       _frameGroup.add(_frameMesh);
-      // 前面画像の UV repeat/offset を現在の display サイズに合わせて更新
-      _updateFrontTextureUV();
+      // 効果8 (iframe) の CSS3D オブジェクトも新サイズに合わせて追従
+      if (typeof _updateSiteCSS3DTransform === 'function') _updateSiteCSS3DTransform();
     }
     // マスク制御 API (master UI から呼び出し)
     window.__frameGridDims = function() {
