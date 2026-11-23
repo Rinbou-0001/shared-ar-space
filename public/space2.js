@@ -1307,27 +1307,36 @@
     const monoGrid = grid;             // 参照互換 (dummy)
     const monoMajorGrid = majorGrid;   // 参照互換 (dummy)
 
-    // ===== Shibuya ラジアルウェーブ (案 X: 床面マテリアル方式) =====
-    //   既存床面と同じ Y レベルの薄い平面 (100m × 100m) を 1 枚追加し、ShaderMaterial の
-    //   fragment で "どの 1m セルに属するか" を算出 → セル中心 → 原点距離 → 波パターン。
-    //   ・セル単位で離散的に発光 (各セル内は一様色、fragment ごとに連続変化しない)
-    //   ・edgeMask で各セルの縁を少し暗くして "ドット感" を出す
+    // ===== Shibuya ラジアルウェーブ (案 X: 床面マテリアル方式 + Pulse 発火式) =====
+    //   床面と同じ Y レベルの薄い平面 (100m × 100m) に 1 枚の ShaderMaterial を貼り、
+    //   fragment で "どの 1m セルに属するか" を算出 → セル中心 → 原点距離。
+    //   ・常時連続ウェーブは撤廃、/space2/youtube の siteAction 受信で pulse を発火する方式に
+    //   ・セル単位で均一色発光 (edge fade 削除、各セルは濃い色のドットとして表示)
+    //   ・pulse プールは 8 スロット、round-robin で入替 (同時 8 本までの波が重なって描画)
+    //   ・pulse ごとに birthTime と color を保持、pulseRadius = age * speed で外へ伝播
     //   ・themeRestrict='shibuya' で既存 __applyTheme が自動 visible 制御
-    //   ・建築物とは独立したレンダリング (床面と同じ Y なので depth 関係で建物に遮られない)
-    //   ・2.5 秒ごとに uColor をプリセット 10 色からランダム変更
     const RADIAL_SIZE = 100;
-    const RADIAL_WAVE_SPEED = 3.0, RADIAL_WAVE_FREQ = 0.6, RADIAL_COLOR_INTERVAL = 2.5;
+    const RADIAL_WAVE_SPEED  = 5.0;    // m/s (pulse の伝播速度)
+    const RADIAL_RING_WIDTH  = 2.5;    // m (ring の幅)
+    const RADIAL_MAX_RADIUS  = 60;     // m (pulse の最大到達距離)
+    const RADIAL_PULSE_LIFETIME = RADIAL_MAX_RADIUS / RADIAL_WAVE_SPEED; // = 12s
+    const RADIAL_PULSE_COUNT = 8;      // 同時 pulse 上限
     const RADIAL_COLOR_PRESETS = [
       0x22d3ee, 0xf472b6, 0xa78bfa, 0xfacc15, 0x4ade80,
       0xf97316, 0x60a5fa, 0xef4444, 0xec4899, 0x14b8a6,
     ];
-    let _radialWave = null, _radialLastColorT = 0;
+    let _radialWave = null;
+    // CPU 側 pulse 状態 (uniform と同期)
+    const _radialPulseBirths = new Array(RADIAL_PULSE_COUNT).fill(-1000);
+    const _radialPulseColors = [];
+    for (let i = 0; i < RADIAL_PULSE_COUNT; i++) {
+      _radialPulseColors.push(new THREE.Color(0xffffff));
+    }
+    let _radialPulseNext = 0;
     function _initRadialWave() {
       if (_radialWave) return;
       try {
-        // PlaneGeometry (XY plane) → 床に合わせて X 軸で -90° 回転
         const planeGeo = new THREE.PlaneGeometry(RADIAL_SIZE, RADIAL_SIZE, 1, 1);
-        // Vertex: world の xz 座標を varying で fragment に渡す (回転後の座標を取得)
         const rwVs = [
           'precision highp float;',
           'varying vec2 vWorldXZ;',
@@ -1337,82 +1346,110 @@
           '  gl_Position = projectionMatrix * viewMatrix * wp;',
           '}',
         ].join('\n');
-        // Fragment: セル単位の色制御
-        //   1. 自ピクセルの world xz から 1m セル中心を算出
-        //   2. セル中心 → 原点距離 で波パターン
-        //   3. セル内の縁を暗くして "ドット的" に表示 (edgeMask)
-        //   4. 遠方 (80m 超) は徐々に減衰
+        // Fragment:
+        //   1. 1m セル中心を算出
+        //   2. 8 本の pulse を順次評価、各 pulse の ring (radius ± width) に該当するなら色寄与
+        //   3. もっとも強い寄与 (最新/近傍の pulse) の色で描画
+        //   4. edge fade 無し: 該当セル内の全ピクセルが同一色・同一 alpha
         const rwFs = [
           'precision highp float;',
           'uniform float uTime;',
           'uniform float uWaveSpeed;',
-          'uniform float uWaveFreq;',
-          'uniform vec3  uColor;',
+          'uniform float uRingWidth;',
+          'uniform float uMaxRadius;',
+          'uniform float uPulseBirth[' + RADIAL_PULSE_COUNT + '];',
+          'uniform vec3  uPulseColor[' + RADIAL_PULSE_COUNT + '];',
           'varying vec2 vWorldXZ;',
           'void main() {',
           '  vec2 cellCenter = floor(vWorldXZ) + vec2(0.5);',
           '  float dist = length(cellCenter);',
-          '  float phase = (dist - uTime * uWaveSpeed) * uWaveFreq;',
-          '  float wave  = pow(max(0.0, cos(phase)), 2.0);',
-          '  float falloff = smoothstep(80.0, 3.0, dist);',
-          '  float intensity = wave * falloff;',
-          // 縁フェード: セル内の端から中心に向かう距離
-          '  vec2 inCell = fract(vWorldXZ);',
-          '  vec2 d = min(inCell, 1.0 - inCell);',
-          '  float edgeMask = smoothstep(0.05, 0.18, min(d.x, d.y));',
-          '  float alpha = intensity * edgeMask;',
-          '  if (alpha < 0.01) discard;',
-          '  gl_FragColor = vec4(uColor, alpha);',
+          '  float bestAlpha = 0.0;',
+          '  vec3  bestColor = vec3(0.0);',
+          '  for (int i = 0; i < ' + RADIAL_PULSE_COUNT + '; i++) {',
+          '    float birth = uPulseBirth[i];',
+          '    float age = uTime - birth;',
+          '    float valid = step(0.0, age) * (1.0 - step(uMaxRadius / uWaveSpeed, age));',
+          '    float pulseRadius = age * uWaveSpeed;',
+          '    float d = abs(dist - pulseRadius);',
+          '    float ring = smoothstep(uRingWidth, 0.0, d);',
+          '    float fade = smoothstep(uMaxRadius, 5.0, pulseRadius);',
+          '    float a = ring * fade * valid;',
+          '    float replace = step(bestAlpha, a);',
+          '    bestAlpha = mix(bestAlpha, a, replace);',
+          '    bestColor = mix(bestColor, uPulseColor[i], replace);',
+          '  }',
+          '  if (bestAlpha < 0.05) discard;',
+          // edge fade 削除: セル内全ピクセルが同じ色/alpha (ドット的に均一)
+          '  gl_FragColor = vec4(bestColor, bestAlpha);',
           '}',
         ].join('\n');
         const rwMat = new THREE.ShaderMaterial({
           uniforms: {
-            uTime:      { value: 0 },
-            uWaveSpeed: { value: RADIAL_WAVE_SPEED },
-            uWaveFreq:  { value: RADIAL_WAVE_FREQ },
-            uColor:     { value: new THREE.Color(0x22d3ee) },
+            uTime:       { value: 0 },
+            uWaveSpeed:  { value: RADIAL_WAVE_SPEED },
+            uRingWidth:  { value: RADIAL_RING_WIDTH },
+            uMaxRadius:  { value: RADIAL_MAX_RADIUS },
+            uPulseBirth: { value: _radialPulseBirths.slice() },
+            uPulseColor: { value: _radialPulseColors.map((c) => c.clone()) },
           },
           vertexShader:   rwVs,
           fragmentShader: rwFs,
           transparent: true,
           depthWrite: false,
           depthTest:  true,
-          // AdditiveBlending は床が白の時 "white + cyan = white" で視覚的に無効化される問題あり
-          // → NormalBlending (α blending) で下地に関係なく色を上塗り
           blending:   THREE.NormalBlending,
           side:       THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(planeGeo, rwMat);
-        mesh.rotation.x = -Math.PI / 2;        // 床と同じ平面
-        mesh.position.set(0, 0.019, 0);        // grid (0.015 / 0.018) の直上に配置
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.set(0, 0.019, 0);
         mesh.name = 'shibuya-radial-wave';
-        mesh.userData.themeRestrict = 'shibuya';  // __applyTheme が自動 visible 制御
-        mesh.visible = false;                    // 初期非表示 (shibuya 適用で true になる)
+        mesh.userData.themeRestrict = 'shibuya';
+        mesh.visible = false;
         mesh.frustumCulled = false;
-        mesh.renderOrder = 6;                    // grid の後、建物の前
+        mesh.renderOrder = 6;
         scene.add(mesh);
         _radialWave = { mesh: mesh, mat: rwMat };
         if (typeof log === 'function') {
-          log('[radial-wave] initialized (floor shader, ' + RADIAL_SIZE + 'm × ' + RADIAL_SIZE + 'm, 1m cell)', 'ok');
+          log('[radial-wave] initialized (pulse mode, pool=' + RADIAL_PULSE_COUNT + ', lifetime=' + RADIAL_PULSE_LIFETIME.toFixed(1) + 's)', 'ok');
         }
       } catch (err) {
         if (typeof log === 'function') log('[radial-wave] init err: ' + err.message, 'err');
+      }
+    }
+    // 外部から呼び出す pulse 発火 (siteAction 受信時など)
+    //   ・空きスロット or 最古スロットを round-robin で上書き
+    //   ・pulse ごとにランダム色を割り当て
+    //   ・uniform 側も同期更新
+    function _fireRadialPulse() {
+      if (!_radialWave) return;
+      try {
+        const slot = _radialPulseNext % RADIAL_PULSE_COUNT;
+        _radialPulseNext++;
+        const colorHex = RADIAL_COLOR_PRESETS[Math.floor(Math.random() * RADIAL_COLOR_PRESETS.length)];
+        _radialPulseColors[slot].setHex(colorHex);
+        _radialPulseBirths[slot] = _radialWave.mat.uniforms.uTime.value;
+        // uniform は配列を更新したら needsUpdate 不要 (ShaderMaterial は自動反映)
+        const birthArr = _radialWave.mat.uniforms.uPulseBirth.value;
+        const colorArr = _radialWave.mat.uniforms.uPulseColor.value;
+        birthArr[slot] = _radialPulseBirths[slot];
+        colorArr[slot].copy(_radialPulseColors[slot]);
+        if (typeof log === 'function') {
+          log('[radial-wave] pulse fired slot=' + slot + ' color=#' + colorArr[slot].getHexString(), 'ok');
+        }
+      } catch (err) {
+        if (typeof log === 'function') log('[radial-wave] fire err: ' + err.message, 'err');
       }
     }
     function _radialWaveTick(dtSec) {
       if (!_radialWave || !_radialWave.mesh.visible) return;
       try {
         _radialWave.mat.uniforms.uTime.value += dtSec;
-        _radialLastColorT += dtSec;
-        if (_radialLastColorT >= RADIAL_COLOR_INTERVAL) {
-          _radialLastColorT = 0;
-          const c = RADIAL_COLOR_PRESETS[Math.floor(Math.random() * RADIAL_COLOR_PRESETS.length)];
-          _radialWave.mat.uniforms.uColor.value.setHex(c);
-        }
-      } catch (err) { /* skip tick err */ }
+      } catch (err) { /* skip */ }
     }
     _initRadialWave();
     window.__radialWaveTick = _radialWaveTick;
+    window.__fireRadialPulse = _fireRadialPulse;
     // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
@@ -10693,6 +10730,10 @@
         if (_env.isEngaged()) {
           _env.params.energy = Math.min(1, _env.params.energy + 0.3);
           _envSmooth.V = Math.min(1, _envSmooth.V + 0.3);   // 次 tick 以降も余韻を残す
+        }
+        // Shibuya テーマで radial wave pulse を発火 (床面リング波紋)
+        if (typeof window.__fireRadialPulse === 'function') {
+          try { window.__fireRadialPulse(); } catch (_) {}
         }
       } catch (err) {
         if (typeof log === 'function') log('[site-act] handler err: ' + err.message, 'err');
