@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Instagram UI Study — Responsive Prototype</title>
+<style>
+:root{--bg:#fff;--panel:#fff;--text:#262626;--muted:#8e8e8e;--line:#dbdbdb;--soft:#efefef;--blue:#0095f6;--nav:244px}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input{font:inherit}button{border:0;background:none;color:inherit;cursor:pointer}a{color:inherit;text-decoration:none}
+.app{min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;width:var(--nav);border-right:1px solid var(--line);padding:28px 12px 18px;display:flex;flex-direction:column;background:var(--panel);z-index:5}
+.logo{font-family:Georgia,serif;font-size:28px;font-weight:bold;margin:0 12px 32px}.nav{display:grid;gap:8px}.nav button{display:flex;align-items:center;gap:16px;padding:12px;border-radius:8px;text-align:left;font-size:15px}.nav button:hover{background:var(--soft)}.nav button.active{font-weight:700}.ico{width:24px;height:24px;display:grid;place-items:center;font-size:22px}.nav .label{white-space:nowrap}.sidebar-bottom{margin-top:auto}
+.main{margin-left:var(--nav);min-height:100vh}.layout{max-width:1000px;margin:auto;display:grid;grid-template-columns:minmax(0,630px) 300px;gap:44px;padding:30px 24px}.feed{min-width:0}.stories{display:flex;gap:16px;overflow:auto;padding:4px 0 22px;margin-bottom:12px;scrollbar-width:none}.story{flex:0 0 66px;text-align:center;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ring{width:62px;height:62px;border-radius:50%;padding:3px;margin:auto auto 6px;background:linear-gradient(35deg,#ffd776,#f13c5b,#a02ad9)}.ring img{width:100%;height:100%;object-fit:cover;border-radius:50%;border:2px solid white}.post{border-bottom:1px solid var(--line);margin-bottom:18px;padding-bottom:16px}.post-head{display:flex;align-items:center;gap:10px;padding:8px 0 12px}.avatar{width:34px;height:34px;border-radius:50%;object-fit:cover}.user{font-weight:650}.sub{color:var(--muted);font-size:12px}.more{margin-left:auto;font-size:22px}.post-img{width:100%;aspect-ratio:1/1;object-fit:cover;border:1px solid var(--line);border-radius:3px;display:block;background:#eee}.actions{display:flex;align-items:center;gap:14px;padding:10px 0 7px}.actions button{font-size:24px;padding:0}.actions .save{margin-left:auto}.likes{font-weight:650;margin-bottom:6px}.caption{line-height:1.5}.comments{color:var(--muted);margin-top:5px}.add-comment{display:flex;border-top:1px solid var(--line);margin-top:10px;padding-top:10px}.add-comment input{border:0;outline:0;flex:1;min-width:0}.add-comment button{color:var(--blue);font-weight:650}
+.right{padding-top:8px}.me-row,.suggest-row{display:flex;align-items:center;gap:12px;margin-bottom:18px}.me-row img,.suggest-row img{width:44px;height:44px;border-radius:50%;object-fit:cover}.me-row .meta,.suggest-row .meta{flex:1}.switch,.follow{color:var(--blue);font-weight:650;font-size:12px}.suggest-title{display:flex;justify-content:space-between;color:var(--muted);font-weight:650;margin:25px 0 18px}.suggest-row img{width:34px;height:34px}.footer{font-size:11px;line-height:1.8;color:#c7c7c7;margin-top:28px}
+.page{display:none;max-width:1000px;margin:0 auto;padding:30px 28px}.page.active{display:block}.page h2{font-size:22px;margin:4px 0 22px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.tile{position:relative;aspect-ratio:1;overflow:hidden;background:#eee}.tile img{width:100%;height:100%;object-fit:cover}.tile:hover:after{content:"♡  128     ▣  12";position:absolute;inset:0;background:#0008;color:white;display:grid;place-items:center;font-weight:700}
+.profile-top{display:flex;gap:70px;align-items:center;max-width:750px;margin:10px auto 40px}.profile-avatar{width:150px;height:150px;border-radius:50%;object-fit:cover}.profile-info{flex:1}.profile-line{display:flex;align-items:center;gap:18px;margin-bottom:18px}.profile-line h2{font-weight:400;margin:0}.pill{background:var(--soft);padding:7px 14px;border-radius:8px;font-weight:650}.stats{display:flex;gap:36px;margin:18px 0}.tabs{display:flex;justify-content:center;gap:60px;border-top:1px solid var(--line);margin-top:30px}.tabs button{padding:16px 0;color:var(--muted);font-size:12px;letter-spacing:1px}.tabs button.active{border-top:1px solid #262626;color:#262626}
+.messages{height:calc(100vh - 60px);max-height:760px;border:1px solid var(--line);display:grid;grid-template-columns:340px 1fr;margin:0 auto;max-width:950px}.msg-list{border-right:1px solid var(--line);overflow:auto}.msg-title{padding:22px;font-weight:700;font-size:20px}.msg-item{display:flex;gap:12px;padding:12px 18px;align-items:center}.msg-item:hover{background:var(--soft)}.msg-item img{width:54px;height:54px;border-radius:50%;object-fit:cover}.msg-body{display:grid;gap:4px}.chat-empty{display:grid;place-items:center;text-align:center;color:var(--muted)}.chat-empty strong{font-size:20px;color:var(--text);font-weight:400;margin:12px}
+.reels{max-width:430px;margin:auto;display:grid;gap:14px}.reel-card{height:min(75vh,720px);background:#222;border-radius:8px;position:relative;overflow:hidden;color:white}.reel-card img{width:100%;height:100%;object-fit:cover;opacity:.88}.reel-info{position:absolute;bottom:20px;left:18px;right:18px;text-shadow:0 1px 4px #000}.reel-actions{position:absolute;right:14px;bottom:80px;display:grid;gap:18px;font-size:22px}
+.searchbox{max-width:520px;margin:20px auto;border-bottom:1px solid var(--line);padding:14px}.searchbox input{width:100%;border:0;outline:0;font-size:18px}
+.mobilebar{display:none}.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#262626;color:white;padding:12px 18px;border-radius:8px;display:none;z-index:20}
+.modal{position:fixed;inset:0;background:#0008;display:none;place-items:center;z-index:15}.modal.show{display:grid}.modal-box{background:white;border-radius:12px;width:min(420px,92vw);padding:20px;text-align:center}.modal-box h3{margin:0 0 16px}.modal-box textarea{width:100%;height:100px;border:1px solid var(--line);border-radius:8px;padding:10px;resize:vertical}.modal-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:12px}
+@media(max-width:1050px){:root{--nav:72px}.sidebar{align-items:center}.logo{font-size:0;margin:0 0 32px}.logo:after{content:"◎";font-size:28px}.nav button{justify-content:center;width:48px}.nav .label{display:none}.layout{grid-template-columns:minmax(0,630px);justify-content:center}.right{display:none}}
+@media(max-width:650px){:root{--nav:0px}.sidebar{display:none}.main{margin:0;padding-bottom:56px}.layout{display:block;padding:12px 0}.feed{width:100%}.stories{padding:4px 12px 18px}.post{margin-bottom:12px}.post-head,.actions,.likes,.caption,.comments,.add-comment{margin-left:12px;margin-right:12px}.post-img{border-left:0;border-right:0;border-radius:0}.page{padding:18px 0}.page h2{padding:0 14px}.grid{gap:2px}.profile-top{gap:18px;padding:10px 14px;margin-bottom:20px}.profile-avatar{width:86px;height:86px}.profile-line{flex-wrap:wrap;gap:8px}.profile-line h2{font-size:20px}.stats{gap:14px;font-size:12px}.profile-bio{font-size:13px}.tabs{gap:45px}.messages{height:calc(100vh - 56px);border:0;grid-template-columns:1fr}.msg-list{border:0}.chat-empty{display:none}.mobilebar{position:fixed;bottom:0;left:0;right:0;height:56px;background:white;border-top:1px solid var(--line);display:flex;justify-content:space-around;align-items:center;z-index:8}.mobilebar button{font-size:23px}.right{display:none}.reel-card{height:calc(100vh - 90px);border-radius:0}.reels{gap:0}.profile-top{align-items:flex-start}.page.profile-page{padding-top:10px}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+  <div class="logo">Instagram</div>
+  <nav class="nav" id="nav">
+    <button class="active" data-page="home"><span class="ico">⌂</span><span class="label">ホーム</span></button>
+    <button data-page="search"><span class="ico">⌕</span><span class="label">検索</span></button>
+    <button data-page="explore"><span class="ico">▦</span><span class="label">発見</span></button>
+    <button data-page="reels"><span class="ico">▻</span><span class="label">リール</span></button>
+    <button data-page="messages"><span class="ico">✉</span><span class="label">メッセージ</span></button>
+    <button data-page="notifications"><span class="ico">♡</span><span class="label">お知らせ</span></button>
+    <button data-action="create"><span class="ico">⊞</span><span class="label">作成</span></button>
+    <button data-page="profile"><span class="ico">◉</span><span class="label">プロフィール</span></button>
+  </nav>
+  <div class="sidebar-bottom nav"><button data-action="more"><span class="ico">☰</span><span class="label">その他</span></button></div>
+</aside>
+<main class="main">
+<section class="page active" id="home" style="display:none"></section>
+<div class="layout" id="home-layout">
+  <section class="feed">
+    <div class="stories" id="stories"></div>
+    <div id="posts"></div>
+  </section>
+  <aside class="right">
+    <div class="me-row"><img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100" alt=""><div class="meta"><b>your_account</b><div class="sub">あなた</div></div><button class="switch">切り替え</button></div>
+    <div class="suggest-title"><span>おすすめ</span><button>すべて見る</button></div>
+    <div id="suggestions"></div>
+    <div class="footer">Metaについて・ブログ・求人・ヘルプ・API・プライバシー・利用規約<br>場所・言語・Meta認証<br><br>© 2026 INSTAGRAM FROM META</div>
+  </aside>
+</div>
+<section class="page" id="search"><h2>検索</h2><div class="searchbox"><input id="searchInput" placeholder="検索"></div><p style="text-align:center;color:var(--muted)">最近の検索はありません</p></section>
+<section class="page" id="explore"><h2>発見</h2><div class="grid" id="exploreGrid"></div></section>
+<section class="page" id="reels"><div class="reels"><div class="reel-card"><img src="https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?w=900" alt="風景"><div class="reel-info"><b>travel_daily</b><p>今日の景色をシェア 🌿</p></div><div class="reel-actions"><span>♡</span><span>◯</span><span>➤</span></div></div></div></section>
+<section class="page" id="messages"><div class="messages"><div class="msg-list"><div class="msg-title">your_account　⌄</div><div class="msg-item"><img src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100"><div class="msg-body"><b>taro_photo</b><span class="sub">写真ありがとう！ · 2時間前</span></div></div><div class="msg-item"><img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100"><div class="msg-body"><b>hana_design</b><span class="sub">また連絡するね · 昨日</span></div></div><div class="msg-item"><img src="https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=100"><div class="msg-body"><b>ken_trip</b><span class="sub">いい写真！ · 月曜日</span></div></div></div><div class="chat-empty"><div><div style="font-size:50px">✉</div><strong>メッセージ</strong><p>友達に写真やメッセージを送信できます。</p><button class="pill">メッセージを送信</button></div></div></div></section>
+<section class="page" id="notifications"><h2>お知らせ</h2><h4>今日</h4><div class="msg-item"><img src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100"><div class="msg-body"><b>taro_photo、他2人</b><span>あなたの投稿に「いいね！」しました。</span><span class="sub">1時間前</span></div></div><h4>今週</h4><div class="msg-item"><img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100"><div class="msg-body"><b>hana_design</b><span>あなたのストーリーズにリアクションしました。</span><span class="sub">昨日</span></div></div></section>
+<section class="page profile-page" id="profile"><div class="profile-top"><img class="profile-avatar" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=300"><div class="profile-info"><div class="profile-line"><h2>your_account</h2><button class="pill">プロフィールを編集</button><button class="pill">プロフィールをシェア</button></div><div class="stats"><span><b>24</b> 投稿</span><span><b>1,284</b> フォロワー</span><span><b>356</b> フォロー中</span></div><b>Your Name</b><div class="profile-bio">日々の記録 📷<br>Design / Travel / Coffee</div></div></div><div class="tabs"><button class="active">▦ 投稿</button><button>▤ 保存済み</button><button>♙ タグ付け</button></div><div class="grid" id="profileGrid"></div></section>
+</main>
+<nav class="mobilebar"><button data-page="home">⌂</button><button data-page="explore">⌕</button><button data-action="create">⊞</button><button data-page="reels">▻</button><button data-page="profile">◉</button></nav>
+</div>
+<div class="modal" id="createModal"><div class="modal-box"><h3>新規投稿を作成</h3><p style="color:var(--muted)">学習用デモ：画像アップロードの代わりにキャプションを入力できます。</p><textarea id="captionInput" placeholder="キャプションを書く..."></textarea><div class="modal-actions"><button onclick="closeModal()">キャンセル</button><button style="color:var(--blue);font-weight:700" onclick="publishDemo()">シェア</button></div></div></div>
+<div class="toast" id="toast"></div>
+<script>
+const pics=[
+ ["photo-1470252649378-9c29740c9fa8","朝の風景","travel_daily","旅先で出会った朝の景色。🌿"],
+ ["photo-1500530855697-b586d89ba3ee","海辺","mika_days","週末の小さな旅 📷"],
+ ["photo-1518837695005-2083093ee35b","海","ocean_note","波の音に癒やされる。"],
+ ["photo-1490730141103-6cac27aaab94","山","outdoor_jp","自然の中でリフレッシュ"],
+ ["photo-1493246507139-91e8fad9978e","山並み","ken_trip","次はどこへ行こう？"],
+ ["photo-1500534623283-312aade485b7","風景","hana_design","色がきれいだった日。"],
+ ["photo-1517841905240-472988babdf9","ポートレート","yui_photo","日常の一枚"],
+ ["photo-1501785888041-af3ef285b470","湖","trip_log","静かな時間"],
+ ["photo-1519681393784-d120267933ba","星空","night_view","夜空を見上げる"]
+];
+const img=(id,w=800)=>`https://images.unsplash.com/${id}?auto=format&fit=crop&w=${w}&q=85`;
+const people=[["sora_days","photo-1500648767791-00dcc994a43e"],["hana_design","photo-1534528741775-53994a69daeb"],["ken_trip","photo-1506794778202-cad84cf45f1d"],["yui_photo","photo-1544005313-94ddf0286df2"],["mika_days","photo-1524504388940-b1c1722653e1"]];
+document.getElementById('stories').innerHTML=[["あなた","photo-1534528741775-53994a69daeb"],...people].map(([n,p])=>`<div class="story"><div class="ring"><img src="${img(p,120)}"></div>${n}</div>`).join('');
+document.getElementById('posts').innerHTML=pics.slice(0,5).map(([id,alt,user,cap],i)=>`<article class="post"><div class="post-head"><img class="avatar" src="${img(people[i%5][1],100)}"><div><div class="user">${user} <span class="sub">・ ${i+1}時間前</span></div><div class="sub">おすすめの投稿</div></div><button class="more" onclick="toast('その他のメニュー')">···</button></div><img class="post-img" src="${img(id,900)}" alt="${alt}"><div class="actions"><button onclick="like(this)">♡</button><button onclick="toast('コメント欄はデモ表示です')">▢</button><button onclick="toast('リンクをコピーしました')">➤</button><button class="save" onclick="save(this)">♧</button></div><div class="likes" id="likes${i}">${(128+i*47).toLocaleString()}件の「いいね！」</div><div class="caption"><b>${user}</b> ${cap}</div><div class="comments">コメント${i+2}件をすべて見る</div><div class="add-comment"><input placeholder="コメントを追加..."><button onclick="toast('コメントを追加しました（デモ）')">投稿</button></div></article>`).join('');
+document.getElementById('suggestions').innerHTML=people.map(([n,p])=>`<div class="suggest-row"><img src="${img(p,100)}"><div class="meta"><b>${n}</b><div class="sub">おすすめ</div></div><button class="follow" onclick="follow(this)">フォロー</button></div>`).join('');
+const gridHTML=pics.map(([id,alt])=>`<div class="tile"><img src="${img(id,500)}" alt="${alt}"></div>`).join('');
+document.getElementById('exploreGrid').innerHTML=gridHTML;document.getElementById('profileGrid').innerHTML=gridHTML;
+function showPage(page){document.getElementById('home-layout').style.display=page==='home'?'grid':'none';document.querySelectorAll('.page').forEach(p=>{p.classList.toggle('active',p.id===page);if(p.id===page)p.style.display='block';else p.style.display='none'});document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));window.scrollTo(0,0)}
+document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>showPage(b.dataset.page)));
+document.querySelectorAll('[data-action="create"]').forEach(b=>b.addEventListener('click',()=>document.getElementById('createModal').classList.add('show')));
+document.querySelectorAll('[data-action="more"]').forEach(b=>b.addEventListener('click',()=>toast('その他のメニュー（デモ）')));
+function like(b){b.textContent=b.textContent==='♡'?'♥':'♡';b.style.color=b.textContent==='♥'?'#ed4956':'';toast(b.textContent==='♥'?'いいね！しました':'いいね！を取り消しました')}
+function save(b){b.textContent=b.textContent==='♧'?'▣':'♧';toast('保存状態を変更しました')}
+function follow(b){b.textContent=b.textContent==='フォロー'?'フォロー中':'フォロー';}
+function toast(t){const e=document.getElementById('toast');e.textContent=t;e.style.display='block';clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>e.style.display='none',1800)}
+function closeModal(){document.getElementById('createModal').classList.remove('show')}
+function publishDemo(){const v=document.getElementById('captionInput').value.trim();if(!v){toast('キャプションを入力してください');return}toast('投稿を作成しました（デモ）');document.getElementById('captionInput').value='';closeModal()}
+document.getElementById('searchInput').addEventListener('input',e=>{const q=e.target.value;document.querySelector('#search p').textContent=q?`「${q}」を検索中（デモ）`:'最近の検索はありません'});
+</script>
+</body></html>

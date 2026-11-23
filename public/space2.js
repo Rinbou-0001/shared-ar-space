@@ -280,7 +280,15 @@
     //   ※ 末尾スラッシュ必須: Firebase Hosting の cleanUrls: true が index.html を
     //     特殊 redirect し、相対パスの base URL が `/.../index/` と誤認されて CSS/JS
     //     参照が 404 になる (案 R-1)。`/sites/foo/` 形式なら cleanUrls は発動しない。
-    const SITE_POOL = ['/sites/youtube-ui-study/'];
+    //   firebase.json の redirect (`/sites/:sitename/index.html` → `/sites/:sitename/`) により、
+    //   サイト内で href="index.html" を使っているサイトも自動的に末尾スラッシュ URL に正規化される。
+    const SITE_POOL = [
+      '/sites/youtube-ui-study/',
+      '/sites/yahoo_ui-study/',
+      '/sites/x-ui-study/',
+      '/sites/google_ui-study/',
+      '/sites/instagram_ui-study/',
+    ];
     let _siteCSS3DRenderer = null;
     let _siteCSS3DScene    = null;
     let _siteIframe        = null;

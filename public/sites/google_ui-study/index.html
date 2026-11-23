@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google 検索 UI 学習デモ</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="top-left"><a href="#" data-route="home" class="brand-mini">Google</a></div>
+  <nav class="top-right"><a href="#" data-route="apps">Google アプリ</a><a href="#" data-route="signin" class="signin">ログイン</a></nav>
+</header>
+<main id="app" aria-live="polite"></main>
+<footer class="footer"><div>日本</div><div class="footlinks"><a href="#" data-route="about">Googleについて</a><a href="#" data-route="advertising">広告</a><a href="#" data-route="business">ビジネス</a><a href="#" data-route="privacy">プライバシー</a><a href="#" data-route="terms">規約</a><a href="#" data-route="settings">設定</a></div></footer>
+<div id="toast" role="status"></div>
+<script src="app.js"></script>
+</body></html>
