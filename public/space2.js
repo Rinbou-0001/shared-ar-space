@@ -7895,6 +7895,10 @@
           if (typeof window.__p3SetEngaged === 'function') {
             window.__p3SetEngaged(on && !!window.__effect[10]);
           }
+          // 効果10 Phase 2: L1 環境も同条件
+          if (typeof window.__l1SetEngaged === 'function') {
+            window.__l1SetEngaged(on && !!window.__effect[10]);
+          }
         }
         if (n === 9) {
           // 効果9: 窓枠 overlay を off-axis 投影に切替
@@ -7927,6 +7931,10 @@
           // Phase 3 粒子 ON/OFF (effect 6 AND effect 10 の AND 条件で engaged)
           if (typeof window.__p3SetEngaged === 'function') {
             window.__p3SetEngaged(on && !!window.__effect[6]);
+          }
+          // Phase 2 L1 環境 ON/OFF (同条件)
+          if (typeof window.__l1SetEngaged === 'function') {
+            window.__l1SetEngaged(on && !!window.__effect[6]);
           }
           log('環境エネルギー系 ' + (on ? 'ON' : 'OFF') +
               ' (effect10, theme6=' + (window.__effect[6] ? 'ON' : 'OFF') + ')', 'ok');
@@ -10636,9 +10644,13 @@
         geo.setAttribute('aFreq',    new THREE.BufferAttribute(_p3.freqArr,  1));
         geo.setAttribute('aBirth',   new THREE.BufferAttribute(_p3.birthArr, 1));
         geo.setAttribute('aLife',    new THREE.BufferAttribute(_p3.lifeArr,  1));
-        // 本番 vertex shader: GLSL 仕様準拠 + 安全な PointSize 範囲 (ALIASED_POINT_SIZE_RANGE 安全圏)
-        //   uSizeBase=28 + 補正係数で最大 ~40 → 大半のドライバの max (32-64) に収まる
+        // 本番 vertex shader (復旧版):
+        //   ・highp precision 全体明示
+        //   ・varying vAgeN を復活 (fragment 側の寿命 fade 用)
+        //   ・uEnergy で発光強度を shader 内で反映 (vEnergy 経由で fragment にも渡す)
+        //   ・PointSize 動的 (uSizeBase=28、life と Energy で ±30% 変動、最大 ~37)
         const vs = [
+          'precision highp float;',
           'attribute vec3 aVel;',
           'attribute vec3 aAmp;',
           'attribute float aPhase;',
@@ -10649,46 +10661,46 @@
           'uniform float uEnergy;',
           'uniform float uSizeBase;',
           'varying float vAgeN;',
+          'varying float vEnergy;',
           'void main() {',
           '  float age = uTime - aBirth;',
           '  if (age < 0.0 || age > aLife) {',
           '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
           '    gl_PointSize = 0.0;',
-          '    vAgeN = 1.0;',
+          '    vAgeN = 0.0;',
+          '    vEnergy = 0.0;',
           '    return;',
           '  }',
           '  vAgeN = age / aLife;',
+          '  vEnergy = uEnergy;',
           '  vec3 p = position + aVel * age + aAmp * sin(aFreq * age + aPhase);',
           '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
           '  gl_Position = projectionMatrix * mv;',
           '  float life = 1.0 - vAgeN;',
-          // 粒子寿命で少し縮小、Energy で少し拡大、合計で 28*0.6 〜 28*1.0*1.3 ≒ 17〜37
           '  gl_PointSize = uSizeBase * (0.6 + 0.4 * life) * (1.0 + 0.3 * uEnergy);',
           '}',
         ].join('\n');
-        // 本番 fragment shader:
-        //   ・gl_PointCoord 距離でソフトエッジ (smoothstep は仕様準拠 edge0<edge1)
-        //   ・寿命で alpha 自然減衰
-        //   ・Energy で発光量を上乗せ (NormalBlending なので小さめにして色味は維持)
-        //   ・NormalBlending 前提: α=1.0 中心でも色が出て、周縁で透過していく
+        // 本番 fragment shader (復旧版):
+        //   ・highp precision 全体明示 (mediump 精度起因のゼロ化を完全回避)
+        //   ・smoothstep 撤去 → 線形 clamp フォールオフ (ドライバ互換性安全)
+        //   ・varying vAgeN / vEnergy で vertex → fragment に age と Energy を渡す
+        //   ・uColorA (cyan) / uColorB (pink) の age 補間で色味変化
         const fs = [
-          'precision mediump float;',
+          'precision highp float;',
           'uniform vec3 uColorA;',
           'uniform vec3 uColorB;',
-          'uniform float uEnergy;',
           'varying float vAgeN;',
+          'varying float vEnergy;',
           'void main() {',
           '  vec2 c = gl_PointCoord - vec2(0.5);',
           '  float d = length(c);',
           '  if (d > 0.5) discard;',
-          // 中心 d=0 → factor 1、周縁 d=0.5 → factor 0
-          '  float edge = 1.0 - smoothstep(0.15, 0.5, d);',
-          // 寿命 fade: 若い粒子ほど濃く、終末で消える
+          // d=0 (中心) → 1.0、d=0.5 (周縁) → 0.0 の線形フォールオフ (smoothstep 回避)
+          '  float edge = clamp(1.0 - d * 2.0, 0.0, 1.0);',
           '  float life = 1.0 - vAgeN;',
           '  float alpha = edge * (0.7 + 0.3 * life);',
-          // 色は cyan → pink の age 補間、Energy で少し明度ブースト
           '  vec3 col = mix(uColorA, uColorB, vAgeN);',
-          '  col = clamp(col + uEnergy * 0.2, 0.0, 1.0);',
+          '  col = clamp(col + vEnergy * 0.2, 0.0, 1.0);',
           '  gl_FragColor = vec4(col, alpha);',
           '}',
         ].join('\n');
@@ -10925,6 +10937,148 @@
     _envRegister('fast60', _p3UniformTick);
     _envRegister('mid30',  _p3SpawnTick);
     _p3Log('Phase 3 scheduler updaters registered (fast60:uniform, mid30:spawn)');
+
+    // ============================================================
+    // 効果10 Phase 2 (L1 環境: 背景色・霧・照明の Energy 連動変化)
+    //   ・engage ON 時に scene の baseline (bg/fog/amb/dir) を snapshot、OFF で復元
+    //   ・slow10 (10Hz): E/T/F から target 値を算出
+    //       - Background: baseline → SHIBUYA_ACCENT_CYAN に Energy 比例 lerp
+    //       - Fog density: baseline + 0.015 × Energy
+    //       - Ambient intensity: baseline × (1 + 0.3 × Energy)
+    //       - Dir intensity: baseline × (1 + 0.2 × Energy)
+    //       - Dir color: baseline → SHIBUYA_ACCENT_PINK に Tension 比例 lerp
+    //   ・fast60 (60Hz): current → target を lerp (Flow で追従速度調整)
+    //   ・|ΔE/T/F| < 0.005 なら target 更新スキップ (無駄処理回避)
+    //   ・各ステップに [l1] prefix でエラーログ
+    // ============================================================
+    const SHIBUYA_ACCENT_CYAN = new THREE.Color(0x22d3ee);
+    const SHIBUYA_ACCENT_PINK = new THREE.Color(0xf472b6);
+    const _l1 = {
+      snapshotTaken: false, wasEngaged: false,
+      baseBg: new THREE.Color(0xffffff), baseFogDen: 0,
+      baseAmbI: 0.87, baseDirI: 1.0, baseDirColor: new THREE.Color(0xffffff),
+      targetBg: new THREE.Color(0xffffff), targetFogDen: 0,
+      targetAmbI: 0.87, targetDirI: 1.0, targetDirColor: new THREE.Color(0xffffff),
+      currentBg: new THREE.Color(0xffffff), currentFogDen: 0,
+      currentAmbI: 0.87, currentDirI: 1.0, currentDirColor: new THREE.Color(0xffffff),
+      lastE: -1, lastT: -1, lastF: -1,
+      errCounts: { snapshot: 0, compute: 0, lerp: 0, restore: 0 },
+    };
+    function _l1Log(msg, level) {
+      if (typeof log === 'function') log('[l1] ' + msg, level || 'ok');
+      else console.log('[l1]', msg);
+    }
+    function _l1SnapshotBaseline() {
+      if (_l1.snapshotTaken) return;
+      try {
+        if (scene.background && scene.background.isColor) _l1.baseBg.copy(scene.background);
+        else if (scene.background) _l1.baseBg.set(0xffffff);
+        _l1.baseFogDen = (scene.fog && typeof scene.fog.density === 'number') ? scene.fog.density : 0;
+        if (typeof sceneAmbient !== 'undefined' && sceneAmbient) _l1.baseAmbI = sceneAmbient.intensity;
+        if (typeof dirLight !== 'undefined' && dirLight) {
+          _l1.baseDirI = dirLight.intensity;
+          _l1.baseDirColor.copy(dirLight.color);
+        }
+        // current/target を baseline で初期化
+        _l1.currentBg.copy(_l1.baseBg);     _l1.currentFogDen = _l1.baseFogDen;
+        _l1.currentAmbI = _l1.baseAmbI;     _l1.currentDirI = _l1.baseDirI;
+        _l1.currentDirColor.copy(_l1.baseDirColor);
+        _l1.targetBg.copy(_l1.baseBg);      _l1.targetFogDen = _l1.baseFogDen;
+        _l1.targetAmbI = _l1.baseAmbI;      _l1.targetDirI = _l1.baseDirI;
+        _l1.targetDirColor.copy(_l1.baseDirColor);
+        _l1.snapshotTaken = true;
+        _l1Log('baseline snapshot: bg=#' + _l1.baseBg.getHexString() +
+               ' fog=' + _l1.baseFogDen.toFixed(4) +
+               ' amb=' + _l1.baseAmbI.toFixed(2) +
+               ' dir=' + _l1.baseDirI.toFixed(2) +
+               '@#' + _l1.baseDirColor.getHexString());
+      } catch (err) {
+        _l1.errCounts.snapshot++;
+        _l1Log('snapshot err: ' + err.message, 'err');
+      }
+    }
+    function _l1RestoreBaseline() {
+      if (!_l1.snapshotTaken) return;
+      try {
+        if (scene.background && scene.background.isColor) scene.background.copy(_l1.baseBg);
+        if (scene.fog && typeof scene.fog.density === 'number') scene.fog.density = _l1.baseFogDen;
+        if (typeof sceneAmbient !== 'undefined' && sceneAmbient) sceneAmbient.intensity = _l1.baseAmbI;
+        if (typeof dirLight !== 'undefined' && dirLight) {
+          dirLight.intensity = _l1.baseDirI;
+          dirLight.color.copy(_l1.baseDirColor);
+        }
+        _l1.snapshotTaken = false;
+        _l1.lastE = _l1.lastT = _l1.lastF = -1;
+        _l1Log('baseline restored');
+      } catch (err) {
+        _l1.errCounts.restore++;
+        _l1Log('restore err: ' + err.message, 'err');
+      }
+    }
+    // slow10 (10Hz): E/T/F から target を算出
+    function _l1ComputeTarget(dt, params) {
+      try {
+        if (!_l1.snapshotTaken) _l1SnapshotBaseline();
+        const e = params.energy, t = params.tension, f = params.flow;
+        // event-driven skip: 変化が極小なら再計算省略
+        if (Math.abs(e - _l1.lastE) < 0.005 &&
+            Math.abs(t - _l1.lastT) < 0.005 &&
+            Math.abs(f - _l1.lastF) < 0.005) {
+          return;
+        }
+        _l1.lastE = e; _l1.lastT = t; _l1.lastF = f;
+        _l1.targetBg.copy(_l1.baseBg).lerp(SHIBUYA_ACCENT_CYAN, Math.min(0.5, e * 0.3));
+        _l1.targetFogDen = _l1.baseFogDen + e * 0.015;
+        _l1.targetAmbI   = _l1.baseAmbI * (1.0 + 0.3 * e);
+        _l1.targetDirI   = _l1.baseDirI * (1.0 + 0.2 * e);
+        _l1.targetDirColor.copy(_l1.baseDirColor).lerp(SHIBUYA_ACCENT_PINK, Math.min(0.4, t * 0.25));
+      } catch (err) {
+        _l1.errCounts.compute++;
+        _l1Log('compute err: ' + err.message, 'err');
+      }
+    }
+    // fast60 (60Hz): current → target に lerp
+    function _l1LerpCurrent(dt, params) {
+      if (!_l1.snapshotTaken) return;
+      try {
+        // lerp 速度は Flow で可変 (Flow 高 = 滑らかに追従、低 = 遅い追従)
+        const baseLerp = 2.0 * dt;
+        const flowBoost = 0.5 + params.flow * 0.5;
+        const k = Math.min(1, baseLerp * flowBoost);
+        _l1.currentBg.lerp(_l1.targetBg, k);
+        _l1.currentFogDen += (_l1.targetFogDen - _l1.currentFogDen) * k;
+        _l1.currentAmbI   += (_l1.targetAmbI   - _l1.currentAmbI)   * k;
+        _l1.currentDirI   += (_l1.targetDirI   - _l1.currentDirI)   * k;
+        _l1.currentDirColor.lerp(_l1.targetDirColor, k);
+        // scene に反映
+        if (scene.background && scene.background.isColor) scene.background.copy(_l1.currentBg);
+        if (scene.fog && typeof scene.fog.density === 'number') scene.fog.density = _l1.currentFogDen;
+        if (typeof sceneAmbient !== 'undefined' && sceneAmbient) sceneAmbient.intensity = _l1.currentAmbI;
+        if (typeof dirLight !== 'undefined' && dirLight) {
+          dirLight.intensity = _l1.currentDirI;
+          dirLight.color.copy(_l1.currentDirColor);
+        }
+      } catch (err) {
+        _l1.errCounts.lerp++;
+        _l1Log('lerp err: ' + err.message, 'err');
+      }
+    }
+    // engage 切替 (effect 6 / 10 の AND 条件、_p3SetEngaged と同じ呼出パス)
+    function _l1SetEngaged(on) {
+      if (on) {
+        _l1SnapshotBaseline();
+        _l1Log('engaged ON');
+      } else {
+        _l1RestoreBaseline();
+        _l1Log('engaged OFF');
+      }
+    }
+    window.__l1SetEngaged = _l1SetEngaged;
+    window.__l1State = _l1;
+
+    _envRegister('slow10', _l1ComputeTarget);
+    _envRegister('fast60', _l1LerpCurrent);
+    _l1Log('Phase 2 scheduler updaters registered (slow10:target, fast60:lerp)');
 
     // 階層実行: fast60 は毎フレーム、mid30 は 2 フレームに 1 回、slow10 は 6 フレームに 1 回、crawl5 は 12 フレームに 1 回
     function _envTick(dt) {
