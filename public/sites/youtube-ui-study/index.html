@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube UI Study - ホーム</title>
+  <link rel="stylesheet" href="css/common.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn menu-toggle" aria-label="メニュー">☰</button>
+    <a class="brand" href="index.html" aria-label="ホーム"><span class="brand-mark">▶</span><strong>YouTube</strong><small>UI Study</small></a>
+    <form class="search" id="searchForm"><input id="searchInput" type="search" placeholder="検索" aria-label="検索"><button aria-label="検索">⌕</button></form>
+    <button class="icon-btn mic" aria-label="音声検索">🎙</button>
+    <div class="top-actions"><button class="pill-button" id="createBtn">＋ 作成</button><button class="icon-btn" aria-label="通知">♧</button><button class="avatar">R</button></div>
+  </header>
+  <aside class="sidebar" id="sidebar">
+    <a class="side-item active" href="index.html"><span>⌂</span>ホーム</a>
+    <a class="side-item" href="#"><span>▣</span>ショート</a>
+    <a class="side-item" href="#"><span>▤</span>登録チャンネル</a>
+    <hr><a class="side-item" href="#"><span>▶</span>マイページ</a>
+    <a class="side-item" href="#"><span>◷</span>履歴</a>
+    <a class="side-item" href="#"><span>▱</span>再生リスト</a>
+    <a class="side-item" href="#"><span>◉</span>後で見る</a>
+    <hr><p class="sidebar-note">YouTube UIの構造を学ぶための模造インターフェースです。</p>
+  </aside>
+  <main class="main-content">
+    <nav class="chips" aria-label="カテゴリ">
+      <button class="chip selected" data-category="すべて">すべて</button><button class="chip" data-category="音楽">音楽</button><button class="chip" data-category="ゲーム">ゲーム</button><button class="chip" data-category="ライブ">ライブ</button><button class="chip" data-category="デザイン">デザイン</button><button class="chip" data-category="プログラミング">プログラミング</button><button class="chip" data-category="最近アップロードされた動画">最近アップロードされた動画</button><button class="chip" data-category="視聴済み">視聴済み</button>
+    </nav>
+    <section class="video-grid" id="videoGrid" aria-label="動画一覧"></section>
+  </main>
+  <script src="js/app.js"></script>
+</body>
+</html>

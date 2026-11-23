@@ -169,6 +169,9 @@
       if (_bloomComposer) {
         _bloomComposer.setSize(winW, winH);
       }
+      // 効果8 用 CSS3DRenderer のサイズ + iframe transform 更新
+      if (_siteCSS3DRenderer) _siteCSS3DRenderer.setSize(winW, winH);
+      if (typeof _updateSiteCSS3DTransform === 'function') _updateSiteCSS3DTransform();
       // 効果7: 窓枠オーバーレイ (PerspectiveCamera) のアスペクト + 距離更新 + frame 再生成
       if (_overlayCamera) {
         const aspect = winW / winH;
@@ -266,66 +269,72 @@
     //   group 1 = sides + bevel。_rebuildFrame で geom.groups を 3 分割し
     //   [back(白), sides, front(画像or白)] を Mesh materials 配列として渡す
     const _capsMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    // 前面専用 (効果8 で interface_img テクスチャを ON/OFF)
+    // 前面専用 (効果8 とは別用途で残存、常に白一色)
     const _frontMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, map: null });
-    // 効果8: 窓枠前面に画像貼付 (sRGB、ディスプレイサイズへ引き伸ばし)
-    //   ・入室時に myDisplay のアスペクトから横/縦を判定し、対応プールからランダム抽選
-    //   ・毎入室で新抽選 (永続化なし)
-    //   ・各クライアント独立 (サーバー同期なし)
-    const WIDTH_IMGS  = ['img_01.png', 'img_06.png', 'img_08.png', 'img_09.png', 'img_10.png', 'img_11.png', 'img_12.png'];
-    const HEIGHT_IMGS = ['img_07.png'];
-    let _frontTexture = null;   // 入室時に _pickAndLoadFrontImage() で生成
-    // UV 正規化: shape が [-dispW/2, dispW/2] × [-dispH/2, dispH/2] 範囲なので
-    //   repeat = (1/dispW, 1/dispH), offset = (0.5, 0.5) で [0, 1] 範囲に写像
-    //   ※ _rebuildFrame が shape 構築に使うのと同じ myDisplay を参照 (effectiveDisplaySize は
-    //     後段 L6874 で let 宣言されており、ここから早期呼出し時に TDZ になるため不可)
-    function _updateFrontTextureUV() {
-      if (!_frontTexture) return;
-      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
-      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
-      if (w > 0 && h > 0) {
-        _frontTexture.repeat.set(1 / w, 1 / h);
-        _frontTexture.offset.set(0.5, 0.5);
-        _frontTexture.needsUpdate = true;
-      }
-    }
-    // 入室時に向きを判定してランダム 1 枚をロード
-    function _pickAndLoadFrontImage() {
-      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
-      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
-      const landscape = (w >= h);
-      const folder = landscape ? 'width' : 'height';
-      const pool   = landscape ? WIDTH_IMGS : HEIGHT_IMGS;
-      if (!pool || pool.length === 0) {
-        if (typeof log === 'function') log('[frame-img] プール空 (' + folder + ')', 'warn');
+    // ===== 効果8 (改): 窓枠に自前サイトを iframe として重ね描き (CSS3DRenderer) =====
+    //   ・SITE_POOL からランダム 1 サイトを選択 (入室時、各クライアント独立)
+    //   ・CSS3DRenderer で iframe を 3D 平面として配置、_overlayCamera と同期
+    //   ・効果8 ON → iframe 表示 (pointer-events 有効、操作可能)
+    //   ・効果8 OFF → iframe 非表示
+    //   ・将来、SITE_POOL にファイル追加するだけで抽選対象が拡張可能
+    const SITE_POOL = ['/sites/youtube-ui-study/index.html'];
+    let _siteCSS3DRenderer = null;
+    let _siteCSS3DScene    = null;
+    let _siteIframe        = null;
+    let _siteCSS3DObject   = null;
+    const SITE_IFRAME_W = 1920;   // iframe の内部 pixel 幅 (CSS ピクセル)
+    const SITE_IFRAME_H = 1080;
+    function _initSiteCSS3D() {
+      if (_siteCSS3DRenderer) return;   // 多重初期化防止
+      if (typeof THREE.CSS3DRenderer !== 'function') {
+        if (typeof log === 'function') log('[site] CSS3DRenderer 未ロード', 'err');
         return;
       }
-      const chosen = pool[Math.floor(Math.random() * pool.length)];
-      const url = '/assets/' + folder + '/' + chosen;
-      new THREE.TextureLoader().load(url, (tex) => {
-        tex.encoding = THREE.sRGBEncoding;
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = false;
-        if (_frontTexture) _frontTexture.dispose();
-        _frontTexture = tex;
-        _updateFrontTextureUV();
-        // 効果8 が既に ON なら即座に map へ反映
-        if (window.__effect && window.__effect[8]) {
-          _frontMaterial.map = _frontTexture;
-          _frontMaterial.needsUpdate = true;
-        }
-        if (typeof log === 'function') {
-          log('[frame-img] 読込完了: ' + url + ' (' + (landscape ? '横' : '縦') + ' ' + w.toFixed(3) + '×' + h.toFixed(3) + 'm)', 'ok');
-        }
-      }, undefined, (err) => {
-        if (typeof log === 'function') log('[frame-img] 読込失敗: ' + url, 'err');
-      });
+      _siteCSS3DRenderer = new THREE.CSS3DRenderer();
+      _siteCSS3DRenderer.setSize(window.innerWidth, window.innerHeight);
+      _siteCSS3DRenderer.domElement.style.position = 'absolute';
+      _siteCSS3DRenderer.domElement.style.top = '0';
+      _siteCSS3DRenderer.domElement.style.left = '0';
+      _siteCSS3DRenderer.domElement.style.pointerEvents = 'none';   // コンテナは透過
+      const container = document.getElementById('css3d-container');
+      if (container) container.appendChild(_siteCSS3DRenderer.domElement);
+      _siteCSS3DScene = new THREE.Scene();
+      _siteIframe = document.createElement('iframe');
+      _siteIframe.style.width  = SITE_IFRAME_W + 'px';
+      _siteIframe.style.height = SITE_IFRAME_H + 'px';
+      _siteIframe.style.border = '0';
+      _siteIframe.style.background = 'white';
+      _siteIframe.style.pointerEvents = 'auto';   // iframe 単体ではクリック・スクロール受付
+      _siteIframe.setAttribute('allow', 'autoplay; encrypted-media; fullscreen');
+      _siteCSS3DObject = new THREE.CSS3DObject(_siteIframe);
+      _siteCSS3DScene.add(_siteCSS3DObject);
+      _updateSiteCSS3DTransform();
+      if (typeof log === 'function') log('[site] CSS3DRenderer initialized', 'ok');
     }
-    // 他モジュール (socket init 後) から呼び出せるよう公開
-    window.__pickAndLoadFrontImage = _pickAndLoadFrontImage;
+    function _updateSiteCSS3DTransform() {
+      if (!_siteCSS3DObject) return;
+      const w = (typeof myDisplay !== 'undefined' && myDisplay.width)  ? myDisplay.width  : 0.3;
+      const h = (typeof myDisplay !== 'undefined' && myDisplay.height) ? myDisplay.height : 0.2;
+      // iframe (SITE_IFRAME_W × SITE_IFRAME_H px) を dispW × dispH m にスケール
+      _siteCSS3DObject.scale.set(w / SITE_IFRAME_W, h / SITE_IFRAME_H, 1);
+      // 窓枠 front face (z = +FRAME_DEPTH/2) に位置合わせ
+      const frontZ = (typeof FRAME_DEPTH !== 'undefined') ? FRAME_DEPTH / 2 : 0.015;
+      _siteCSS3DObject.position.set(0, 0, frontZ);
+      _siteCSS3DObject.quaternion.identity();
+      _siteCSS3DObject.updateMatrixWorld();
+    }
+    function _pickAndLoadSite() {
+      _initSiteCSS3D();
+      if (!_siteIframe) return;
+      if (!SITE_POOL || SITE_POOL.length === 0) {
+        if (typeof log === 'function') log('[site] SITE_POOL 空', 'warn');
+        return;
+      }
+      const chosen = SITE_POOL[Math.floor(Math.random() * SITE_POOL.length)];
+      _siteIframe.src = chosen;
+      if (typeof log === 'function') log('[site] 選択 → ' + chosen, 'ok');
+    }
+    window.__pickAndLoadSite = _pickAndLoadSite;
     // ===== 物理メートル値での窓枠定数 (PerspectiveCamera 使用) =====
     const FRAME_THICK   = 0.008;   // 8mm 外周枠太さ
     const FRAME_DEPTH   = 0.03;    // 3cm 奥行き (指定)
@@ -947,6 +956,12 @@
       renderer.clearDepth();
       renderer.render(_overlayScene, _overlayCamera);
       renderer.autoClear = prevAutoClear;
+      // 効果8 ON: CSS3DRenderer で iframe を描画 (overlay camera と同期)
+      if (window.__effect && window.__effect[8] && _siteCSS3DRenderer && _siteCSS3DScene) {
+        try {
+          _siteCSS3DRenderer.render(_siteCSS3DScene, _overlayCamera);
+        } catch (e) { /* 描画失敗は無視 (iframe クロスオリジン制約等) */ }
+      }
     }
 
     // ===== 試験: スプレー塗装 Emissive + UnrealBloom =====
@@ -7243,7 +7258,7 @@
         // ディスプレイサイズを自動推定 → 報告 (space3 は入室時 1 回のみ)
         refreshMyDisplaySize(true);
         // 効果8 用: 入室時にアスペクトから横/縦を判定し、該当プールからランダム 1 枚をロード
-        try { _pickAndLoadFrontImage(); } catch (e) { log('_pickAndLoadFrontImage err: ' + e.message, 'err'); }
+        try { _pickAndLoadSite(); } catch (e) { log('_pickAndLoadSite err: ' + e.message, 'err'); }
         if (ROLE !== 'camera') {
           // observer/master: canvas 物理サイズを確定して self avatar 再構築 + emit
           computeAndApplyEffectiveSize('init');
@@ -7733,21 +7748,14 @@
           log('窓枠 off-axis ' + (on ? 'ON' : 'OFF') + ' (effect9)', 'ok');
         }
         if (n === 8) {
-          // 効果8: 窓枠前面テクスチャ ON/OFF (前面のみ、sRGB、ディスプレイサイズへ引き伸ばし)
-          //   _frontTexture は入室時に _pickAndLoadFrontImage() で生成 (非同期)。
-          //   まだ読込完了していなければ null のため、ロードコールバックで再度 map 反映される。
-          if (on) {
-            if (_frontTexture) {
-              _frontMaterial.map = _frontTexture;
-              _updateFrontTextureUV();
-            } else {
-              log('窓枠前面テクスチャ未ロード (effect8 ON、ロード完了後に反映)', 'warn');
-            }
-          } else {
-            _frontMaterial.map = null;
-          }
-          _frontMaterial.needsUpdate = true;
-          log('窓枠前面テクスチャ ' + (on ? 'ON' : 'OFF') + ' (effect8)', 'ok');
+          // 効果8 (改): 窓枠前面に自前サイト (iframe) を表示 (CSS3DRenderer 使用)
+          //   ・ON: #css3d-container を表示 + iframe pointer-events 有効
+          //   ・OFF: コンテナ非表示
+          const container = document.getElementById('css3d-container');
+          if (container) container.style.display = on ? '' : 'none';
+          if (_siteIframe) _siteIframe.style.pointerEvents = on ? 'auto' : 'none';
+          _updateSiteCSS3DTransform();
+          log('窓枠サイト (iframe) ' + (on ? 'ON' : 'OFF') + ' (effect8)', 'ok');
         }
         log('effectState recv: 効果' + n + ' → ' + (on ? 'ON' : 'OFF'), 'ok');
       });

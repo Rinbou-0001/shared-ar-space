@@ -331,6 +331,8 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/postprocessing/UnrealBloomPass.js" onload="uiLog('UnrealBloomPass loaded','ok')" onerror="uiLog('UnrealBloomPass load failed','err')"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/shaders/CopyShader.js" onload="uiLog('CopyShader loaded','ok')" onerror="uiLog('CopyShader load failed','err')"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/shaders/LuminosityHighPassShader.js" onload="uiLog('LuminosityHighPassShader loaded','ok')" onerror="uiLog('LuminosityHighPassShader load failed','err')"></script>
+  <!-- CSS3DRenderer (効果8 窓枠サイト表示: iframe を 3D 配置、インタラクティブ) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/renderers/CSS3DRenderer.js" onload="uiLog('CSS3DRenderer loaded','ok')" onerror="uiLog('CSS3DRenderer load failed','err')"></script>
   <script src="/config.js"></script>
   <script>
     (function () {
@@ -349,6 +351,8 @@
 <!-- AR モード用 背面カメラ映像 (camera role, getUserMedia 成功時のみ表示) -->
 <video id="bg-video" autoplay playsinline muted></video>
 <div id="stage"></div>
+<!-- 効果8: CSS3DRenderer iframe 配置コンテナ (WebGL の上に 3D 平面として iframe を描画) -->
+<div id="css3d-container" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;display:none;"></div>
 <!-- 効果2: スマホ UI モード背景 (1cm×1cm グリッド、camera role のみ表示) -->
 <div id="grid-overlay"></div>
 
