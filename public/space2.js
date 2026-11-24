@@ -1481,15 +1481,18 @@
           shader.uniforms.uTileStrength = strengthUniform;
           mat.userData._uTileStrength = strengthUniform;
           // Vertex: world position を varying に出す
-          //   Three.js r150 の standard chunk `<worldpos_vertex>` 直後で worldPosition が定義される
+          //   ※ `<worldpos_vertex>` chunk の `worldPosition` 変数は envMap/shadow 等の条件下でのみ
+          //     定義される (texture/shadow 無効化済の Shibuya タイルでは undefined → compile fail → 黒化)。
+          //     そのため `<begin_vertex>` 後 (vec3 transformed 定義済) に modelMatrix * transformed で
+          //     手動算出する方式に変更 (条件に依存せず常に成立)。
           shader.vertexShader = shader.vertexShader
             .replace(
               'void main() {',
               'varying vec3 vShibuyaWorldPos;\nvoid main() {'
             )
             .replace(
-              '#include <worldpos_vertex>',
-              '#include <worldpos_vertex>\nvShibuyaWorldPos = worldPosition.xyz;'
+              '#include <begin_vertex>',
+              '#include <begin_vertex>\nvShibuyaWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;'
             );
           // Fragment: uniforms 宣言 + pulse 評価 + mix で blend
           //   chunk `<dithering_fragment>` の直前に挿入 (ほぼ gl_FragColor が確定した段階)
