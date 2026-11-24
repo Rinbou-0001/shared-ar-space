@@ -1450,6 +1450,109 @@
     _initRadialWave();
     window.__radialWaveTick = _radialWaveTick;
     window.__fireRadialPulse = _fireRadialPulse;
+
+    // ===== 効果11: Shibuya ポリゴン街並みタイルへの色伝播 (床面 radial wave と完全同期) =====
+    //   ・ onBeforeCompile で既存マテリアルに shader 注入 (texture/lighting/shadow 保持)
+    //   ・ fragment shader で world position から pulse 距離 → color blend
+    //   ・ pulse uniform (_radialWave.mat.uniforms) を直接共有 → 床と完全同期
+    //   ・ uTileStrength uniform で ON/OFF 制御 (0.0 = OFF, 0.4 = ON) — material を再 compile しない
+    //   ・ 対象: Shibuya タイル (OBJ 街並み) のみ、cubes/panels/frames/pipes/spheres/ancientTree/fish は除外
+    const SHIBUYA_TILE_STRENGTH = 0.4;
+    const _shibuyaTilePatched = new Set();   // patch 済み material のリスト (strength uniform 更新用)
+    let _shibuyaTileStrength = 0.0;          // 現在の strength (uniform と同期)
+    function _patchShibuyaTileMaterial(mat) {
+      if (!mat || _shibuyaTilePatched.has(mat)) return;
+      if (!_radialWave) {
+        if (typeof log === 'function') log('[tile-patch] skip: _radialWave not ready', 'warn');
+        return;
+      }
+      try {
+        // compile 時の shader インジェクション (1 回のみ実行)
+        mat.onBeforeCompile = (shader) => {
+          // pulse uniforms を _radialWave と同一 object 参照で共有 → 完全同期
+          shader.uniforms.uTime       = _radialWave.mat.uniforms.uTime;
+          shader.uniforms.uWaveSpeed  = _radialWave.mat.uniforms.uWaveSpeed;
+          shader.uniforms.uRingWidth  = _radialWave.mat.uniforms.uRingWidth;
+          shader.uniforms.uMaxRadius  = _radialWave.mat.uniforms.uMaxRadius;
+          shader.uniforms.uPulseBirth = _radialWave.mat.uniforms.uPulseBirth;
+          shader.uniforms.uPulseColor = _radialWave.mat.uniforms.uPulseColor;
+          // 強度 uniform (個別持ち、効果11 toggle で 0 ↔ 0.4)
+          const strengthUniform = { value: _shibuyaTileStrength };
+          shader.uniforms.uTileStrength = strengthUniform;
+          mat.userData._uTileStrength = strengthUniform;
+          // Vertex: world position を varying に出す
+          //   Three.js r150 の standard chunk `<worldpos_vertex>` 直後で worldPosition が定義される
+          shader.vertexShader = shader.vertexShader
+            .replace(
+              'void main() {',
+              'varying vec3 vShibuyaWorldPos;\nvoid main() {'
+            )
+            .replace(
+              '#include <worldpos_vertex>',
+              '#include <worldpos_vertex>\nvShibuyaWorldPos = worldPosition.xyz;'
+            );
+          // Fragment: uniforms 宣言 + pulse 評価 + mix で blend
+          //   chunk `<dithering_fragment>` の直前に挿入 (ほぼ gl_FragColor が確定した段階)
+          shader.fragmentShader = shader.fragmentShader
+            .replace(
+              'void main() {',
+              [
+                'varying vec3 vShibuyaWorldPos;',
+                'uniform float uTime;',
+                'uniform float uWaveSpeed;',
+                'uniform float uRingWidth;',
+                'uniform float uMaxRadius;',
+                'uniform float uPulseBirth[8];',
+                'uniform vec3  uPulseColor[8];',
+                'uniform float uTileStrength;',
+                'void main() {',
+              ].join('\n')
+            )
+            .replace(
+              '#include <dithering_fragment>',
+              [
+                '  if (uTileStrength > 0.0) {',
+                '    float sDist = length(vShibuyaWorldPos.xz);',
+                '    float sBestA = 0.0; vec3 sBestC = vec3(0.0);',
+                '    for (int i = 0; i < 8; i++) {',
+                '      float sAge = uTime - uPulseBirth[i];',
+                '      float sValid = step(0.0, sAge) * (1.0 - step(uMaxRadius / uWaveSpeed, sAge));',
+                '      float sR = sAge * uWaveSpeed;',
+                '      float sD = abs(sDist - sR);',
+                '      float sRing = smoothstep(uRingWidth, 0.0, sD);',
+                '      float sA = sRing * sValid;',
+                '      float sReplace = step(sBestA, sA);',
+                '      sBestA = mix(sBestA, sA, sReplace);',
+                '      sBestC = mix(sBestC, uPulseColor[i], sReplace);',
+                '    }',
+                '    gl_FragColor.rgb = mix(gl_FragColor.rgb, sBestC, sBestA * uTileStrength);',
+                '  }',
+                '  #include <dithering_fragment>',
+              ].join('\n')
+            );
+        };
+        mat.needsUpdate = true;   // 強制 re-compile
+        _shibuyaTilePatched.add(mat);
+      } catch (err) {
+        if (typeof log === 'function') log('[tile-patch] patch err: ' + err.message, 'err');
+      }
+    }
+    function _setShibuyaTileStrength(s) {
+      _shibuyaTileStrength = s;
+      let updated = 0;
+      for (const mat of _shibuyaTilePatched) {
+        if (mat.userData && mat.userData._uTileStrength) {
+          mat.userData._uTileStrength.value = s;
+          updated++;
+        }
+      }
+      if (typeof log === 'function') {
+        log('[tile-patch] strength=' + s.toFixed(2) + ' (updated ' + updated + ' materials)', 'ok');
+      }
+    }
+    // 外部 (OBJ ロードコールバック) から呼出可能に公開
+    window.__patchShibuyaTileMaterial = _patchShibuyaTileMaterial;
+    window.__setShibuyaTileStrength   = _setShibuyaTileStrength;
     // 60m 境界 (ほぼ黒) — 外周の 1 本枠だけ残す
     const boundary = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(FIELD_SIZE, 0.02, FIELD_SIZE)),
@@ -2926,7 +3029,12 @@
                 mats.forEach((m) => {
                   if (m.map) { try { m.map.dispose(); } catch (_) {} m.map = null; }
                   if (m.color) m.color.setHex(0xffffff);
+                  // 効果11: 街並みタイル material に radial wave 色伝播 shader を注入
+                  if (typeof window.__patchShibuyaTileMaterial === 'function') {
+                    window.__patchShibuyaTileMaterial(m);
+                  }
                 });
+                child.userData.isShibuyaTile = true;   // 識別フラグ (将来の除外判定用)
                 child.castShadow = false;
                 child.receiveShadow = false;
                 // エッジ重畳 (法線角度 20° 以上の境界のみ)
@@ -7971,9 +8079,9 @@
       socket.on('effectState', (data) => {
         if (!data || typeof data !== 'object') return;
         const n = data.effect;
-        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9 && n !== 10) return;
+        if (n !== 1 && n !== 2 && n !== 3 && n !== 4 && n !== 5 && n !== 6 && n !== 7 && n !== 8 && n !== 9 && n !== 10 && n !== 11) return;
         const on = !!data.on;
-        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false };
+        window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false, 11: false };
         window.__effect[n] = on;
         // master UI 同期 (ボタン見た目を on/off に合わせる)
         if (ROLE === 'master') {
@@ -8087,6 +8195,14 @@
           }
           log('環境エネルギー系 ' + (on ? 'ON' : 'OFF') +
               ' (effect10, theme6=' + (window.__effect[6] ? 'ON' : 'OFF') + ')', 'ok');
+        }
+        if (n === 11) {
+          // 効果11: Shibuya 街並みタイルへの色伝播 (床面 radial wave と完全同期)
+          //   uTileStrength uniform で ON/OFF 制御 (0.0 ↔ 0.4)
+          if (typeof window.__setShibuyaTileStrength === 'function') {
+            window.__setShibuyaTileStrength(on ? 0.4 : 0.0);
+          }
+          log('街並み色伝播 ' + (on ? 'ON' : 'OFF') + ' (effect11)', 'ok');
         }
         if (n === 8) {
           // 効果8 (改): 窓枠前面に自前サイト (iframe) を表示 (CSS3DRenderer 使用)
@@ -10187,8 +10303,8 @@
       //     - 効果2, 3: 未割当 (指示待ち)
       //   ・ボタン見た目の更新は socket.on('effectState') 側で行う (サーバー往復後に反映)
       // ==================================================
-      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false };
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].forEach((n) => {
+      window.__effect = window.__effect || { 1: false, 2: false, 3: false, 4: false, 5: false, 6: false, 7: false, 8: false, 9: false, 10: false, 11: false };
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].forEach((n) => {
         const btn = document.getElementById('m-effect-' + n);
         if (!btn) return;
         btn.addEventListener('click', () => {

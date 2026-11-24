@@ -49,6 +49,7 @@
     { n: 8, label: '効果8' },
     { n: 9, label: '効果9 (窓枠off-axis)' },
     { n: 10, label: '効果10 (環境E)' },
+    { n: 11, label: '効果11 (街並み色伝播)' },
   ];
   const effectStates = {};   // id → { entryTag, display:{width,height}, customTags:[], snapFace, pos:{x,y,z} }
   let activeFaceLabel = 'A';
