@@ -111,7 +111,8 @@ let moveConfig = { sensitivity: 10 };
 //   effect4: cube しなりモード — false=直結ばね, true=2段ばね+向き追従 (遠心力感)
 //   新規接続時にも initEffects で現在値を送る
 // 効果2 (camera のスプレー缶 UI モード) はデフォルト ON 恒常化
-let effectState = { 1: true, 2: true, 3: false, 4: true, 5: true, 6: false, 7: true };
+// 初期状態: Shibuya テーマ (効果6) を直接適用。Google テーマ (効果5) は OFF で lazy build 待機
+let effectState = { 1: true, 2: true, 3: false, 4: true, 5: false, 6: true, 7: true };
 // 窓枠グリッド自動生成用 seed: 接続時ごとに新規生成 (案 S-2、クライアント別固有窓)
 
 // space3 スプレー履歴 (dome 上の全打点)。新規接続時に sprayBatch で送信して同期。

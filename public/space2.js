@@ -2607,11 +2607,17 @@
     // ===== Ancient Tree (FBX) =====
     //   高さ 15m、位置 (10, -1, -10)、モノクロマテリアル、スプレー可能
     //   base (bbox min Y) を Y=-1 に沈める
-    (function _loadAncientTree() {
+    // 案 A (lazy load): __applyTheme('default') 初回呼出まで FBX の DL + parse を遅延
+    //   起動時 FBX ロード (~300ms + DL) を省略。default テーマ切替時に初回のみ発生
+    let _ancientTreeLoaded = false;
+    function _loadAncientTreeOnce() {
+      if (_ancientTreeLoaded) return;
+      _ancientTreeLoaded = true;
       if (typeof THREE.FBXLoader !== 'function') {
         log('FBXLoader not loaded, ancientTree skipped', 'warn');
         return;
       }
+      if (typeof log === 'function') log('[ancientTree] lazy load start', 'ok');
       const loader = new THREE.FBXLoader();
       loader.load('/assets/ancientTREE.fbx', (fbx) => {
         try {
@@ -2677,7 +2683,8 @@
       }, undefined, (err) => {
         log('ancientTree load failed: ' + (err && err.message ? err.message : err), 'err');
       });
-    })();
+    }
+    window.__loadAncientTreeOnce = _loadAncientTreeOnce;
 
     // ===== Low-poly fish =====
     //   位置 (1, 1.5, 0)、長辺 15cm、配色 yellow、yaw -90°
@@ -3090,8 +3097,14 @@
     window.__defaultLightCache = _defaultLightCache;
     window.__applyTheme = function(name) {
       if (name !== 'default' && name !== 'google' && name !== 'shibuya') return;
-      // Shibuya 選択時は初回ロードをトリガー
+      // 案 A (lazy): 各テーマ選択時に初回構築をトリガー
       if (name === 'shibuya') _loadShibuyaIfNeeded();
+      if (name === 'google' && typeof window.__spawnGoogleCityOnce === 'function') {
+        window.__spawnGoogleCityOnce();
+      }
+      if (name === 'default' && typeof window.__loadAncientTreeOnce === 'function') {
+        window.__loadAncientTreeOnce();
+      }
       const prev = _currentTheme;
       // ライティングプリセットの配信は master のみが担当。
       //   master が emit → 全クライアントが sceneAmbient/Dir/Point handler で受信・適用。
@@ -3254,7 +3267,14 @@
       //   原点中心 10m × 10m (|x|<5 && |z|<5) エリアは配置禁止
       //   各建物 = 基礎 + 中層 + 柱 + 梁 + 窓枠 + 出入口 + バルコニー + パイプ + 屋上
       //   小さな詳細パーツは InstancedMesh で集約し draw call を抑制
-      (function _spawnGoogleCity() {
+      // 案 A (lazy build): Google 街並みは __applyTheme('google') 初回呼出まで構築を遅延
+      //   起動時コスト削減。効果 5 ON 時に初回のみ 500〜1000ms の同期ブロックが発生
+      let _googleCitySpawned = false;
+      function _spawnGoogleCityOnce() {
+        if (_googleCitySpawned) return;
+        _googleCitySpawned = true;
+        if (typeof log === 'function') log('[google city] lazy build start', 'ok');
+        const _tBuildStart = performance.now();
         let _seed = 20261110;   // 再配置 seed (街レイアウト全更新)
         const rand = () => {
           _seed = (_seed * 1664525 + 1013904223) >>> 0;
@@ -4378,7 +4398,9 @@
         });
 
         _themeGoogleGroup.add(cityRoot);
-      })();
+        if (typeof log === 'function') log('[google city] lazy build done in ' + (performance.now() - _tBuildStart).toFixed(0) + 'ms', 'ok');
+      }
+      window.__spawnGoogleCityOnce = _spawnGoogleCityOnce;
     })();
 
     // ===== パネル (plate1 / plate2): L 字配置のワイヤーフレーム + ペイント対応キャンバス =====
