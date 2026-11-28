@@ -94,8 +94,7 @@
     //   density は master 制御パネルから変更可能 (fogConfig で全クライアントに配信)
     scene.fog = new THREE.FogExp2(0xffffff, 0.0);   // 初期値 0 (フォグ無効スタート)
 
-    // 効果3 (Fog 原点固定) は廃止。__patchSceneFog は呼び出し互換のため no-op として残置。
-    window.__patchSceneFog = function () {};
+    // 効果3 (Fog 原点固定) は廃止。__patchSceneFog は完全削除 (呼出側も剥離済み)。
     window.__applyFogOriginMode = function () {};
 
     const camera = new THREE.PerspectiveCamera(
@@ -7277,7 +7276,6 @@
       //   ユーザー指示により削除。avatar は視錐台のみで表現する。
       scene.add(grp);
       // 効果3 (fog 原点固定) が ON の場合、新規マテリアルも patch
-      if (typeof _patchSceneFog === 'function') _patchSceneFog();
       return av;
     }
 
@@ -7405,7 +7403,6 @@
       selectables.push(parts.apexHit);
       selectables.push(parts.baseHit);
       // 効果3 (fog 原点固定) 対応: 再構築で生成された新マテリアルも patch
-      if (typeof _patchSceneFog === 'function') _patchSceneFog();
       const dTag = (typeof depthOverride === 'number' && depthOverride > 0) ? (' D=' + depthOverride.toFixed(3) + 'm') : '';
       const hTag = hasHole ? ' [hole]' : '';
       log('frustum rebuilt: ' + id.substring(0,6) + ' → ' + dW.toFixed(3) + '×' + dH.toFixed(3) + 'm' + dTag + hTag, 'ok');
@@ -8080,9 +8077,25 @@
       });
 
       // ペイントモード派生オブジェクト発生 (wood/river/sky) は分散生成に移行済。
-      // サーバー側のレガシー互換のため modeSpawn 系ハンドラは残っているが、
-      // クライアントは購読しない (ネット経路に乗らないので受信もしない)。
-      socket.on('resetModeSpawn', () => { _clearAllModeSpawn(); log('[mode] cleared', 'ok'); });
+      // サーバー側の modeSpawn / modeOverwrite / resetModeSpawn 関連は Phase 2 で完全削除。
+
+      // /space2/youtube や将来の子クライアントが emit する siteAction を受信
+      //   → 床面 radial wave pulse + 効果 11 街並み色伝播を発火
+      //   (元は 効果10 ハンドラに同居していたが Phase A 削除で消失、ここで再追加)
+      socket.on('siteAction', (data) => {
+        if (!data || typeof data !== 'object') return;
+        try {
+          if (typeof window.__fireRadialPulse === 'function') {
+            window.__fireRadialPulse();
+          }
+          const cid = (typeof data.clientId === 'string') ? data.clientId.slice(0, 6) : '?';
+          const site = (typeof data.site === 'string') ? data.site : '?';
+          const act  = (typeof data.action === 'string') ? data.action : '?';
+          log('[site-act] ' + site + '/' + act + ' from=' + cid, 'ok');
+        } catch (err) {
+          log('[site-act] handler err: ' + err.message, 'err');
+        }
+      });
       // 旧 'resetSpace' (space3 由来) は購読しない — space3 のリセットが space2 に波及しないようにするため。
       // space2 独自のアトラスリセットは 'resetAtlas2' ハンドラ側で実施。
 
